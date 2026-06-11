@@ -1,8 +1,9 @@
 use crate::agent_mind::{
-    ConversationTurnInput, ConversationTurnOutput, DecisionEnvelope, DecisionInput,
-    parse_conversation_turn_json_with_notes, parse_decision_json,
+    ActionPlannerInput, ThinkMakerInput, ThinkMakerOutput,
+    ConversationTurnInput, ConversationTurnOutput,
+    parse_conversation_turn_json_with_notes, parse_think_maker_json,
 };
-use crate::world_model::{AgentIntent, IntentKind, RelationDelta, SocialMove};
+use crate::world_model::RelationDelta;
 use anyhow::{Context, Result as AnyResult};
 use reqwest::blocking::Client;
 use reqwest::{Error as ReqwestError, StatusCode};
@@ -13,51 +14,85 @@ use std::fmt;
 use std::thread;
 use std::time::Duration;
 
-const DECISION_PROMPT: &str = r#"Voce decide o proximo passo de um aldeao medieval em um mundo fisico de grid.
+const ACTION_PLANNER_PROMPT: &str = r#"Voce decide a sequencia de proximos passos (plano de tarefas) de um aldeao medieval em um mundo fisico de grid.
 
-Responda com EXATAMENTE UM objeto JSON valido e nada mais.
-Nao escreva markdown.
-Nao use ```json.
-Nao escreva explicacoes antes ou depois.
-Nao escreva comentarios.
-Nao escreva texto fora do JSON.
+Sua resposta deve conter APENAS uma lista de acoes separadas por virgula no formato especificado, sem preambulos, introducoes ou markdown.
+NUNCA use blocos de codigo (como ``` ou ```json) ou qualquer explicacao fora das acoes.
 
-Use EXATAMENTE este shape:
+Formatos validos de Acao:
+- Acao(parametro_semantico) (ex: Comer(taverna), Trabalhar(posto_de_trabalho), Andar(casa))
+- Acao(alvo_id, movimento_social) (apenas para Socializar; ex: Socializar(3, conversar), Socializar(5, fofocar))
+- Acao(alvo_id) (apenas para acoes com alvo; ex: Agredir(2), Roubar(4), Prender(1))
+- Acao (para acoes sem parametro; ex: Descansar, Refletir, Fugir, ReceberPagamento, Investigar)
+
+Acoes Permitidas e Seus Parametros:
+- Trabalhar(posto_de_trabalho) (executar tarefas de producao no posto de trabalho/oficina)
+- Descansar (recuperar energia em uma cama)
+- Comer(taverna|casa) (alimentar-se quando com fome)
+- Socializar(alvo_id, social_move) (iniciar conversa; social_move valido: conversar|fofocar|prometer|ofender|reconciliar|ajudar)
+- Refletir (diminuir stress)
+- Andar(destino) (deslocar-se fisicamente ate um local)
+- Comprar(recurso) (comprar insumos/alimentos)
+- Transportar(recurso) (mover recursos de um estoque/local para outro)
+- Vender(recurso) (colocar produtos a venda ou comercializar)
+- ReceberPagamento (reivindicar salarios ou compensacoes financeiras devidas)
+- Agredir(alvo_id) (ataque fisico imediato contra agente adjacente)
+- Combater(alvo_id) (continuar combate fisico ativo contra agente adjacente)
+- Roubar(alvo_id) (tomar recursos de um alvo adjacente com violencia)
+- Furtar(alvo_id) (subtrair pequeno recurso sem confronto direto)
+- Fugir (tentar sair de combate ou perigo)
+- Acusar(alvo_id) (denunciar alguem por crime)
+- Investigar (apurar caso criminal ou suspeito)
+- Prender(alvo_id) (guarda/lider tenta deter suspeito adjacente)
+- Punir(alvo_id) (lider/guarda aplica sentenca em suspeito detido)
+- Apoiar(pauta) (registrar apoio individual a uma pauta politica aberta)
+- Opor(pauta) (registrar oposicao individual a uma pauta politica aberta)
+- Pressionar(alvo_id) (pressionar agente adjacente em disputa institucional)
+- PedirApoio(alvo_id) (pedir apoio politico a agente adjacente)
+- Mediar(alvo_id) (tentar reduzir conflito institucional)
+
+Regras de Validacao e Negocio:
+1. Retorne entre 3 e 6 acoes em sequencia, separadas por virgula.
+2. Use APENAS IDs numericos de agentes para os campos alvo_id (ex: use 3 em vez de "Alda").
+3. Se o aldeao estiver com fome alta (hunger >= 65), inclua a tarefa "Comer" no planejamento. Se estiver muito cansado (energy <= 25), inclua "Descansar". Se estiver muito estressado (stress >= 70), inclua "Refletir".
+4. Personalidade, Caos e Faixas de chaos_pressure (0-100):
+   - chaos_pressure 0-30: Comportamento normal, cooperativo. Violencia APENAS em defesa propria.
+   - chaos_pressure 31-50: Comportamento tenso. Permitido ofender, fofocar, pressionar. Furto apenas se fome > 80.
+   - chaos_pressure 51-70: Comportamento volatil. Furtar, roubar de estranhos, agredir com resentment alto.
+   - chaos_pressure 71-85: Comportamento perigoso. Agredir qualquer agente proximo, roubar com violencia, acusar sem evidencia.
+   - chaos_pressure 86-100: Comportamento desesperado. Qualquer acao anti-social e justificada pela sobrevivencia: matar, saquear, trair, fugir.
+
+Exemplo de Resposta Valida:
+Comer(taverna), Trabalhar(posto_de_trabalho), Descansar"#;
+
+const THINK_MAKER_PROMPT: &str = r#"Voce gera o pensamento, sentimento e crencas de um aldeao medieval que acabou de planejar um conjunto de acoes.
+
+Sua resposta deve conter EXATAMENTE um objeto JSON estruturado e NADA mais.
+Nao utilize marcacoes de markdown (como ```json ou ```).
+Nao escreva nenhuma explicacao, preambulo, introducao, notas de rodape ou texto adicional fora do JSON.
+Nao insira comentarios no JSON.
+
+Use EXATAMENTE esta estrutura de chaves e tipos:
 {
-  "reflection": "string",
-  "intent": {
-    "kind": "Trabalhar|Descansar|Comer|Socializar|Refletir|Andar|Comprar|Transportar|Vender|ReceberPagamento",
-    "target_agent": null ou inteiro,
-    "target_semantic": null ou string,
-    "justification": "string",
-    "dominant_emotion": "string",
-    "perceived_risk": inteiro de 0 a 100,
-    "belief_updates": ["string"],
-    "priority": inteiro de 1 a 10,
-    "social_move": null ou "conversar|fofocar|prometer|ofender|reconciliar|ajudar"
-  }
+  "reflection": "string extremamente concisa resumindo o raciocinio e motivacao atual (no maximo 2 frases)",
+  "dominant_emotion": "string indicando o sentimento atual (ex: alegre, cansado, focado, apreensivo, furioso, desesperado)",
+  "belief_updates": ["array de strings contendo novas crencas ou metas curtas (seja extremamente conciso, max 2 frases por crenca)"]
 }
 
-Regras obrigatorias:
-- kind deve usar exatamente um destes nomes: Trabalhar, Descansar, Comer, Socializar, Refletir, Andar, Comprar, Transportar, Vender, ReceberPagamento.
-- target_agent deve ser null ou um inteiro. Nunca use nome de agente aqui.
-- target_semantic deve ser um alvo semantico, nunca coordenadas.
-- perceived_risk deve ser numero inteiro, nunca string como "baixo" ou "medio".
-- belief_updates deve ser sempre um array de strings, mesmo com 1 item.
-- priority deve ser numero inteiro, nunca string como "alta" ou "media".
-- social_move so deve ser preenchido quando kind == Socializar; caso contrario use null.
-- Nunca inclua chaves extras.
-- Nunca inclua desired_duration.
+Regras:
+1. Baseie-se no estado do agente, chaos_pressure, traits, traumas, memorias e nas acoes planejadas.
+2. Seja extremamente conciso. No maximo 2 frases em reflection e em cada item de belief_updates.
 
-Se estiver em duvida sobre um campo:
-- target_agent = null
-- target_semantic = null
-- perceived_risk = 20
-- belief_updates = []
-- priority = 5
-- social_move = null"#;
+Exemplo de Resposta Valida:
+{
+  "reflection": "Estou com fome e preciso comer para continuar trabalhando.",
+  "dominant_emotion": "apreensivo",
+  "belief_updates": ["Preciso economizar moedas para tempos dificeis."]
+}"#;
 
 const CONVERSATION_TURN_PROMPT: &str = r#"Voce responde apenas pela mente de UM unico aldeao em uma conversa social medieval.
+
+Seja extremamente conciso nas strings de justificativa e pensamento. Use no maximo 2 frases.
 
 Responda com EXATAMENTE UM objeto JSON valido e nada mais.
 Nao escreva markdown.
@@ -74,7 +109,7 @@ Use EXATAMENTE este shape:
   "speech_act": "string",
   "emotion": "string",
   "intent_to_continue": true,
-  "belief_updates": ["string"],
+  "belief_updates": ["string (extremamente concisa, no maximo 2 frases)"],
   "relation_delta_hint": {
     "trust": 0,
     "friendship": 0,
@@ -106,6 +141,15 @@ Regras obrigatorias:
 - Nunca substitua belief_updates por string unica.
 - Nunca substitua intent_to_continue por score como 0.8.
 - Nunca inclua chaves extras.
+- Seja extremamente conciso nas strings de justificativa e pensamento. Use no maximo 2 frases no campo belief_updates.
+
+Regras de Personalidade na Conversa:
+O campo "chaos_pressure" e os "personality_traits"/"trauma_traits" guiam o tom e as acoes sociais:
+- Se chaos_pressure >= 50: permitido 'ofender' espontaneamente, mentir em promessas, aumentar deltas negativos de resentment/trust.
+- Se chaos_pressure >= 70: o agente pode ameacar, chantagear, ou encerrar a conversa com agressao (intent_to_continue=false + risk_shift alto).
+- Tracos como 'manipulador' permitem speech_act 'prometer' com falsidade implicita.
+- Tracos como 'paranoico' geram interpretacoes hostis de falas neutras.
+- Tracos como 'cinico' reduzem trust em qualquer promessa recebida.
 
 Se estiver em duvida sobre um campo:
 - intent_to_continue = true
@@ -217,8 +261,10 @@ impl fmt::Display for LlmError {
 impl std::error::Error for LlmError {}
 
 pub trait LlmAdapter: Send + Sync {
+    fn clone_box(&self) -> Box<dyn LlmAdapter>;
     fn provider_name(&self) -> &str;
-    fn evaluate_and_decide(&self, input: &DecisionInput) -> LlmResult<DecisionEnvelope>;
+    fn plan_actions(&self, input: &ActionPlannerInput) -> LlmResult<String>;
+    fn generate_thoughts(&self, input: &ThinkMakerInput) -> LlmResult<ThinkMakerOutput>;
     fn generate_conversation_turn(
         &self,
         input: &ConversationTurnInput,
@@ -232,159 +278,102 @@ pub fn adapter_from_env() -> Box<dyn LlmAdapter> {
     }
 }
 
+#[derive(Clone)]
 pub struct MockLlmAdapter;
 
-impl MockLlmAdapter {
-    fn choose_intent(&self, input: &DecisionInput) -> AgentIntent {
-        let mut target_agent = input
-            .nearby_agents
-            .iter()
-            .find(|other| other.distance <= 1)
-            .map(|other| other.id);
-        let mut social_move = Some(SocialMove::Chat);
-        let (kind, target_semantic) = if input.economic_context.pending_salary > 0 {
-            social_move = None;
-            (
-                IntentKind::ReceberPagamento,
-                Some("receber pagamentos pendentes".to_string()),
-            )
-        } else if let Some(task) = input
-            .economic_context
-            .open_tasks
-            .iter()
-            .find(|task| task.kind == crate::world_model::EconomicTaskKind::Produzir)
-        {
-            social_move = None;
-            (
-                IntentKind::Trabalhar,
-                Some(task.summary.to_lowercase()),
-            )
-        } else if input
-            .economic_context
-            .open_tasks
-            .iter()
-            .any(|task| task.kind == crate::world_model::EconomicTaskKind::Comprar)
-            && input.state.hunger >= 50
-        {
-            social_move = None;
-            (IntentKind::Comprar, Some("comprar comida para o lar".to_string()))
-        } else if input
-            .economic_context
-            .open_tasks
-            .iter()
-            .any(|task| task.kind == crate::world_model::EconomicTaskKind::Transportar)
-        {
-            social_move = None;
-            (
-                IntentKind::Transportar,
-                Some("transportar insumos ou producao".to_string()),
-            )
-        } else if input
-            .economic_context
-            .open_tasks
-            .iter()
-            .any(|task| task.kind == crate::world_model::EconomicTaskKind::Vender)
-        {
-            social_move = None;
-            (IntentKind::Vender, Some("vender excedente".to_string()))
-        } else if input.state.hunger >= 65 {
-            (IntentKind::Comer, Some("comida".to_string()))
-        } else if input.state.energy <= 25 {
-            (IntentKind::Descansar, Some("cama".to_string()))
-        } else if input.state.stress >= 70 {
-            (IntentKind::Refletir, Some("assento silencioso".to_string()))
-        } else if let Some(conflict) = input.nearby_agents.iter().find(|other| {
-            other
-                .relation
-                .as_ref()
-                .map(|relation| relation.resentment > 35)
-                .unwrap_or(false)
-        }) {
-            target_agent = Some(conflict.id);
-            social_move = Some(SocialMove::Offend);
-            (
-                IntentKind::Socializar,
-                Some("iniciar conversa tensa".to_string()),
-            )
-        } else if let Some(friend) = input.nearby_agents.iter().find(|other| {
-            other
-                .relation
-                .as_ref()
-                .map(|relation| relation.friendship > 30 || relation.trust > 30)
-                .unwrap_or(false)
-        }) {
-            target_agent = Some(friend.id);
-            social_move = Some(SocialMove::Favor);
-            (
-                IntentKind::Socializar,
-                Some("iniciar conversa amistosa".to_string()),
-            )
-        } else if (6..=14).contains(&input.tick) {
-            (IntentKind::Trabalhar, Some("posto de trabalho".to_string()))
-        } else if (16..=21).contains(&input.tick) && !input.nearby_agents.is_empty() {
-            if let Some(nearby) = input.nearby_agents.first() {
-                target_agent = Some(nearby.id);
-            }
-            (
-                IntentKind::Socializar,
-                Some("puxar conversa casual".to_string()),
-            )
-        } else if input.current_building.is_some() {
-            (IntentKind::Andar, Some("porta externa".to_string()))
-        } else {
-            social_move = None;
-            (IntentKind::Andar, Some("praca".to_string()))
-        };
-
-        AgentIntent {
-            kind,
-            target_agent,
-            target_semantic,
-            justification: format!(
-                "{} equilibra necessidade imediata, reputacao, {} e espaco acessivel.",
-                input.actor_name,
-                input
-                    .psychological_context
-                    .current_identity_tension
-                    .to_lowercase()
-            ),
-            dominant_emotion: if input.state.stress > 50 {
-                "tenso".to_string()
-            } else {
-                "contido".to_string()
-            },
-            perceived_risk: if kind == IntentKind::Socializar { 45 } else { 20 },
-            belief_updates: vec![format!(
-                "Meu foco deve honrar {}.",
-                input
-                    .psychological_context
-                    .core_values
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "minhas prioridades".to_string())
-            )],
-            priority: 3,
-            social_move,
-        }
-    }
-}
-
 impl LlmAdapter for MockLlmAdapter {
+    fn clone_box(&self) -> Box<dyn LlmAdapter> {
+        Box::new(self.clone())
+    }
+
     fn provider_name(&self) -> &str {
         "mock"
     }
 
-    fn evaluate_and_decide(&self, input: &DecisionInput) -> LlmResult<DecisionEnvelope> {
-        let intent = self.choose_intent(input);
+    fn plan_actions(&self, input: &ActionPlannerInput) -> LlmResult<String> {
+        let mut tasks = Vec::new();
+
+        if input.state.hunger >= 65 {
+            tasks.push("Comer(taverna)".to_string());
+        }
+        if input.state.energy <= 25 {
+            tasks.push("Descansar".to_string());
+        }
+        if input.state.stress >= 70 {
+            tasks.push("Refletir".to_string());
+        }
+        if input.economic_context.pending_salary > 0 {
+            tasks.push("ReceberPagamento".to_string());
+        }
+
+        if (input.role.to_lowercase().contains("guarda")
+            || input.role.to_lowercase().contains("lider"))
+            && !input.legal_context.open_cases.is_empty()
+        {
+            tasks.push("Investigar".to_string());
+        }
+
+        if !input.political_context.open_issues.is_empty()
+            && !input.political_context.household_grievances.is_empty()
+        {
+            let issue = input.political_context.open_issues.first().cloned().unwrap_or_default();
+            tasks.push(format!("Apoiar({})", issue));
+        } else if input.role.to_lowercase().contains("lider")
+            && !input.political_context.open_issues.is_empty()
+        {
+            let target = input.nearby_agents.first().map(|a| a.id.to_string()).unwrap_or_else(|| "null".to_string());
+            tasks.push(format!("Mediar({})", target));
+        }
+
+        for task in &input.economic_context.open_tasks {
+            let action = match task.kind {
+                crate::world_model::EconomicTaskKind::Produzir => format!("Trabalhar({})", task.summary.to_lowercase()),
+                crate::world_model::EconomicTaskKind::Comprar => format!("Comprar({})", task.summary.to_lowercase()),
+                crate::world_model::EconomicTaskKind::Transportar => format!("Transportar({})", task.summary.to_lowercase()),
+                crate::world_model::EconomicTaskKind::Vender => format!("Vender({})", task.summary.to_lowercase()),
+                crate::world_model::EconomicTaskKind::ReceberPagamento => "ReceberPagamento".to_string(),
+            };
+            tasks.push(action);
+        }
+
+        if tasks.is_empty() {
+            if (6..=14).contains(&input.tick) {
+                tasks.push("Trabalhar(posto_de_trabalho)".to_string());
+            } else if (16..=21).contains(&input.tick) && !input.nearby_agents.is_empty() {
+                let target = input.nearby_agents.first().map(|a| a.id).unwrap_or(0);
+                tasks.push(format!("Socializar({}, conversar)", target));
+            } else {
+                tasks.push("Andar(praca)".to_string());
+            }
+        }
+
+        if tasks.len() < 3 {
+            tasks.push("Andar(praca)".to_string());
+            tasks.push("Refletir".to_string());
+        }
+        tasks.truncate(5);
+
+        Ok(tasks.join(", "))
+    }
+
+    fn generate_thoughts(&self, input: &ThinkMakerInput) -> LlmResult<ThinkMakerOutput> {
         let reflection = format!(
-            "{} avalia area={}, fome={}, energia={} e stress={}.",
-            input.actor_name,
-            input.current_area,
-            input.state.hunger,
-            input.state.energy,
-            input.state.stress
+            "{} avalia a situacao com fome={}, energia={} e stress={}.",
+            input.decision_input.actor_name,
+            input.decision_input.state.hunger,
+            input.decision_input.state.energy,
+            input.decision_input.state.stress
         );
-        Ok(DecisionEnvelope { intent, reflection })
+
+        Ok(ThinkMakerOutput {
+            reflection,
+            dominant_emotion: if input.decision_input.state.stress > 50 {
+                "tenso".to_string()
+            } else {
+                "contido".to_string()
+            },
+            belief_updates: vec![format!("Manter prioridades de {}.", input.decision_input.role)],
+        })
     }
 
     fn generate_conversation_turn(
@@ -482,6 +471,7 @@ impl LlmAdapter for MockLlmAdapter {
     }
 }
 
+#[derive(Clone)]
 pub struct OpenAiCompatibleAdapter {
     client: Client,
     base_url: String,
@@ -494,13 +484,13 @@ pub struct OpenAiCompatibleAdapter {
 impl OpenAiCompatibleAdapter {
     pub fn from_env() -> AnyResult<Self> {
         let api_key = env::var("OPENAI_API_KEY").context("OPENAI_API_KEY not set")?;
-        let model = env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4.1-mini".to_string());
+        let model = env::var("OPENAI_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".to_string());
         let base_url = env::var("OPENAI_BASE_URL")
             .unwrap_or_else(|_| "https://api.openai.com/v1/chat/completions".to_string());
         let timeout_secs = env::var("LLM_HTTP_TIMEOUT_SECS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(60);
+            .unwrap_or(180);
         let retry_count = env::var("LLM_HTTP_RETRY_COUNT")
             .ok()
             .and_then(|value| value.parse::<u32>().ok())
@@ -630,10 +620,11 @@ impl OpenAiCompatibleAdapter {
                 return Err(llm_error);
             }
 
-            let payload: ChatCompletionResponse = response.json().map_err(|error| LlmError::Parse {
-                operation: operation.to_string(),
-                message: format!("invalid LLM HTTP response: {}", error),
-            })?;
+            let payload: ChatCompletionResponse =
+                response.json().map_err(|error| LlmError::Parse {
+                    operation: operation.to_string(),
+                    message: format!("invalid LLM HTTP response: {}", error),
+                })?;
             return payload
                 .choices
                 .into_iter()
@@ -666,18 +657,30 @@ impl OpenAiCompatibleAdapter {
 }
 
 impl LlmAdapter for OpenAiCompatibleAdapter {
+    fn clone_box(&self) -> Box<dyn LlmAdapter> {
+        Box::new(self.clone())
+    }
+
     fn provider_name(&self) -> &str {
         "openai-compatible"
     }
 
-    fn evaluate_and_decide(&self, input: &DecisionInput) -> LlmResult<DecisionEnvelope> {
+    fn plan_actions(&self, input: &ActionPlannerInput) -> LlmResult<String> {
         let payload = serde_json::to_value(input).map_err(|error| LlmError::Schema {
-            operation: "decision".to_string(),
-            message: format!("failed to serialize decision input: {}", error),
+            operation: "action_planning".to_string(),
+            message: format!("failed to serialize action planning input: {}", error),
         })?;
-        let content = self.fetch_message_content("decision", DECISION_PROMPT, &payload)?;
-        parse_decision_json(&content).map_err(|error| LlmError::Schema {
-            operation: "decision".to_string(),
+        self.fetch_message_content("action_planning", ACTION_PLANNER_PROMPT, &payload)
+    }
+
+    fn generate_thoughts(&self, input: &ThinkMakerInput) -> LlmResult<ThinkMakerOutput> {
+        let payload = serde_json::to_value(input).map_err(|error| LlmError::Schema {
+            operation: "thought_generation".to_string(),
+            message: format!("failed to serialize thought generation input: {}", error),
+        })?;
+        let content = self.fetch_message_content("thought_generation", THINK_MAKER_PROMPT, &payload)?;
+        parse_think_maker_json(&content).map_err(|error| LlmError::Schema {
+            operation: "thought_generation".to_string(),
             message: error.to_string(),
         })
     }

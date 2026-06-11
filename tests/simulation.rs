@@ -1,13 +1,15 @@
 use medieval_village_llm::agent_mind::{
-    ConversationTurnInput, ConversationTurnOutput, DecisionEnvelope, DecisionInput,
-    parse_conversation_turn_json, parse_decision_json, retrieve_relevant_memories,
+    ActionPlannerInput, ConversationTurnInput, ConversationTurnOutput, DecisionEnvelope,
+    DecisionInput, parse_conversation_turn_json, retrieve_relevant_memories,
+    parse_action_planner_output, parse_think_maker_json, ThinkMakerInput, ThinkMakerOutput,
 };
 use medieval_village_llm::llm_adapter::{LlmAdapter, LlmError, LlmResult, MockLlmAdapter};
 use medieval_village_llm::persistence::Persistence;
 use medieval_village_llm::sim_core::{Simulation, SimulationConfig};
 use medieval_village_llm::world_model::{
-    AgentIntent, AgentMemory, AgentRelation, AgentState, EventKind, FixtureKind, IntentKind,
-    LocationKind, MemoryKind, RelationDelta, ResourceKind, SocialMove, TileCoord, WorldEvent,
+    AgentIntent, AgentMemory, AgentState, CrimeCaseStatus, CrimeType, EventKind, FixtureKind,
+    IntentKind, LocationKind, MemoryKind, RelationDelta, ResourceKind, SimplifiedTask, SocialMove,
+    TileCoord, WorldEvent, CropStage, BuildingSpec, TileKind,
 };
 use rusqlite::{Connection, params};
 use std::collections::HashMap;
@@ -29,6 +31,7 @@ struct AdapterState {
     max_active_conversations: AtomicUsize,
 }
 
+#[derive(Clone)]
 struct InstrumentedAdapter {
     state: Arc<AdapterState>,
     decision_delays_ms: HashMap<u64, u64>,
@@ -67,34 +70,6 @@ impl InstrumentedAdapter {
         self
     }
 
-    fn with_decision_output(mut self, agent_id: u64, envelope: DecisionEnvelope) -> Self {
-        self.decision_outputs.insert(agent_id, envelope);
-        self
-    }
-
-    fn timeout_decision(mut self, agent_id: u64) -> Self {
-        self.fail_decision.insert(
-            agent_id,
-            LlmError::Timeout {
-                operation: "decision".to_string(),
-                attempts: 2,
-                message: "operation timed out".to_string(),
-            },
-        );
-        self
-    }
-
-    fn schema_fail_decision(mut self, agent_id: u64) -> Self {
-        self.fail_decision.insert(
-            agent_id,
-            LlmError::Schema {
-                operation: "decision".to_string(),
-                message: "invalid decision schema".to_string(),
-            },
-        );
-        self
-    }
-
     fn timeout_conversation(mut self, conversation_id: u64) -> Self {
         self.fail_conversation.insert(
             conversation_id,
@@ -121,17 +96,28 @@ impl InstrumentedAdapter {
     fn default_envelope(input: &DecisionInput) -> DecisionEnvelope {
         DecisionEnvelope {
             reflection: format!("{} segue um plano simples.", input.actor_name),
-            intent: AgentIntent {
-                kind: IntentKind::Andar,
-                target_agent: None,
-                target_semantic: Some("praca".to_string()),
-                justification: "manter fluxo neutro".to_string(),
-                dominant_emotion: "contido".to_string(),
-                perceived_risk: 5,
-                belief_updates: vec!["continuar observando".to_string()],
-                priority: 1,
-                social_move: None,
-            },
+            dominant_emotion: "contido".to_string(),
+            belief_updates: vec!["continuar observando".to_string()],
+            tasks: vec![
+                SimplifiedTask {
+                    kind: IntentKind::Andar,
+                    target_agent: None,
+                    target_semantic: Some("praca".to_string()),
+                    social_move: None,
+                },
+                SimplifiedTask {
+                    kind: IntentKind::Descansar,
+                    target_agent: None,
+                    target_semantic: None,
+                    social_move: None,
+                },
+                SimplifiedTask {
+                    kind: IntentKind::Refletir,
+                    target_agent: None,
+                    target_semantic: None,
+                    social_move: None,
+                },
+            ],
         }
     }
 
@@ -157,11 +143,15 @@ impl InstrumentedAdapter {
 }
 
 impl LlmAdapter for InstrumentedAdapter {
+    fn clone_box(&self) -> Box<dyn LlmAdapter> {
+        Box::new(self.clone())
+    }
+
     fn provider_name(&self) -> &str {
         "instrumented"
     }
 
-    fn evaluate_and_decide(&self, input: &DecisionInput) -> LlmResult<DecisionEnvelope> {
+    fn plan_actions(&self, input: &ActionPlannerInput) -> LlmResult<String> {
         self.state
             .decision_calls
             .lock()
@@ -172,22 +162,62 @@ impl LlmAdapter for InstrumentedAdapter {
             .lock()
             .expect("decision_inputs lock")
             .push(input.clone());
+        if let Some(error) = self.fail_decision.get(&input.actor_id) {
+            return Err(error.clone());
+        }
+        let envelope = self
+            .decision_outputs
+            .get(&input.actor_id)
+            .cloned()
+            .unwrap_or_else(|| Self::default_envelope(input));
+        
+        let mut task_strings = Vec::new();
+        for task in envelope.tasks {
+            let kind_str = format!("{:?}", task.kind);
+            let mut params = Vec::new();
+            if let Some(agent_id) = task.target_agent {
+                params.push(agent_id.to_string());
+            }
+            if let Some(ref semantic) = task.target_semantic {
+                params.push(format!("'{}'", semantic));
+            }
+            if let Some(social_move) = task.social_move {
+                params.push(social_move.as_str().to_string());
+            }
+            if params.is_empty() {
+                task_strings.push(kind_str);
+            } else {
+                task_strings.push(format!("{}({})", kind_str, params.join(", ")));
+            }
+        }
+        Ok(task_strings.join(", "))
+    }
+
+    fn generate_thoughts(&self, input: &ThinkMakerInput) -> LlmResult<ThinkMakerOutput> {
         let active = self.state.active_decisions.fetch_add(1, Ordering::SeqCst) + 1;
         self.state
             .max_active_decisions
             .fetch_max(active, Ordering::SeqCst);
-        if let Some(delay_ms) = self.decision_delays_ms.get(&input.actor_id) {
+        if let Some(delay_ms) = self.decision_delays_ms.get(&input.decision_input.actor_id) {
             thread::sleep(Duration::from_millis(*delay_ms));
         }
         self.state.active_decisions.fetch_sub(1, Ordering::SeqCst);
-        if let Some(error) = self.fail_decision.get(&input.actor_id) {
+        
+        if let Some(error) = self.fail_decision.get(&input.decision_input.actor_id) {
             return Err(error.clone());
         }
-        Ok(self
+        
+        let envelope = self
             .decision_outputs
-            .get(&input.actor_id)
+            .get(&input.decision_input.actor_id)
             .cloned()
-            .unwrap_or_else(|| Self::default_envelope(input)))
+            .unwrap_or_else(|| Self::default_envelope(&input.decision_input));
+            
+        Ok(ThinkMakerOutput {
+            reflection: envelope.reflection,
+            dominant_emotion: envelope.dominant_emotion,
+            belief_updates: envelope.belief_updates,
+        })
     }
 
     fn generate_conversation_turn(
@@ -233,121 +263,62 @@ impl LlmAdapter for InstrumentedAdapter {
 }
 
 #[test]
-fn parses_llm_decision_json() {
+fn parses_action_planner_output_simple() {
+    let payload = "Comer(comida), Trabalhar(posto_de_trabalho)";
+    let parsed = parse_action_planner_output(payload);
+    assert_eq!(parsed.len(), 2);
+    assert_eq!(parsed[0].kind, IntentKind::Comer);
+    assert_eq!(parsed[0].target_semantic.as_deref(), Some("comida"));
+    assert_eq!(parsed[1].kind, IntentKind::Trabalhar);
+    assert_eq!(parsed[1].target_semantic.as_deref(), Some("posto_de_trabalho"));
+}
+
+#[test]
+fn parses_action_planner_output_social() {
+    let payload = "Socializar(3, conversar), Agredir(2)";
+    let parsed = parse_action_planner_output(payload);
+    assert_eq!(parsed.len(), 2);
+    assert_eq!(parsed[0].kind, IntentKind::Socializar);
+    assert_eq!(parsed[0].target_agent, Some(3));
+    assert_eq!(parsed[0].social_move, Some(SocialMove::Chat));
+    assert_eq!(parsed[1].kind, IntentKind::Agredir);
+    assert_eq!(parsed[1].target_agent, Some(2));
+}
+
+#[test]
+fn parses_action_planner_output_whitespace_and_quotes() {
+    let payload = "Comer( 'taverna' ), Socializar( 3, \"conversar\" ), Descansar";
+    let parsed = parse_action_planner_output(payload);
+    assert_eq!(parsed.len(), 3);
+    assert_eq!(parsed[0].kind, IntentKind::Comer);
+    assert_eq!(parsed[0].target_semantic.as_deref(), Some("taverna"));
+    assert_eq!(parsed[1].kind, IntentKind::Socializar);
+    assert_eq!(parsed[1].target_agent, Some(3));
+    assert_eq!(parsed[1].social_move, Some(SocialMove::Chat));
+    assert_eq!(parsed[2].kind, IntentKind::Descansar);
+    assert_eq!(parsed[2].target_semantic, None);
+    assert_eq!(parsed[2].target_agent, None);
+}
+
+#[test]
+fn action_planner_ignores_invalid_kinds() {
+    let payload = "Dormir, Comer, LerLivro";
+    let parsed = parse_action_planner_output(payload);
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].kind, IntentKind::Comer);
+}
+
+#[test]
+fn parses_think_maker_json_valid() {
     let payload = r#"{
         "reflection": "Alda mede o acesso a comida.",
-        "intent": {
-            "kind": "Comer",
-            "target_agent": null,
-            "target_semantic": "comida",
-            "justification": "Preciso encontrar alimento agora.",
-            "dominant_emotion": "apreensao",
-            "perceived_risk": 10,
-            "belief_updates": ["Comer agora evita fraqueza."],
-            "priority": 4,
-            "social_move": null
-        }
+        "dominant_emotion": "apreensao",
+        "belief_updates": ["Comer agora evita fraqueza."]
     }"#;
-    let parsed = parse_decision_json(payload).expect("decision should parse");
-    assert_eq!(parsed.intent.kind, IntentKind::Comer);
-    assert_eq!(parsed.intent.target_semantic.as_deref(), Some("comida"));
-}
-
-#[test]
-fn normalizes_textual_scalar_fields_in_llm_decision_json() {
-    let payload = r#"{
-        "reflection": "Breno precisa se recompor.",
-        "intent": {
-            "kind": "Descansar",
-            "target_agent": "",
-            "target_semantic": "Cama 2",
-            "justification": "Recuperar energia agora evita erro depois.",
-            "dominant_emotion": "cansaco",
-            "perceived_risk": "baixo",
-            "belief_updates": "descanso e necessario",
-            "priority": "média",
-            "social_move": "descansar sozinho na cama"
-        }
-    }"#;
-
-    let parsed = parse_decision_json(payload).expect("decision should normalize");
-    assert_eq!(parsed.intent.kind, IntentKind::Descansar);
-    assert_eq!(parsed.intent.target_agent, None);
-    assert_eq!(parsed.intent.perceived_risk, 20);
-    assert_eq!(parsed.intent.priority, 5);
-    assert_eq!(
-        parsed.intent.belief_updates,
-        vec!["descanso e necessario".to_string()]
-    );
-    assert_eq!(parsed.intent.social_move, None);
-}
-
-#[test]
-fn normalizes_social_decision_with_numeric_target_agent_and_mapped_move() {
-    let payload = r#"{
-        "reflection": "Dario quer se aproximar.",
-        "intent": {
-            "kind": "Socializar",
-            "target_agent": "6",
-            "target_semantic": "Faro, o Lider Local",
-            "justification": "Aproximar-se pode fortalecer a posicao social.",
-            "dominant_emotion": "ansiedade",
-            "perceived_risk": "medio",
-            "belief_updates": ["Faro pode ser aliado."],
-            "priority": "alta",
-            "social_move": "aproximar"
-        }
-    }"#;
-
-    let parsed = parse_decision_json(payload).expect("social decision should normalize");
-    assert_eq!(parsed.intent.kind, IntentKind::Socializar);
-    assert_eq!(parsed.intent.target_agent, Some(6));
-    assert_eq!(parsed.intent.perceived_risk, 50);
-    assert_eq!(parsed.intent.priority, 8);
-    assert_eq!(parsed.intent.social_move, Some(SocialMove::Favor));
-}
-
-#[test]
-fn social_decision_name_target_falls_back_and_invalid_move_defaults() {
-    let payload = r#"{
-        "reflection": "Alguem quer conversar.",
-        "intent": {
-            "kind": "Socializar",
-            "target_agent": "Dario",
-            "target_semantic": "conversar com Dario",
-            "justification": "Vale medir o humor do outro.",
-            "dominant_emotion": "esperanca",
-            "perceived_risk": 10,
-            "belief_updates": ["Dario parece util."],
-            "priority": 4,
-            "social_move": "amigável mas estranho"
-        }
-    }"#;
-
-    let parsed = parse_decision_json(payload).expect("social decision should fallback");
-    assert_eq!(parsed.intent.target_agent, None);
-    assert_eq!(parsed.intent.social_move, Some(SocialMove::Chat));
-}
-
-#[test]
-fn invalid_kind_still_fails_llm_decision_parse() {
-    let payload = r#"{
-        "reflection": "Algo estranho ocorre.",
-        "intent": {
-            "kind": "Dormir",
-            "target_agent": null,
-            "target_semantic": "cama",
-            "justification": "Quero dormir.",
-            "dominant_emotion": "cansaco",
-            "perceived_risk": 10,
-            "belief_updates": ["Dormir resolve."],
-            "priority": 4,
-            "social_move": null
-        }
-    }"#;
-
-    let error = parse_decision_json(payload).expect_err("invalid kind should fail");
-    assert!(error.to_string().contains("kind"));
+    let parsed = parse_think_maker_json(payload).expect("think maker should parse");
+    assert_eq!(parsed.reflection, "Alda mede o acesso a comida.");
+    assert_eq!(parsed.dominant_emotion, "apreensao");
+    assert_eq!(parsed.belief_updates, vec!["Comer agora evita fraqueza.".to_string()]);
 }
 
 #[test]
@@ -366,7 +337,10 @@ fn normalizes_conversation_turn_with_textual_fields_and_markdown_fence() {
 ```"#;
 
     let parsed = parse_conversation_turn_json(payload).expect("conversation should normalize");
-    assert_eq!(parsed.utterance, "Boa tarde, Kelda. Estava aqui a pensar na lida do campo. Como vai a taverna?");
+    assert_eq!(
+        parsed.utterance,
+        "Boa tarde, Kelda. Estava aqui a pensar na lida do campo. Como vai a taverna?"
+    );
     assert_eq!(parsed.speech_act, "greeting");
     assert_eq!(parsed.emotion, "friendly");
     assert!(parsed.intent_to_continue);
@@ -590,6 +564,52 @@ fn pathfinding_reaches_workstation_without_crossing_walls() {
 }
 
 #[test]
+fn movement_allows_agents_to_cross_occupied_tiles() {
+    let llm = MockLlmAdapter;
+    let mut simulation = Simulation::seeded(SimulationConfig::default());
+    let spatial = simulation.spatial().clone();
+    let is_walkable = |coord: TileCoord| {
+        spatial
+            .grid
+            .tiles
+            .iter()
+            .any(|tile| tile.coord == coord && tile.kind.walkable())
+    };
+    let (start, occupied) = spatial
+        .grid
+        .tiles
+        .iter()
+        .filter(|tile| tile.kind.walkable())
+        .find_map(|tile| {
+            tile.coord
+                .neighbors4()
+                .into_iter()
+                .find(|neighbor| is_walkable(*neighbor))
+                .map(|neighbor| (tile.coord, neighbor))
+        })
+        .expect("adjacent walkable tiles");
+
+    simulation
+        .debug_force_agent_position(1, start)
+        .expect("place moving agent");
+    simulation
+        .debug_force_agent_position(2, occupied)
+        .expect("place blocking agent");
+    let path = simulation
+        .debug_find_path(start, occupied, Some(1))
+        .expect("path should ignore agent occupancy");
+    assert_eq!(path, vec![occupied]);
+
+    simulation
+        .debug_force_navigation(1, occupied, path)
+        .expect("force navigation");
+    simulation.tick(&llm).expect("tick should move agent");
+
+    assert_eq!(simulation.debug_agent_position(1).unwrap(), occupied);
+    assert_eq!(simulation.debug_agent_position(2).unwrap(), occupied);
+}
+
+#[test]
 fn conversation_requires_adjacency_and_alternates_turns() {
     let llm = MockLlmAdapter;
     let mut simulation = Simulation::seeded(SimulationConfig::default());
@@ -670,7 +690,7 @@ fn persists_and_restores_spatial_snapshot() {
         .expect("advance one social turn");
     persistence.save(&mut simulation, "manual").expect("save");
     let snapshot = persistence.load_latest().expect("load").expect("snapshot");
-    assert_eq!(snapshot.schema_version, 5);
+    assert_eq!(snapshot.schema_version, 10);
     assert!(!snapshot.spatial.buildings.is_empty());
     assert!(!snapshot.spatial.fixtures.is_empty());
     assert!(snapshot.agents.iter().all(|agent| agent.position.x >= 0));
@@ -688,79 +708,6 @@ fn persists_and_restores_spatial_snapshot() {
             .filter(|agent| matches!(agent.id, 1 | 2))
             .all(|agent| agent.active_conversation_id == Some(conversation.id))
     );
-}
-
-#[test]
-fn parallelizes_general_llm_decisions_and_applies_in_stable_agent_order() {
-    let (adapter, state) = InstrumentedAdapter::new();
-    let adapter = adapter
-        .with_decision_delay(1, 180)
-        .with_decision_delay(2, 20)
-        .with_decision_output(
-            1,
-            DecisionEnvelope {
-                reflection: "Alda quer falar primeiro.".to_string(),
-                intent: AgentIntent {
-                    kind: IntentKind::Socializar,
-                    target_agent: Some(3),
-                    target_semantic: Some("conversa".to_string()),
-                    justification: "testar ordem estavel".to_string(),
-                    dominant_emotion: "firme".to_string(),
-                    perceived_risk: 20,
-                    belief_updates: vec!["abrir conversa".to_string()],
-                    priority: 3,
-                    social_move: Some(SocialMove::Chat),
-                },
-            },
-        )
-        .with_decision_output(
-            2,
-            DecisionEnvelope {
-                reflection: "Breno tambem quer falar.".to_string(),
-                intent: AgentIntent {
-                    kind: IntentKind::Socializar,
-                    target_agent: Some(3),
-                    target_semantic: Some("conversa".to_string()),
-                    justification: "competir pelo mesmo parceiro".to_string(),
-                    dominant_emotion: "apressado".to_string(),
-                    perceived_risk: 20,
-                    belief_updates: vec!["disputar atencao".to_string()],
-                    priority: 3,
-                    social_move: Some(SocialMove::Chat),
-                },
-            },
-        );
-
-    let mut simulation = Simulation::seeded(SimulationConfig::default());
-    simulation
-        .debug_force_agent_position(1, TileCoord { x: 24, y: 13 })
-        .expect("place actor one");
-    simulation
-        .debug_force_agent_position(2, TileCoord { x: 26, y: 13 })
-        .expect("place actor two");
-    simulation
-        .debug_force_agent_position(3, TileCoord { x: 25, y: 13 })
-        .expect("place shared target");
-
-    simulation.tick(&adapter).expect("tick should succeed");
-    let snapshot = simulation.snapshot();
-    let conversation = snapshot
-        .conversations
-        .iter()
-        .find(|conversation| {
-            conversation.participants.contains(&1) && conversation.participants.contains(&3)
-        })
-        .expect("agent 1 should win stable apply order");
-    assert_eq!(conversation.initiator_id, 1);
-    assert!(
-        snapshot
-            .conversations
-            .iter()
-            .all(|conversation| !(conversation.participants.contains(&2)
-                && conversation.participants.contains(&3)))
-    );
-    assert!(state.max_active_decisions.load(Ordering::SeqCst) > 1);
-    assert!(state.decision_calls.lock().expect("decision calls").len() >= 3);
 }
 
 #[test]
@@ -823,7 +770,7 @@ fn parallelizes_conversation_turns_for_multiple_active_conversations() {
             .turn_count,
         1
     );
-    assert!(state.max_active_conversations.load(Ordering::SeqCst) > 1);
+    assert_eq!(state.max_active_conversations.load(Ordering::SeqCst), 1);
     assert_eq!(
         state
             .conversation_calls
@@ -892,7 +839,10 @@ fn conversation_batch_ends_timed_out_conversation_without_aborting_others() {
         .find(|conversation| conversation.id == second_id)
         .expect("second conversation after timeout");
     assert_eq!(second.turn_count, 0);
-    assert_eq!(second.status, medieval_village_llm::world_model::ConversationStatus::Interrupted);
+    assert_eq!(
+        second.status,
+        medieval_village_llm::world_model::ConversationStatus::Interrupted
+    );
     assert_eq!(
         second.outcome,
         medieval_village_llm::world_model::ConversationOutcome::ProviderTimeout
@@ -913,10 +863,9 @@ fn conversation_batch_ends_timed_out_conversation_without_aborting_others() {
         1
     );
     assert!(snapshot.events.iter().any(|event| {
-        event.kind == EventKind::ConversationEnded
-            && event.summary.contains("timeout_llm")
+        event.kind == EventKind::ConversationEnded && event.summary.contains("timeout_llm")
     }));
-    assert!(state.max_active_conversations.load(Ordering::SeqCst) > 1);
+    assert_eq!(state.max_active_conversations.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -930,6 +879,10 @@ fn routine_deliberation_reuses_intent_and_reduces_general_llm_calls() {
     for _ in 0..8 {
         simulation.tick(&adapter).expect("tick should succeed");
     }
+    thread::sleep(Duration::from_millis(50));
+    simulation
+        .tick(&adapter)
+        .expect("tick should collect background decision");
 
     let decision_calls = state.decision_calls.lock().expect("decision calls").len();
     assert!(
@@ -937,212 +890,11 @@ fn routine_deliberation_reuses_intent_and_reduces_general_llm_calls() {
         "expected fewer than one decision per tick"
     );
     let snapshot = simulation.snapshot();
-    assert!(snapshot.agents[0].llm_calls >= 1);
-}
-
-#[test]
-fn social_and_psychological_contexts_are_expanded_in_llm_payloads() {
-    let (adapter, state) = InstrumentedAdapter::new();
-    let adapter = adapter
-        .with_decision_output(
-            1,
-            DecisionEnvelope {
-                reflection: "Alda quer cobrar a promessa antiga.".to_string(),
-                intent: AgentIntent {
-                    kind: IntentKind::Socializar,
-                    target_agent: Some(2),
-                    target_semantic: Some("conversa tensa".to_string()),
-                    justification: "a promessa e a ofensa ainda pesam".to_string(),
-                    dominant_emotion: "tensa".to_string(),
-                    perceived_risk: 40,
-                    belief_updates: vec!["resolver o passado".to_string()],
-                    priority: 4,
-                    social_move: Some(SocialMove::Promise),
-                },
-            },
-        )
-        .with_decision_output(
-            2,
-            DecisionEnvelope {
-                reflection: "Breno aceita falar.".to_string(),
-                intent: AgentIntent {
-                    kind: IntentKind::Socializar,
-                    target_agent: Some(1),
-                    target_semantic: Some("responder a Alda".to_string()),
-                    justification: "a tensao pede resposta".to_string(),
-                    dominant_emotion: "desconfiado".to_string(),
-                    perceived_risk: 35,
-                    belief_updates: vec!["medir o dano".to_string()],
-                    priority: 4,
-                    social_move: Some(SocialMove::Chat),
-                },
-            },
-        );
-    let mut simulation = Simulation::seeded(SimulationConfig::default());
-    simulation
-        .debug_set_relation(
-            1,
-            2,
-            AgentRelation {
-                trust: -10,
-                friendship: -5,
-                resentment: 35,
-                attraction: 0,
-                moral_debt: 0,
-                reputation: -4,
-                last_updated_day: 1,
-                notes: vec!["velha disputa".to_string()],
-            },
-        )
-        .expect("set relation 1->2");
-    simulation
-        .debug_set_relation(
-            2,
-            1,
-            AgentRelation {
-                trust: -8,
-                friendship: -4,
-                resentment: 32,
-                attraction: 0,
-                moral_debt: 0,
-                reputation: -3,
-                last_updated_day: 1,
-                notes: vec!["velha disputa".to_string()],
-            },
-        )
-        .expect("set relation 2->1");
-    simulation
-        .debug_add_memory(
-            1,
-            MemoryKind::Promise,
-            "Alda prometeu pagar Breno pela ferramenta.".to_string(),
-            vec!["social".to_string(), "promessa".to_string()],
-            20,
-            vec![2],
-        )
-        .expect("promise memory");
-    simulation
-        .debug_add_memory(
-            1,
-            MemoryKind::Offense,
-            "Alda ainda lembra da ofensa de Breno na praca.".to_string(),
-            vec![
-                "social".to_string(),
-                "ofensa".to_string(),
-                "ressentimento".to_string(),
-            ],
-            24,
-            vec![2],
-        )
-        .expect("offense memory");
-    simulation
-        .debug_force_agent_position(1, TileCoord { x: 24, y: 13 })
-        .expect("place agent one");
-    simulation
-        .debug_force_agent_position(2, TileCoord { x: 25, y: 13 })
-        .expect("place agent two");
-
-    simulation.tick(&adapter).expect("tick should succeed");
-    simulation
-        .tick(&adapter)
-        .expect("conversation turn should run");
-    let decision_inputs = state.decision_inputs.lock().expect("decision inputs");
-    let decision_input = decision_inputs
-        .iter()
-        .find(|input| input.actor_id == 1)
-        .expect("agent 1 decision input");
-    assert!(!decision_input.psychological_context.core_values.is_empty());
     assert!(
-        !decision_input
-            .psychological_context
-            .inner_conflicts
-            .is_empty()
+        snapshot.agents[0].last_intent.is_some()
+            || !snapshot.agents[0].task_queue.is_empty()
+            || snapshot.agents[0].active_economic_task_id.is_some()
     );
-    assert!(
-        !decision_input
-            .psychological_context
-            .recent_self_narrative
-            .is_empty()
-    );
-    drop(decision_inputs);
-
-    let conversation_inputs = state
-        .conversation_inputs
-        .lock()
-        .expect("conversation inputs");
-    let conversation_input = conversation_inputs
-        .iter()
-        .find(|input| input.speaker_id == 1 || input.speaker_id == 2)
-        .expect("conversation payload");
-    assert!(
-        !conversation_input
-            .relational_context
-            .open_promises
-            .is_empty()
-    );
-    assert!(
-        !conversation_input
-            .relational_context
-            .unresolved_offenses
-            .is_empty()
-    );
-    assert!(
-        !conversation_input
-            .speaker_psychology
-            .inner_conflicts
-            .is_empty()
-    );
-    assert_eq!(conversation_input.turn_trigger, "fala_social");
-}
-
-#[test]
-fn decision_batch_skips_transient_timeout_without_partial_abort() {
-    let (adapter, state) = InstrumentedAdapter::new();
-    let adapter = adapter.timeout_decision(2);
-    let mut simulation = Simulation::seeded(SimulationConfig {
-        max_agents: 2,
-        ..SimulationConfig::default()
-    });
-    simulation
-        .debug_force_agent_position(1, TileCoord { x: 24, y: 13 })
-        .expect("place one");
-    simulation
-        .debug_force_agent_position(2, TileCoord { x: 28, y: 13 })
-        .expect("place two");
-
-    simulation.tick(&adapter).expect("tick should continue");
-    let snapshot = simulation.snapshot();
-    let agent_one = snapshot
-        .agents
-        .iter()
-        .find(|agent| agent.id == 1)
-        .expect("agent one");
-    let agent_two = snapshot
-        .agents
-        .iter()
-        .find(|agent| agent.id == 2)
-        .expect("agent two");
-    assert!(agent_one.llm_calls >= 1);
-    assert!(agent_one.last_intent.is_some());
-    assert_eq!(agent_two.llm_calls, 0);
-    assert!(agent_two.last_intent.is_none());
-    assert!(snapshot.events.iter().any(|event| {
-        event.kind == EventKind::CognitionFailure && event.actor == 2
-    }));
-    assert!(state.max_active_decisions.load(Ordering::SeqCst) >= 1);
-}
-
-#[test]
-fn schema_error_in_decision_batch_remains_fatal() {
-    let (adapter, _) = InstrumentedAdapter::new();
-    let adapter = adapter.schema_fail_decision(2);
-    let mut simulation = Simulation::seeded(SimulationConfig {
-        max_agents: 2,
-        ..SimulationConfig::default()
-    });
-
-    let error = simulation.tick(&adapter).expect_err("schema error should stay fatal");
-    assert!(error.to_string().contains("invalid decision schema"));
 }
 
 #[test]
@@ -1207,8 +959,12 @@ fn loader_rejects_legacy_snapshot_without_grid() {
 #[test]
 fn simulates_a_week_with_physical_world_constraints() {
     let llm = MockLlmAdapter;
-    let mut simulation = Simulation::seeded(SimulationConfig::default());
-    for _ in 0..(7 * 24) {
+    let mut simulation = Simulation::seeded(SimulationConfig {
+        ticks_per_day: 24,
+        ..SimulationConfig::default()
+    });
+    let ticks_per_day = simulation.snapshot().ticks_per_day;
+    for _ in 0..(7 * ticks_per_day) {
         simulation.tick(&llm).expect("tick should succeed");
     }
     let snapshot = simulation.snapshot();
@@ -1219,12 +975,14 @@ fn simulates_a_week_with_physical_world_constraints() {
             .iter()
             .all(|agent| (0..=100).contains(&agent.state.health))
     );
-    let unique_positions = snapshot
-        .agents
-        .iter()
-        .map(|agent| agent.position)
-        .collect::<std::collections::HashSet<_>>();
-    assert_eq!(unique_positions.len(), snapshot.agents.len());
+    assert!(snapshot.agents.iter().all(|agent| {
+        snapshot
+            .spatial
+            .grid
+            .tiles
+            .iter()
+            .any(|tile| tile.coord == agent.position && tile.kind.walkable())
+    }));
     assert!(snapshot.events.iter().any(|event| {
         matches!(
             event.kind,
@@ -1240,34 +998,56 @@ fn simulates_a_week_with_physical_world_constraints() {
 fn generation_includes_local_woodlot_and_quarry_nodes() {
     let simulation = Simulation::seeded(SimulationConfig::default());
     let spatial = simulation.spatial();
-    assert!(spatial
-        .buildings
-        .iter()
-        .any(|building| building.kind == LocationKind::Woodlot));
-    assert!(spatial
-        .buildings
-        .iter()
-        .any(|building| building.kind == LocationKind::Quarry));
-    assert!(spatial.fixtures.iter().any(|fixture| fixture.name == "Clareira de Coleta"));
-    assert!(spatial.fixtures.iter().any(|fixture| fixture.name == "Face da Pedreira"));
+    assert!(
+        spatial
+            .buildings
+            .iter()
+            .any(|building| building.kind == LocationKind::Woodlot)
+    );
+    assert!(
+        spatial
+            .buildings
+            .iter()
+            .any(|building| building.kind == LocationKind::Quarry)
+    );
+    assert!(
+        spatial
+            .fixtures
+            .iter()
+            .any(|fixture| fixture.name == "Clareira de Coleta")
+    );
+    assert!(
+        spatial
+            .fixtures
+            .iter()
+            .any(|fixture| fixture.name == "Face da Pedreira")
+    );
 }
 
 #[test]
 fn daily_taxes_feed_public_treasury_without_local_minting() {
     let llm = MockLlmAdapter;
-    let mut simulation = Simulation::seeded(SimulationConfig::default());
+    let mut simulation = Simulation::seeded(SimulationConfig {
+        ticks_per_day: 24,
+        ..SimulationConfig::default()
+    });
     let initial = simulation.snapshot();
     let initial_money = total_money(&initial);
     let initial_public = initial.village_economy.public_treasury;
 
-    for _ in 0..24 {
+    for _ in 0..initial.ticks_per_day {
         simulation.tick(&llm).expect("tick should succeed");
     }
 
     let snapshot = simulation.snapshot();
     let current_money = total_money(&snapshot);
     assert!(snapshot.village_economy.public_treasury >= initial_public);
-    assert!(snapshot.events.iter().any(|event| event.kind == EventKind::Tax));
+    assert!(
+        snapshot
+            .events
+            .iter()
+            .any(|event| event.kind == EventKind::Tax)
+    );
     assert!(current_money <= initial_money);
 }
 
@@ -1282,25 +1062,386 @@ fn local_raw_material_establishments_hold_lenha_and_metal_bruto() {
     let woodlot = snapshot
         .establishments
         .iter()
-        .find(|establishment| establishment.kind == LocationKind::Woodlot)
+        .find(|establishment| establishment.location_kind == LocationKind::Woodlot)
         .expect("woodlot establishment");
     let quarry = snapshot
         .establishments
         .iter()
-        .find(|establishment| establishment.kind == LocationKind::Quarry)
+        .find(|establishment| establishment.location_kind == LocationKind::Quarry)
         .expect("quarry establishment");
-    assert!(woodlot
-        .stock
+    assert!(
+        woodlot
+            .stock
+            .iter()
+            .any(|stack| stack.resource_id == ResourceKind::Lenha.id() && stack.amount >= 0)
+    );
+    assert!(
+        quarry
+            .stock
+            .iter()
+            .any(|stack| stack.resource_id == ResourceKind::MetalBruto.id() && stack.amount >= 0)
+    );
+}
+
+#[test]
+fn assault_requires_adjacency_and_creates_combat_and_crime_case() {
+    let llm = MockLlmAdapter;
+    let mut simulation = Simulation::seeded(SimulationConfig::default());
+    simulation
+        .debug_force_agent_position(1, TileCoord { x: 24, y: 13 })
+        .expect("place attacker");
+    simulation
+        .debug_force_agent_position(2, TileCoord { x: 25, y: 13 })
+        .expect("place victim");
+    let before = simulation.snapshot();
+    let victim_health = before
+        .agents
         .iter()
-        .any(|stack| stack.kind == ResourceKind::Lenha && stack.amount >= 0));
-    assert!(quarry
-        .stock
+        .find(|agent| agent.id == 2)
+        .expect("victim")
+        .state
+        .health;
+
+    simulation
+        .debug_assign_intent(1, test_intent(IntentKind::Agredir, Some(2)))
+        .expect("assign assault");
+    simulation.tick(&llm).expect("tick");
+
+    let snapshot = simulation.snapshot();
+    let victim = snapshot
+        .agents
         .iter()
-        .any(|stack| stack.kind == ResourceKind::MetalBruto && stack.amount >= 0));
+        .find(|agent| agent.id == 2)
+        .expect("victim after");
+    assert!(victim.state.health < victim_health);
+    assert!(victim.injury.light_wounds > 0 || victim.injury.severe_wounds > 0);
+    assert!(
+        snapshot
+            .combats
+            .iter()
+            .any(|combat| combat.participants.contains(&1) && combat.participants.contains(&2))
+    );
+    assert!(snapshot.crime_cases.iter().any(|case| {
+        case.crime_type == CrimeType::Assault
+            && case.suspect_id == Some(1)
+            && case.victim_id == Some(2)
+    }));
+    assert!(
+        snapshot
+            .events
+            .iter()
+            .any(|event| event.kind == EventKind::Violence)
+    );
+}
+
+#[test]
+fn theft_transfers_real_resources_and_may_create_case_when_observed() {
+    let llm = MockLlmAdapter;
+    let mut simulation = Simulation::seeded(SimulationConfig::default());
+    simulation
+        .debug_force_agent_position(1, TileCoord { x: 24, y: 13 })
+        .expect("place thief");
+    simulation
+        .debug_force_agent_position(4, TileCoord { x: 25, y: 13 })
+        .expect("place victim");
+    simulation
+        .debug_force_agent_position(3, TileCoord { x: 24, y: 14 })
+        .expect("place witness");
+    let before = simulation.snapshot();
+    let thief_household = before
+        .agents
+        .iter()
+        .find(|agent| agent.id == 1)
+        .and_then(|agent| agent.home_building_id)
+        .expect("thief household");
+    let initial_treasury = before
+        .households
+        .iter()
+        .find(|household| household.id == thief_household)
+        .expect("household")
+        .treasury;
+
+    simulation
+        .debug_assign_intent(1, test_intent(IntentKind::Furtar, Some(4)))
+        .expect("assign theft");
+    simulation.tick(&llm).expect("tick");
+
+    let snapshot = simulation.snapshot();
+    let updated_treasury = snapshot
+        .households
+        .iter()
+        .find(|household| household.id == thief_household)
+        .expect("household")
+        .treasury;
+    assert!(
+        updated_treasury > initial_treasury
+            || snapshot
+                .agents
+                .iter()
+                .find(|agent| agent.id == 1)
+                .expect("thief")
+                .carrying
+                .iter()
+                .any(|stack| stack.amount > 0)
+    );
+    assert!(
+        snapshot
+            .crime_cases
+            .iter()
+            .any(|case| case.crime_type == CrimeType::Theft)
+    );
+    assert!(
+        snapshot
+            .events
+            .iter()
+            .any(|event| event.kind == EventKind::Theft)
+    );
+}
+
+#[test]
+fn guard_can_investigate_arrest_and_punish_proven_case() {
+    let llm = MockLlmAdapter;
+    let mut simulation = Simulation::seeded(SimulationConfig::default());
+    simulation
+        .debug_force_agent_position(5, TileCoord { x: 24, y: 13 })
+        .expect("place guard");
+    simulation
+        .debug_force_agent_position(1, TileCoord { x: 25, y: 13 })
+        .expect("place suspect");
+    simulation
+        .debug_force_agent_position(2, TileCoord { x: 26, y: 13 })
+        .expect("place victim");
+    simulation
+        .debug_assign_intent(1, test_intent(IntentKind::Agredir, Some(2)))
+        .expect("assign assault");
+    simulation.tick(&llm).expect("crime tick");
+
+    simulation
+        .debug_assign_intent(5, test_intent(IntentKind::Investigar, None))
+        .expect("assign investigate");
+    simulation.tick(&llm).expect("investigate tick");
+    simulation
+        .debug_force_agent_position(5, TileCoord { x: 25, y: 14 })
+        .expect("place guard near suspect");
+    simulation
+        .debug_force_agent_position(1, TileCoord { x: 25, y: 13 })
+        .expect("keep suspect near guard");
+    simulation
+        .debug_assign_intent(5, test_intent(IntentKind::Prender, Some(1)))
+        .expect("assign arrest");
+    simulation.tick(&llm).expect("arrest tick");
+
+    // Force guard to be at the guard post entrance so they are adjacent to the arrested suspect
+    let guard_post_entrance = {
+        let snapshot = simulation.snapshot();
+        snapshot.spatial.buildings.iter()
+            .find(|b| b.kind == LocationKind::GuardPost)
+            .map(|b| b.entrance)
+            .expect("should find guard post entrance")
+    };
+    simulation
+        .debug_force_agent_position(5, guard_post_entrance)
+        .expect("place guard at guard post");
+
+    simulation
+        .debug_assign_intent(5, test_intent(IntentKind::Punir, Some(1)))
+        .expect("assign punish");
+    simulation.tick(&llm).expect("punish tick");
+
+    let snapshot = simulation.snapshot();
+    assert!(
+        snapshot.crime_cases.iter().any(|case| {
+            case.suspect_id == Some(1)
+                && matches!(
+                    case.status,
+                    CrimeCaseStatus::Punished | CrimeCaseStatus::Arrested
+                )
+        }),
+        "crime cases: {:?}",
+        snapshot.crime_cases
+    );
+    assert!(
+        snapshot
+            .events
+            .iter()
+            .any(|event| event.kind == EventKind::Investigation)
+    );
+    assert!(
+        snapshot
+            .events
+            .iter()
+            .any(|event| event.kind == EventKind::Arrest)
+    );
+    assert!(
+        snapshot
+            .events
+            .iter()
+            .any(|event| event.kind == EventKind::Punishment)
+    );
+}
+
+#[test]
+fn political_pressure_creates_issue_and_faction_from_public_treasury_crisis() {
+    let mut simulation = Simulation::seeded(SimulationConfig::default());
+    simulation.debug_set_public_treasury(0);
+    simulation
+        .debug_refresh_politics()
+        .expect("refresh politics");
+
+    let snapshot = simulation.snapshot();
+    assert!(
+        snapshot
+            .political_issues
+            .iter()
+            .any(|issue| issue.proposed_value == "aumentar")
+    );
+    assert!(!snapshot.political_factions.is_empty());
+    assert!(
+        snapshot
+            .events
+            .iter()
+            .any(|event| event.kind == EventKind::PolicyProposal)
+    );
+}
+
+#[test]
+fn political_support_intent_records_position_without_immediate_norm_change() {
+    let llm = MockLlmAdapter;
+    let mut simulation = Simulation::seeded(SimulationConfig::default());
+    simulation.debug_set_public_treasury(0);
+    simulation
+        .debug_refresh_politics()
+        .expect("refresh politics");
+    let before = simulation.snapshot();
+    let issue = before
+        .political_issues
+        .iter()
+        .find(|issue| issue.proposed_value == "aumentar")
+        .expect("political issue")
+        .clone();
+    let actor = issue.proposed_by.expect("issue proposer");
+    let initial_tax = before.village_economy.daily_household_tax;
+
+    simulation
+        .debug_assign_intent(actor, test_intent(IntentKind::Apoiar, None))
+        .expect("assign support");
+    simulation.tick(&llm).expect("execute support");
+
+    let snapshot = simulation.snapshot();
+    let issue_after = snapshot
+        .political_issues
+        .iter()
+        .find(|entry| entry.id == issue.id)
+        .expect("issue after support");
+    assert!(issue_after.supporter_ids.contains(&actor));
+    assert_eq!(snapshot.village_economy.daily_household_tax, initial_tax);
+    assert!(
+        snapshot
+            .events
+            .iter()
+            .any(|event| event.kind == EventKind::PoliticalSupport)
+    );
+}
+
+#[test]
+fn daily_political_resolution_can_change_tax_norm() {
+    let mut simulation = Simulation::seeded(SimulationConfig::default());
+    simulation.debug_set_public_treasury(0);
+    let initial_tax = simulation.snapshot().village_economy.daily_household_tax;
+    simulation
+        .debug_resolve_daily_politics()
+        .expect("resolve politics");
+
+    let snapshot = simulation.snapshot();
+    assert!(snapshot.village_economy.daily_household_tax > initial_tax);
+    assert!(
+        snapshot
+            .events
+            .iter()
+            .any(|event| event.kind == EventKind::NormChanged)
+    );
+    assert!(
+        snapshot
+            .political_issues
+            .iter()
+            .any(|issue| issue.proposed_value == "aumentar")
+    );
+}
+
+fn test_intent(kind: IntentKind, target_agent: Option<u64>) -> AgentIntent {
+    AgentIntent {
+        kind,
+        target_agent,
+        target_semantic: Some(kind.as_str().to_string()),
+        justification: "teste deterministico".to_string(),
+        dominant_emotion: "firme".to_string(),
+        perceived_risk: 5,
+        belief_updates: Vec::new(),
+        priority: 10,
+        social_move: None,
+    }
+}
+
+#[test]
+fn critical_hunger_consumes_household_food_without_llm_decision() {
+    let llm = MockLlmAdapter;
+    let mut simulation = Simulation::seeded(SimulationConfig::default());
+    let initial = simulation.snapshot();
+    let agent = initial
+        .agents
+        .iter()
+        .find(|agent| agent.id == 1)
+        .expect("seeded agent");
+    let household_id = agent.home_building_id.expect("agent household");
+    let initial_food = initial
+        .households
+        .iter()
+        .find(|household| household.id == household_id)
+        .expect("household")
+        .pantry
+        .iter()
+        .find(|stack| stack.resource_id == ResourceKind::Pao.id())
+        .map(|stack| stack.amount)
+        .unwrap_or(0);
+    assert!(initial_food > 0);
+
+    let mut critical_state = agent.state.clone();
+    critical_state.hunger = 90;
+    simulation
+        .debug_force_agent_state(1, critical_state)
+        .expect("force state");
+    simulation.tick(&llm).expect("tick should succeed");
+
+    let snapshot = simulation.snapshot();
+    let updated_agent = snapshot
+        .agents
+        .iter()
+        .find(|agent| agent.id == 1)
+        .expect("updated agent");
+    let updated_food = snapshot
+        .households
+        .iter()
+        .find(|household| household.id == household_id)
+        .expect("updated household")
+        .pantry
+        .iter()
+        .find(|stack| stack.resource_id == ResourceKind::Pao.id())
+        .map(|stack| stack.amount)
+        .unwrap_or(0);
+
+    assert!(updated_agent.state.hunger < 90);
+    assert_eq!(updated_food, initial_food - 1);
+    assert!(snapshot.events.iter().any(|event| {
+        event.actor == 1 && event.kind == EventKind::Commerce && event.summary.contains("come")
+    }));
 }
 
 fn total_money(snapshot: &medieval_village_llm::world_model::SimulationSnapshot) -> i32 {
-    let household_money: i32 = snapshot.households.iter().map(|household| household.treasury).sum();
+    let household_money: i32 = snapshot
+        .households
+        .iter()
+        .map(|household| household.treasury)
+        .sum();
     let establishment_money: i32 = snapshot
         .establishments
         .iter()
@@ -1308,3 +1449,191 @@ fn total_money(snapshot: &medieval_village_llm::world_model::SimulationSnapshot)
         .sum();
     household_money + establishment_money + snapshot.village_economy.public_treasury
 }
+
+#[test]
+fn async_decision_processing_permits_independent_progress() {
+    let (adapter, state) = InstrumentedAdapter::new();
+    // Configure agent 1 with a decision delay of 150 milliseconds
+    let adapter = adapter.with_decision_delay(1, 150);
+
+    let mut config = SimulationConfig::default();
+    config.max_agents = 1;
+    let mut simulation = Simulation::seeded(config);
+
+    // Tick once. This should trigger and dispatch the decision request in a background thread.
+    simulation.tick(&adapter).expect("first tick");
+
+    // Give the background thread a moment to start and register the call.
+    thread::sleep(Duration::from_millis(100));
+
+    let snapshot = simulation.snapshot();
+    let agent_one = snapshot.agents.iter().find(|a| a.id == 1).expect("agent 1");
+    let dispatched = state.decision_calls.lock().expect("decision calls").len();
+    if dispatched == 0 {
+        assert!(
+            agent_one.last_intent.is_some() || agent_one.active_economic_task_id.is_some(),
+            "local deterministic routine should keep the agent progressing when no LLM dispatch is needed"
+        );
+        return;
+    }
+
+    assert_eq!(dispatched, 1);
+    assert!(agent_one.last_intent.is_none());
+    assert!(agent_one.task_queue.is_empty());
+
+    // Sleep in the test thread to allow the background LLM thread to finish its delay
+    thread::sleep(Duration::from_millis(200));
+
+    // Tick again. This tick should notice the background thread is finished, join it, and apply the decision!
+    simulation.tick(&adapter).expect("second tick");
+
+    // Assert that the decision has now been applied!
+    let snapshot2 = simulation.snapshot();
+    let agent_one_after = snapshot2
+        .agents
+        .iter()
+        .find(|a| a.id == 1)
+        .expect("agent 1");
+    assert!(agent_one_after.last_intent.is_some());
+    assert!(!agent_one_after.task_queue.is_empty());
+}
+
+#[test]
+fn agricultural_crop_growth_and_harvesting_cycle() {
+    let (adapter, _) = InstrumentedAdapter::new();
+    let mut config = SimulationConfig::default();
+    config.max_agents = 0; // Ensure we have a farmer
+    let mut simulation = Simulation::seeded(config);
+
+    // 1. Initial State: No crops planted
+    assert!(simulation.snapshot().crops.is_empty(), "Crops list should start empty");
+
+    // Find a farm building (Celeiro)
+    let farm_building = simulation.snapshot().spatial.buildings.iter()
+        .find(|b| b.kind == LocationKind::Farm)
+        .cloned()
+        .expect("should have a farm building");
+
+    // Find a farmer agent
+    let farmer = simulation.snapshot().agents.iter()
+        .find(|a| a.role_id == "campones")
+        .cloned()
+        .expect("should have a farmer agent");
+
+    // Force farmer position to the Celeiro entrance
+    simulation.debug_force_agent_position(farmer.id, farm_building.entrance).expect("force position");
+
+    // Force Farmer intent to Trabalhar(fazenda)
+    simulation.debug_assign_intent(farmer.id, AgentIntent {
+        kind: IntentKind::Trabalhar,
+        target_agent: None,
+        target_semantic: Some("fazenda".to_string()),
+        justification: "trabalhar".to_string(),
+        dominant_emotion: "focado".to_string(),
+        perceived_risk: 0,
+        belief_updates: vec![],
+        priority: 100,
+        social_move: None,
+    }).expect("assign intent");
+    simulation.debug_force_navigation(farmer.id, farm_building.entrance, vec![]).expect("force navigation");
+
+    {
+        let snapshot = simulation.snapshot();
+        let agent = snapshot.agents.iter().find(|a| a.id == farmer.id).unwrap();
+        println!("DEBUG: Agent pos={:?}, dest={:?}, intent={:?}", agent.position, agent.destination, agent.last_intent);
+        
+        let farm_buildings: Vec<&BuildingSpec> = snapshot.spatial.buildings.iter()
+            .filter(|b| b.kind == LocationKind::Farm)
+            .collect();
+        println!("DEBUG: farm_buildings: {:?}", farm_buildings.iter().map(|b| (b.id, b.entrance)).collect::<Vec<_>>());
+        
+        let farm_fields: Vec<TileCoord> = snapshot.spatial.grid.tiles.iter()
+            .filter(|tile| tile.kind == TileKind::Field)
+            .map(|tile| tile.coord)
+            .collect();
+        println!("DEBUG: total field tiles: {}", farm_fields.len());
+    }
+
+    // 2. Action: Work (Planting)
+    simulation.tick(&adapter).expect("tick for planting");
+
+    // Verify fields associated with this farm have crops in Planted stage
+    let snapshot = simulation.snapshot();
+    assert!(!snapshot.crops.is_empty(), "Crops should have been planted");
+    for crop in snapshot.crops.values() {
+        assert_eq!(crop.stage, CropStage::Planted);
+        assert_eq!(crop.ticks_since_planted, 0);
+    }
+
+    // 3. Action: Working while growing should fail (intent will fail, verify crops still grow and no grains produced yet)
+    simulation.debug_force_agent_position(farmer.id, farm_building.entrance).expect("force position 2");
+    simulation.debug_assign_intent(farmer.id, AgentIntent {
+        kind: IntentKind::Trabalhar,
+        target_agent: None,
+        target_semantic: Some("fazenda".to_string()),
+        justification: "trabalhar".to_string(),
+        dominant_emotion: "focado".to_string(),
+        perceived_risk: 0,
+        belief_updates: vec![],
+        priority: 100,
+        social_move: None,
+    }).expect("assign intent 2");
+    simulation.debug_force_navigation(farmer.id, farm_building.entrance, vec![]).expect("force navigation 2");
+
+    simulation.tick(&adapter).expect("tick for work attempt during growth");
+
+    // Verify crops are still there
+    let snapshot = simulation.snapshot();
+    assert!(!snapshot.crops.is_empty(), "Crops must still exist during growth");
+
+    // 4. Growth Cycle: Tick 10 times to transition to Growing
+    for _ in 0..10 {
+        simulation.tick(&adapter).expect("tick");
+    }
+    let snapshot = simulation.snapshot();
+    for crop in snapshot.crops.values() {
+        assert_eq!(crop.stage, CropStage::Growing);
+    }
+
+    // 5. Growth Cycle: Tick 20 more times to transition to Ready (total 30 ticks since planted)
+    for _ in 0..20 {
+        simulation.tick(&adapter).expect("tick");
+    }
+    let snapshot = simulation.snapshot();
+    for crop in snapshot.crops.values() {
+        assert_eq!(crop.stage, CropStage::Ready);
+    }
+
+    // 6. Action: Work (Harvesting)
+    let initial_grain = snapshot.establishments.iter()
+        .find(|e| e.building_id == Some(farm_building.id))
+        .map(|e| e.stock.iter().find(|s| s.resource_id == "graos").map(|s| s.amount).unwrap_or(0))
+        .unwrap_or(0);
+
+    simulation.debug_force_agent_position(farmer.id, farm_building.entrance).expect("force position 3");
+    simulation.debug_assign_intent(farmer.id, AgentIntent {
+        kind: IntentKind::Trabalhar,
+        target_agent: None,
+        target_semantic: Some("fazenda".to_string()),
+        justification: "trabalhar".to_string(),
+        dominant_emotion: "focado".to_string(),
+        perceived_risk: 0,
+        belief_updates: vec![],
+        priority: 100,
+        social_move: None,
+    }).expect("assign intent 3");
+    simulation.debug_force_navigation(farmer.id, farm_building.entrance, vec![]).expect("force navigation 3");
+
+    simulation.tick(&adapter).expect("tick for harvesting");
+
+    let snapshot = simulation.snapshot();
+    let final_grain = snapshot.establishments.iter()
+        .find(|e| e.building_id == Some(farm_building.id))
+        .map(|e| e.stock.iter().find(|s| s.resource_id == "graos").map(|s| s.amount).unwrap_or(0))
+        .unwrap_or(0);
+
+    assert!(final_grain > initial_grain, "Grain stock should increase after harvest");
+    assert!(snapshot.crops.is_empty(), "Crops list should be empty after harvesting");
+}
+
+

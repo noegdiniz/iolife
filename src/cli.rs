@@ -71,20 +71,23 @@ where
             "--event-tail" => {
                 headless.event_tail = next_parsed(&mut args, "--event-tail")?;
             }
+            "--ticks-per-second" => {
+                headless.ticks_per_second = next_parsed(&mut args, "--ticks-per-second")?;
+            }
             "--seed" => {
                 simulation.world_seed = next_parsed(&mut args, "--seed")?;
             }
-            "--agents" => {
-                simulation.max_agents = next_parsed(&mut args, "--agents")?;
+            "--agents" | "--population" => {
+                simulation.max_agents = next_parsed(&mut args, "--agents | --population")?;
             }
-            "--ticks-per-day" => {
-                simulation.ticks_per_day = next_parsed(&mut args, "--ticks-per-day")?;
+            "--grid-width" | "--width" => {
+                simulation.grid_width = next_parsed(&mut args, "--grid-width | --width")?;
             }
-            "--grid-width" => {
-                simulation.grid_width = next_parsed(&mut args, "--grid-width")?;
+            "--grid-height" | "--height" => {
+                simulation.grid_height = next_parsed(&mut args, "--grid-height | --height")?;
             }
-            "--grid-height" => {
-                simulation.grid_height = next_parsed(&mut args, "--grid-height")?;
+            "--num-villages" => {
+                simulation.num_villages = next_parsed(&mut args, "--num-villages")?;
             }
             "--village-name" => {
                 simulation.village_name = next_string(&mut args, "--village-name")?;
@@ -99,14 +102,20 @@ where
     if headless.event_tail == 0 {
         bail!("--event-tail deve ser maior que zero");
     }
+    if headless.ticks_per_second == 0 {
+        bail!("--ticks-per-second deve ser maior que zero");
+    }
     if simulation.max_agents == 0 {
         bail!("--agents deve ser maior que zero");
     }
-    if simulation.ticks_per_day == 0 {
-        bail!("--ticks-per-day deve ser maior que zero");
+    if simulation.num_villages == 0 {
+        bail!("--num-villages deve ser maior que zero");
     }
-    if simulation.grid_width <= 0 || simulation.grid_height <= 0 {
-        bail!("--grid-width e --grid-height devem ser maiores que zero");
+    if simulation.ticks_per_day == 0 {
+        bail!("ticks_per_day interno deve ser maior que zero");
+    }
+    if simulation.grid_width < 100 || simulation.grid_height < 60 {
+        bail!("Dimensoes do grid devem ser de pelo menos 100x60");
     }
 
     let mode = if headless_enabled {
@@ -135,16 +144,17 @@ pub fn usage() -> &'static str {
         "  --db PATH               sobrescreve VILLAGE_DB_PATH\n",
         "  --village-name NOME     nome da vila ao criar um mundo novo\n",
         "  --seed N                seed do gerador espacial\n",
-        "  --agents N              quantidade de agentes iniciais\n",
-        "  --ticks-per-day N       quantidade de ticks por dia\n",
-        "  --grid-width N          largura do grid\n",
-        "  --grid-height N         altura do grid\n\n",
+        "  --agents, --population N quantidade de agentes iniciais\n",
+        "  --grid-width, --width N  largura do grid\n",
+        "  --grid-height, --height N altura do grid\n",
+        "  --num-villages N        quantidade de vilas a gerar\n\n",
         "Headless:\n",
         "  --ticks N               encerra apos N ticks executados neste processo\n",
         "  --days N                encerra apos N dias simulados neste processo\n",
         "  --save-every N          salva checkpoint intervalar a cada N ticks (0 desativa)\n",
         "  --summary-every N       imprime relatorio a cada N ticks\n",
         "  --event-tail N          quantos eventos recentes mostrar por relatorio\n",
+        "  --ticks-per-second N    ritmo real da simulacao no headless (padrao: 1)\n",
         "  --map                   inclui o mapa ASCII completo nos relatorios\n",
         "  --help                  mostra esta ajuda\n",
     )
@@ -172,6 +182,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{CliCommand, RunMode, parse_cli_args};
+    use crate::sim_core::DEFAULT_TICKS_PER_DAY;
 
     #[test]
     fn parses_headless_options_and_bootstrap() {
@@ -188,17 +199,17 @@ mod tests {
             "6".to_string(),
             "--event-tail".to_string(),
             "4".to_string(),
+            "--ticks-per-second".to_string(),
+            "3".to_string(),
             "--map".to_string(),
             "--seed".to_string(),
             "77".to_string(),
             "--agents".to_string(),
             "18".to_string(),
-            "--ticks-per-day".to_string(),
-            "32".to_string(),
             "--grid-width".to_string(),
-            "60".to_string(),
+            "150".to_string(),
             "--grid-height".to_string(),
-            "34".to_string(),
+            "100".to_string(),
             "--village-name".to_string(),
             "Pedra Clara".to_string(),
         ])
@@ -210,9 +221,9 @@ mod tests {
         assert!(options.force_new);
         assert_eq!(options.simulation.world_seed, 77);
         assert_eq!(options.simulation.max_agents, 18);
-        assert_eq!(options.simulation.ticks_per_day, 32);
-        assert_eq!(options.simulation.grid_width, 60);
-        assert_eq!(options.simulation.grid_height, 34);
+        assert_eq!(options.simulation.ticks_per_day, DEFAULT_TICKS_PER_DAY);
+        assert_eq!(options.simulation.grid_width, 150);
+        assert_eq!(options.simulation.grid_height, 100);
         assert_eq!(options.simulation.village_name, "Pedra Clara");
         match options.mode {
             RunMode::Headless(headless) => {
@@ -221,6 +232,7 @@ mod tests {
                 assert_eq!(headless.save_every_ticks, Some(12));
                 assert_eq!(headless.summary_every_ticks, 6);
                 assert_eq!(headless.event_tail, 4);
+                assert_eq!(headless.ticks_per_second, 3);
                 assert!(headless.render_map);
             }
             RunMode::Tui => panic!("expected headless mode"),
@@ -241,7 +253,23 @@ mod tests {
             "0".to_string(),
         ])
         .expect_err("zero ticks must fail");
-        assert!(ticks_error.to_string().contains("--ticks deve ser maior que zero"));
+        assert!(
+            ticks_error
+                .to_string()
+                .contains("--ticks deve ser maior que zero")
+        );
+
+        let tick_rate_error = parse_cli_args([
+            "--headless".to_string(),
+            "--ticks-per-second".to_string(),
+            "0".to_string(),
+        ])
+        .expect_err("zero tick rate must fail");
+        assert!(
+            tick_rate_error
+                .to_string()
+                .contains("--ticks-per-second deve ser maior que zero")
+        );
 
         let command = parse_cli_args([
             "--headless".to_string(),

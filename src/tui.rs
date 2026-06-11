@@ -1,7 +1,9 @@
 use crate::llm_adapter::LlmAdapter;
 use crate::persistence::Persistence;
-use crate::sim_core::{AgentView, MapRender, Simulation};
-use crate::world_model::Role;
+use crate::sim_core::{
+    AgentView, DEFAULT_TICKS_PER_SECOND, MAX_TICKS_PER_SECOND, MapRender, Simulation,
+    tick_interval_ms,
+};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
@@ -44,7 +46,7 @@ fn run_app(
     let mut last_saved_day = sim.current_day();
 
     loop {
-        let views = filtered_views(sim.agent_views(), app.role_filter);
+        let views = filtered_views(sim.agent_views(), app.role_filter.clone());
         if !views.is_empty() {
             app.selected_agent = app.selected_agent.min(views.len().saturating_sub(1));
         } else {
@@ -77,10 +79,12 @@ fn run_app(
                         sim.tick(llm)?;
                     }
                     KeyCode::Char('+') => {
-                        app.tick_rate_ms = app.tick_rate_ms.saturating_sub(150).max(150);
+                        app.ticks_per_second = (app.ticks_per_second + 1).min(MAX_TICKS_PER_SECOND);
+                        app.tick_rate_ms = tick_interval_ms(app.ticks_per_second);
                     }
                     KeyCode::Char('-') => {
-                        app.tick_rate_ms = (app.tick_rate_ms + 150).min(3_000);
+                        app.ticks_per_second = app.ticks_per_second.saturating_sub(1).max(1);
+                        app.tick_rate_ms = tick_interval_ms(app.ticks_per_second);
                     }
                     KeyCode::Down => {
                         if !views.is_empty() {
@@ -96,7 +100,7 @@ fn run_app(
                         }
                     }
                     KeyCode::Char('f') => {
-                        app.role_filter = next_filter(app.role_filter);
+                        app.role_filter = next_filter(app.role_filter.clone());
                     }
                     _ => {}
                 }
@@ -151,7 +155,27 @@ fn render(
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, sim: &Simulation, app: &AppState) {
-    let economy = sim.economy_overview().into_iter().next().unwrap_or_default();
+    let economy = sim
+        .economy_overview()
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    let politics = sim
+        .politics_overview()
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    let mut planted = 0;
+    let mut growing = 0;
+    let mut ready = 0;
+    for crop in sim.crops.values() {
+        match crop.stage {
+            crate::world_model::CropStage::Planted => planted += 1,
+            crate::world_model::CropStage::Growing => growing += 1,
+            crate::world_model::CropStage::Ready => ready += 1,
+        }
+    }
+
     let text = vec![
         Line::from(vec![
             Span::styled(
@@ -162,15 +186,20 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, sim: &Simulation, app: &AppS
             ),
             Span::raw(" | "),
             Span::raw(format!(
-                "LLM={} | estado={} | filtro={}",
+                "LLM={} | estado={} | velocidade={} tick/s | filtro={} | Plantas: {}P, {}C, {}R",
                 app.provider_name,
                 if app.paused { "pausado" } else { "rodando" },
-                app.role_filter.map(|role| role.as_str()).unwrap_or("todos")
+                app.ticks_per_second,
+                app.role_filter.as_deref().unwrap_or("todos"),
+                planted,
+                growing,
+                ready
             )),
         ]),
         Line::from(economy),
+        Line::from(politics),
         Line::from(
-            "Mapa: @ agente selecionado | & em conversa | * caminho | # parede | + porta | = rua | , campo | ^ lenhal | % pedreira",
+            "Mapa: @ agente selecionado | & em conversa | * caminho | # parede | + porta | = rua | , campo | . plantado | v crescendo | Y pronto | ^ lenhal | % pedreira",
         ),
     ];
     frame.render_widget(
@@ -190,10 +219,7 @@ fn render_agent_list(frame: &mut Frame<'_>, area: Rect, views: &[AgentView], app
         .map(|(idx, view)| {
             let line = format!(
                 "{} | {} | ({}, {})",
-                view.name,
-                view.role.as_str(),
-                view.position.x,
-                view.position.y
+                view.name, view.role_name, view.position.x, view.position.y
             );
             let style = if idx == app.selected_agent {
                 Style::default()
@@ -260,7 +286,7 @@ fn render_agent_detail(frame: &mut Frame<'_>, area: Rect, view: Option<&AgentVie
     } else {
         view.household_pantry
             .iter()
-            .map(|stack| format!("{} x{}", stack.kind.as_str(), stack.amount))
+            .map(|stack| format!("{} x{}", stack.resource_id, stack.amount))
             .collect::<Vec<_>>()
             .join(", ")
     };
@@ -269,7 +295,7 @@ fn render_agent_detail(frame: &mut Frame<'_>, area: Rect, view: Option<&AgentVie
     } else {
         view.work_establishment_stock
             .iter()
-            .map(|stack| format!("{} x{}", stack.kind.as_str(), stack.amount))
+            .map(|stack| format!("{} x{}", stack.resource_id, stack.amount))
             .collect::<Vec<_>>()
             .join(", ")
     };
@@ -278,7 +304,7 @@ fn render_agent_detail(frame: &mut Frame<'_>, area: Rect, view: Option<&AgentVie
     } else {
         view.local_prices
             .iter()
-            .map(|price| format!("{}={}m", price.resource.as_str(), price.unit_price))
+            .map(|price| format!("{}={}m", price.resource_id, price.unit_price))
             .collect::<Vec<_>>()
             .join(", ")
     };
@@ -287,7 +313,7 @@ fn render_agent_detail(frame: &mut Frame<'_>, area: Rect, view: Option<&AgentVie
     } else {
         view.carrying
             .iter()
-            .map(|stack| format!("{} x{}", stack.kind.as_str(), stack.amount))
+            .map(|stack| format!("{} x{}", stack.resource_id, stack.amount))
             .collect::<Vec<_>>()
             .join(", ")
     };
@@ -316,9 +342,14 @@ fn render_agent_detail(frame: &mut Frame<'_>, area: Rect, view: Option<&AgentVie
         )
     };
     let detail = format!(
-        "Nome: {}\nPapel: {}\nLar: {}\nArea: {}\nEdificio: {}\nSala: {}\nPosicao: ({}, {})\nDestino: {}\nCaminho pendente: {} tiles\nFoco: {}\nHumor:{} Energia:{} Saude:{} Fome:{} Stress:{}\n\nIntento geral: {}\nUltimo pensamento: {}\n\nEconomia:\nCaixa do lar: {}\nDivida de imposto: {}\nDespensa: {}\nSalario pendente: {}\nCaixa publico: {}\nTarefa economica: {}\nCarregando: {}\nEstabelecimento: {}\nCaixa do estabelecimento: {}\nEstoque do estabelecimento: {}\nPrecos locais: {}\n\n{}\n\n{}\n\nMemorias recentes:\n{}",
+        "Nome: {}\nPapel: {}\nVida: {:?}\nFerimentos: leves={} graves={} dor={} sangramento={}\nLar: {}\nArea: {}\nEdificio: {}\nSala: {}\nPosicao: ({}, {})\nDestino: {}\nCaminho pendente: {} tiles\nFoco: {}\nHumor:{} Energia:{} Saude:{} Fome:{} Stress:{}\n\nIntento geral: {}\nUltimo pensamento: {}\n\nPolitica:\nPosicao: {}\nQueixas: {}\n\nEconomia:\nCaixa do lar: {}\nDivida de imposto: {}\nDespensa: {}\nSalario pendente: {}\nCaixa publico: {}\nTarefa economica: {}\nCarregando: {}\nEstabelecimento: {}\nCaixa do estabelecimento: {}\nEstoque do estabelecimento: {}\nPrecos locais: {}\n\n{}\n\n{}\n\nMemorias recentes:\n{}",
         view.name,
-        view.role.as_str(),
+        view.role_name,
+        view.life_status,
+        view.injury.light_wounds,
+        view.injury.severe_wounds,
+        view.injury.pain,
+        view.injury.bleeding,
         view.household_name
             .clone()
             .unwrap_or_else(|| "-".to_string()),
@@ -345,6 +376,12 @@ fn render_agent_detail(frame: &mut Frame<'_>, area: Rect, view: Option<&AgentVie
             .map(|intent| format!("{} ({})", intent.kind.as_str(), intent.justification))
             .unwrap_or_else(|| "nenhuma".to_string()),
         view.last_thought,
+        view.political_position,
+        if view.political_grievances.is_empty() {
+            "-".to_string()
+        } else {
+            view.political_grievances.join("; ")
+        },
         view.household_treasury,
         view.household_tax_arrears,
         pantry,
@@ -406,26 +443,33 @@ fn render_events(
     );
 }
 
-fn filtered_views(mut views: Vec<AgentView>, filter: Option<Role>) -> Vec<AgentView> {
-    if let Some(role) = filter {
-        views.retain(|view| view.role == role);
+fn filtered_views(mut views: Vec<AgentView>, filter: Option<String>) -> Vec<AgentView> {
+    if let Some(role_id) = filter {
+        views.retain(|view| view.role_id == role_id);
     }
     views
 }
 
-fn next_filter(current: Option<Role>) -> Option<Role> {
-    let roles = Role::all();
+fn next_filter(current: Option<String>) -> Option<String> {
+    const ROLE_FILTERS: [&str; 6] = [
+        "campones",
+        "ferreiro",
+        "padeiro",
+        "taverneiro",
+        "guarda",
+        "lider_local",
+    ];
     match current {
-        None => Some(roles[0]),
+        None => Some(ROLE_FILTERS[0].to_string()),
         Some(current_role) => {
-            let idx = roles
+            let idx = ROLE_FILTERS
                 .iter()
                 .position(|role| *role == current_role)
                 .unwrap_or(0);
-            if idx + 1 >= roles.len() {
+            if idx + 1 >= ROLE_FILTERS.len() {
                 None
             } else {
-                Some(roles[idx + 1])
+                Some(ROLE_FILTERS[idx + 1].to_string())
             }
         }
     }
@@ -434,8 +478,9 @@ fn next_filter(current: Option<Role>) -> Option<Role> {
 struct AppState {
     selected_agent: usize,
     paused: bool,
+    ticks_per_second: u32,
     tick_rate_ms: u64,
-    role_filter: Option<Role>,
+    role_filter: Option<String>,
     provider_name: String,
 }
 
@@ -444,7 +489,8 @@ impl AppState {
         Self {
             selected_agent: 0,
             paused: false,
-            tick_rate_ms: 900,
+            ticks_per_second: DEFAULT_TICKS_PER_SECOND,
+            tick_rate_ms: tick_interval_ms(DEFAULT_TICKS_PER_SECOND),
             role_filter: None,
             provider_name,
         }

@@ -1,6 +1,6 @@
 use crate::world_model::{
-    AgentIntent, AgentMemory, AgentRelation, AgentState, EconomicTaskKind, EventKind,
-    FixtureKind, IntentKind, RelationDelta, ResourceKind, SocialMove, WorldEvent,
+    AgentIntent, AgentMemory, AgentRelation, AgentState, EconomicTaskClass, EconomicTaskKind,
+    EventKind, FixtureKind, IntentKind, RelationDelta, SimplifiedTask, SocialMove, WorldEvent,
 };
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -58,8 +58,10 @@ pub struct PsychologicalContextInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EconomicOpportunityInput {
     pub kind: EconomicTaskKind,
+    pub class: EconomicTaskClass,
+    pub priority: u8,
     pub summary: String,
-    pub resource: Option<ResourceKind>,
+    pub resource_id: Option<String>,
     pub amount: i32,
     pub unit_price: Option<i32>,
 }
@@ -69,14 +71,44 @@ pub struct EconomicContextInput {
     pub household_name: String,
     pub household_treasury: i32,
     pub pantry: Vec<String>,
+    pub reserved_food: Vec<String>,
+    pub food_crisis_level: u8,
+    pub reserved_food_workers: u8,
+    pub open_food_tasks: usize,
+    pub has_food_purchase_in_transit: bool,
+    pub can_eat_from_reserve: bool,
     pub pending_salary: i32,
     pub tax_pressure: i32,
     pub work_obligations: Vec<String>,
     pub local_prices: Vec<String>,
     pub base_resource_availability: Vec<String>,
     pub scarcity_signals: Vec<String>,
+    pub grain_availability: String,
+    pub external_grain_offer: Option<String>,
     pub public_treasury_status: String,
     pub open_tasks: Vec<EconomicOpportunityInput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LegalContextInput {
+    pub life_status: String,
+    pub injury_summary: String,
+    pub active_combat: Option<String>,
+    pub nearby_threats: Vec<String>,
+    pub open_cases: Vec<String>,
+    pub cases_against_actor: Vec<String>,
+    pub cases_involving_actor: Vec<String>,
+    pub witness_risk: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoliticalContextInput {
+    pub local_norms: Vec<String>,
+    pub relevant_factions: Vec<String>,
+    pub open_issues: Vec<String>,
+    pub likely_position: String,
+    pub household_grievances: Vec<String>,
+    pub opposition_risks: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,14 +135,37 @@ pub struct DecisionInput {
     pub context_depth: String,
     pub psychological_context: PsychologicalContextInput,
     pub economic_context: EconomicContextInput,
+    pub legal_context: LegalContextInput,
+    pub political_context: PoliticalContextInput,
     pub profile_summary: Vec<String>,
     pub llm_budget_remaining: u32,
+    pub chaos_pressure: u32,
+    pub personality_traits: Vec<String>,
+    pub trauma_traits: Vec<String>,
+}
+
+pub type ActionPlannerInput = DecisionInput;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThinkMakerInput {
+    pub decision_input: DecisionInput,
+    pub planned_tasks: Vec<SimplifiedTask>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DecisionEnvelope {
-    pub intent: AgentIntent,
+pub struct ThinkMakerOutput {
     pub reflection: String,
+    pub dominant_emotion: String,
+    pub belief_updates: Vec<String>,
+}
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionEnvelope {
+    pub tasks: Vec<SimplifiedTask>,
+    pub reflection: String,
+    pub dominant_emotion: String,
+    pub belief_updates: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,6 +217,9 @@ pub struct ConversationTurnInput {
     pub relational_context: RelationalHistoryInput,
     pub recent_memories: Vec<RelevantMemoryInput>,
     pub recent_turns: Vec<String>,
+    pub chaos_pressure: u32,
+    pub personality_traits: Vec<String>,
+    pub trauma_traits: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -265,58 +323,177 @@ pub fn parse_decision_json(payload: &str) -> Result<DecisionEnvelope> {
     parse_decision_json_with_notes(payload).map(|(envelope, _)| envelope)
 }
 
-pub(crate) fn parse_decision_json_with_notes(payload: &str) -> Result<(DecisionEnvelope, Vec<String>)> {
-    let root: Value =
-        serde_json::from_str(payload.trim()).context("failed to parse LLM decision payload")?;
+pub(crate) fn parse_decision_json_with_notes(
+    payload: &str,
+) -> Result<(DecisionEnvelope, Vec<String>)> {
+    let mut notes = Vec::new();
+    let root = extract_first_json_object(payload, "decision payload", &mut notes)?;
     let object = root
         .as_object()
         .ok_or_else(|| anyhow!("decision payload root must be a JSON object"))?;
     let reflection = required_string_field(object, "reflection")?;
-    let intent_object = object
-        .get("intent")
-        .and_then(Value::as_object)
-        .ok_or_else(|| anyhow!("decision payload must contain an object intent"))?;
+    let dominant_emotion =
+        required_string_field(object, "dominant_emotion").unwrap_or_else(|_| "contido".to_string());
+    let belief_updates = parse_belief_updates(object.get("belief_updates"), &mut notes);
 
-    let mut notes = Vec::new();
-    let kind = parse_strict_intent_kind(intent_object.get("kind"))?;
-    let target_agent = parse_target_agent(intent_object.get("target_agent"), &mut notes);
-    let target_semantic =
-        parse_optional_nonempty_string(intent_object.get("target_semantic"), "target_semantic", &mut notes);
-    let justification = required_string_field(intent_object, "justification")?;
-    let dominant_emotion = required_string_field(intent_object, "dominant_emotion")?;
-    let perceived_risk =
-        parse_u8ish_field(intent_object.get("perceived_risk"), "perceived_risk", 20, &mut notes)?
-            .clamp(0, 100);
-    let belief_updates = parse_belief_updates(intent_object.get("belief_updates"), &mut notes);
-    let priority =
-        parse_u8ish_field(intent_object.get("priority"), "priority", 5, &mut notes)?.clamp(1, 10);
-    let social_move = if kind == IntentKind::Socializar {
-        Some(parse_social_move(intent_object.get("social_move"), &mut notes))
-    } else {
-        if intent_object.get("social_move").is_some() {
-            notes.push("social_move ignorado para acao nao social".to_string());
-        }
-        None
-    };
+    let tasks_val = object
+        .get("tasks")
+        .ok_or_else(|| anyhow!("decision payload must contain a 'tasks' array"))?;
+    let tasks_arr = tasks_val
+        .as_array()
+        .ok_or_else(|| anyhow!("'tasks' must be a JSON array"))?;
+
+    let mut tasks = Vec::new();
+    for (i, item) in tasks_arr.iter().enumerate() {
+        let task_obj = item
+            .as_object()
+            .ok_or_else(|| anyhow!("task at index {i} must be a JSON object"))?;
+        let kind = parse_strict_intent_kind(task_obj.get("kind"))?;
+        let target_agent = parse_target_agent(task_obj.get("target_agent"), &mut notes);
+        let target_semantic = parse_optional_nonempty_string(
+            task_obj.get("target_semantic"),
+            "target_semantic",
+            &mut notes,
+        );
+        let social_move = if kind == IntentKind::Socializar {
+            Some(parse_social_move(task_obj.get("social_move"), &mut notes))
+        } else {
+            None
+        };
+        tasks.push(SimplifiedTask {
+            kind,
+            target_semantic,
+            target_agent,
+            social_move,
+        });
+    }
 
     Ok((
         DecisionEnvelope {
+            tasks,
             reflection,
-            intent: AgentIntent {
-                kind,
-                target_agent,
-                target_semantic,
-                justification,
-                dominant_emotion,
-                perceived_risk,
-                belief_updates,
-                priority,
-                social_move,
-            },
+            dominant_emotion,
+            belief_updates,
         },
         notes,
     ))
 }
+
+pub fn parse_action_planner_output(raw: &str) -> Vec<SimplifiedTask> {
+    let mut tasks = Vec::new();
+    let mut tokens = Vec::new();
+    let mut current_token = String::new();
+    let mut paren_depth = 0;
+    
+    for c in raw.chars() {
+        match c {
+            '(' => {
+                paren_depth += 1;
+                current_token.push(c);
+            }
+            ')' => {
+                if paren_depth > 0 {
+                    paren_depth -= 1;
+                }
+                current_token.push(c);
+            }
+            ',' if paren_depth == 0 => {
+                tokens.push(current_token.trim().to_string());
+                current_token.clear();
+            }
+            _ => {
+                current_token.push(c);
+            }
+        }
+    }
+    if !current_token.trim().is_empty() {
+        tokens.push(current_token.trim().to_string());
+    }
+
+    let mut mock_notes = Vec::new();
+    for token in tokens {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        if let Some(open_paren_idx) = token.find('(') {
+            let kind_part = token[..open_paren_idx].trim();
+            let val_kind = Value::String(kind_part.to_string());
+            let kind = match parse_strict_intent_kind(Some(&val_kind)) {
+                Ok(k) => k,
+                Err(_) => continue,
+            };
+            let close_paren_idx = token.rfind(')').unwrap_or(token.len());
+            let params_str = &token[open_paren_idx + 1..close_paren_idx];
+            let params: Vec<&str> = params_str.split(',').map(|p| p.trim_matches(|c| c == '\'' || c == '"' || c == ' ')).collect();
+            
+            let mut target_agent = None;
+            let mut target_semantic = None;
+            let mut social_move = None;
+
+            if !params.is_empty() && !params[0].is_empty() {
+                if let Ok(agent_id) = params[0].parse::<u64>() {
+                    target_agent = Some(agent_id);
+                } else {
+                    target_semantic = Some(params[0].to_string());
+                }
+            }
+
+            if params.len() > 1 && !params[1].is_empty() {
+                if kind == IntentKind::Socializar {
+                    let val_social = Value::String(params[1].to_string());
+                    social_move = Some(parse_social_move(Some(&val_social), &mut mock_notes));
+                } else {
+                    if target_agent.is_some() {
+                        target_semantic = Some(params[1].to_string());
+                    } else if target_semantic.is_some() {
+                        if let Ok(agent_id) = params[1].parse::<u64>() {
+                            target_agent = Some(agent_id);
+                        }
+                    }
+                }
+            }
+
+            tasks.push(SimplifiedTask {
+                kind,
+                target_semantic,
+                target_agent,
+                social_move,
+            });
+        } else {
+            let val_kind = Value::String(token.to_string());
+            if let Ok(kind) = parse_strict_intent_kind(Some(&val_kind)) {
+                tasks.push(SimplifiedTask {
+                    kind,
+                    target_semantic: None,
+                    target_agent: None,
+                    social_move: None,
+                });
+            }
+        }
+    }
+
+    tasks
+}
+
+pub fn parse_think_maker_json(payload: &str) -> Result<ThinkMakerOutput> {
+    let mut notes = Vec::new();
+    let root = extract_first_json_object(payload, "think maker payload", &mut notes)?;
+    let object = root
+        .as_object()
+        .ok_or_else(|| anyhow!("think maker payload root must be a JSON object"))?;
+    let reflection = required_string_field(object, "reflection")?;
+    let dominant_emotion =
+        required_string_field(object, "dominant_emotion").unwrap_or_else(|_| "contido".to_string());
+    let belief_updates = parse_belief_updates(object.get("belief_updates"), &mut notes);
+
+    Ok(ThinkMakerOutput {
+        reflection,
+        dominant_emotion,
+        belief_updates,
+    })
+}
+
 
 pub fn parse_conversation_turn_json(payload: &str) -> Result<ConversationTurnOutput> {
     parse_conversation_turn_json_with_notes(payload).map(|(output, _)| output)
@@ -452,7 +629,23 @@ fn parse_strict_intent_kind(value: Option<&Value>) -> Result<IntentKind> {
         "transportar" => Ok(IntentKind::Transportar),
         "vender" => Ok(IntentKind::Vender),
         "receberpagamento" => Ok(IntentKind::ReceberPagamento),
-        _ => Err(anyhow!("decision payload field `kind` has invalid value `{raw}`")),
+        "agredir" => Ok(IntentKind::Agredir),
+        "combater" => Ok(IntentKind::Combater),
+        "roubar" => Ok(IntentKind::Roubar),
+        "furtar" => Ok(IntentKind::Furtar),
+        "fugir" => Ok(IntentKind::Fugir),
+        "acusar" => Ok(IntentKind::Acusar),
+        "investigar" => Ok(IntentKind::Investigar),
+        "prender" => Ok(IntentKind::Prender),
+        "punir" => Ok(IntentKind::Punir),
+        "apoiar" => Ok(IntentKind::Apoiar),
+        "opor" => Ok(IntentKind::Opor),
+        "pressionar" => Ok(IntentKind::Pressionar),
+        "pedirapoio" => Ok(IntentKind::PedirApoio),
+        "mediar" => Ok(IntentKind::Mediar),
+        _ => Err(anyhow!(
+            "decision payload field `kind` has invalid value `{raw}`"
+        )),
     }
 }
 
@@ -466,7 +659,9 @@ fn parse_target_agent(value: Option<&Value>, notes: &mut Vec<String>) -> Option<
                 notes.push("target_agent vazio convertido para None".to_string());
                 None
             } else if let Ok(parsed) = trimmed.parse::<u64>() {
-                notes.push(format!("target_agent string `{trimmed}` convertido para id numerico"));
+                notes.push(format!(
+                    "target_agent string `{trimmed}` convertido para id numerico"
+                ));
                 Some(parsed)
             } else {
                 notes.push(format!(
@@ -502,7 +697,10 @@ fn parse_optional_nonempty_string(
             }
         }
         Some(other) => {
-            notes.push(format!("{field} com tipo inesperado `{}` virou None", other));
+            notes.push(format!(
+                "{field} com tipo inesperado `{}` virou None",
+                other
+            ));
             None
         }
     }
@@ -576,7 +774,9 @@ fn parse_boolish_field(
                 ));
                 normalized
             } else {
-                notes.push(format!("{field} numerico invalido; usando default {default}"));
+                notes.push(format!(
+                    "{field} numerico invalido; usando default {default}"
+                ));
                 default
             }
         }
@@ -607,7 +807,9 @@ fn parse_boolish_field(
                     boolean
                 }
                 None => {
-                    notes.push(format!("{field} invalido `{trimmed}`; usando default {default}"));
+                    notes.push(format!(
+                        "{field} invalido `{trimmed}`; usando default {default}"
+                    ));
                     default
                 }
             }
@@ -618,50 +820,6 @@ fn parse_boolish_field(
                 other
             ));
             default
-        }
-    }
-}
-
-fn parse_u8ish_field(
-    value: Option<&Value>,
-    field: &str,
-    default: u8,
-    notes: &mut Vec<String>,
-) -> Result<u8> {
-    let Some(value) = value else {
-        notes.push(format!("{field} ausente; usando default {default}"));
-        return Ok(default);
-    };
-    match value {
-        Value::Number(number) => number
-            .as_u64()
-            .map(|value| value.min(u8::MAX as u64) as u8)
-            .ok_or_else(|| anyhow!("decision payload field `{field}` must be a positive integer")),
-        Value::String(raw) => {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                notes.push(format!("{field} vazio; usando default {default}"));
-                return Ok(default);
-            }
-            if let Ok(parsed) = trimmed.parse::<u8>() {
-                notes.push(format!("{field} string numerica `{trimmed}` convertida para numero"));
-                return Ok(parsed);
-            }
-            if let Some(mapped) = qualitative_u8_mapping(trimmed, field) {
-                notes.push(format!("{field} qualitativo `{trimmed}` normalizado para {mapped}"));
-                return Ok(mapped);
-            }
-            notes.push(format!(
-                "{field} invalido `{trimmed}`; usando default {default}"
-            ));
-            Ok(default)
-        }
-        other => {
-            notes.push(format!(
-                "{field} com tipo inesperado `{}`; usando default {default}",
-                other
-            ));
-            Ok(default)
         }
     }
 }
@@ -682,7 +840,9 @@ fn parse_i32ish_field(
             } else if let Some(float) = number.as_f64() {
                 float.round().clamp(i32::MIN as f64, i32::MAX as f64) as i32
             } else {
-                notes.push(format!("{field} numerico invalido; usando default {default}"));
+                notes.push(format!(
+                    "{field} numerico invalido; usando default {default}"
+                ));
                 default
             }
         }
@@ -692,7 +852,9 @@ fn parse_i32ish_field(
                 return default;
             }
             if let Ok(integer) = trimmed.parse::<i32>() {
-                notes.push(format!("{field} string numerica `{trimmed}` convertida para numero"));
+                notes.push(format!(
+                    "{field} string numerica `{trimmed}` convertida para numero"
+                ));
                 return integer;
             }
             if let Ok(float) = trimmed.parse::<f64>() {
@@ -702,7 +864,9 @@ fn parse_i32ish_field(
                 ));
                 return normalized;
             }
-            notes.push(format!("{field} string invalida `{trimmed}`; usando default {default}"));
+            notes.push(format!(
+                "{field} string invalida `{trimmed}`; usando default {default}"
+            ));
             default
         }
         other => {
@@ -734,7 +898,9 @@ fn parse_risk_shift_field(
                 return default;
             }
             if let Ok(integer) = trimmed.parse::<i32>() {
-                notes.push(format!("{field} string numerica `{trimmed}` convertida para numero"));
+                notes.push(format!(
+                    "{field} string numerica `{trimmed}` convertida para numero"
+                ));
                 return integer.clamp(-5, 5);
             }
             if let Ok(float) = trimmed.parse::<f64>() {
@@ -747,11 +913,15 @@ fn parse_risk_shift_field(
             let normalized = interpret_risk_shift_text(trimmed);
             match normalized {
                 Some(value) => {
-                    notes.push(format!("{field} qualitativo `{trimmed}` normalizado para {value}"));
+                    notes.push(format!(
+                        "{field} qualitativo `{trimmed}` normalizado para {value}"
+                    ));
                     value.clamp(-5, 5)
                 }
                 None => {
-                    notes.push(format!("{field} invalido `{trimmed}`; usando default {default}"));
+                    notes.push(format!(
+                        "{field} invalido `{trimmed}`; usando default {default}"
+                    ));
                     default
                 }
             }
@@ -809,20 +979,6 @@ fn parse_relation_delta_hint(value: Option<&Value>, notes: &mut Vec<String>) -> 
     }
 }
 
-fn qualitative_u8_mapping(raw: &str, field: &str) -> Option<u8> {
-    match (field, fold_text(raw).as_str()) {
-        ("perceived_risk", "baixo") | ("perceived_risk", "low") => Some(20),
-        ("perceived_risk", "medio") | ("perceived_risk", "medium") => Some(50),
-        ("perceived_risk", "alto") | ("perceived_risk", "alta") | ("perceived_risk", "high") => {
-            Some(80)
-        }
-        ("priority", "baixa") | ("priority", "baixo") | ("priority", "low") => Some(3),
-        ("priority", "media") | ("priority", "medio") | ("priority", "medium") => Some(5),
-        ("priority", "alta") | ("priority", "alto") | ("priority", "high") => Some(8),
-        _ => None,
-    }
-}
-
 fn parse_social_move(value: Option<&Value>, notes: &mut Vec<String>) -> SocialMove {
     let default = SocialMove::Chat;
     let Some(value) = value else {
@@ -838,9 +994,22 @@ fn parse_social_move(value: Option<&Value>, notes: &mut Vec<String>) -> SocialMo
     };
     let folded = fold_text(raw);
     let mapped = match folded.as_str() {
-        "chat" | "conversa" | "conversar" | "baterpapo" | "casual" | "none" | "nenhum"
-        | "neutro" | "neutral" | "manter" | "isolado" | "isolamentotemporario"
-        | "prudencia" | "retirada" | "solitary" | "manutencao" => Some(SocialMove::Chat),
+        "chat"
+        | "conversa"
+        | "conversar"
+        | "baterpapo"
+        | "casual"
+        | "none"
+        | "nenhum"
+        | "neutro"
+        | "neutral"
+        | "manter"
+        | "isolado"
+        | "isolamentotemporario"
+        | "prudencia"
+        | "retirada"
+        | "solitary"
+        | "manutencao" => Some(SocialMove::Chat),
         "fofoca" | "fofocar" | "rumor" | "rumores" => Some(SocialMove::Gossip),
         "promessa" | "prometer" | "compromisso" => Some(SocialMove::Promise),
         "ofensa" | "ofender" | "hostil" | "pressionar" | "cobrar" => Some(SocialMove::Offend),
@@ -873,18 +1042,16 @@ fn parse_social_move(value: Option<&Value>, notes: &mut Vec<String>) -> SocialMo
     }
 }
 
-fn extract_first_json_object(
-    payload: &str,
-    label: &str,
-    notes: &mut Vec<String>,
-) -> Result<Value> {
+fn extract_first_json_object(payload: &str, label: &str, notes: &mut Vec<String>) -> Result<Value> {
     let stripped = strip_markdown_fence(payload, notes);
     let trimmed = stripped.trim();
     let start = trimmed
         .find('{')
         .ok_or_else(|| anyhow!("{label} did not contain a JSON object"))?;
     if !trimmed[..start].trim().is_empty() {
-        notes.push(format!("{label}: texto antes do primeiro JSON foi ignorado"));
+        notes.push(format!(
+            "{label}: texto antes do primeiro JSON foi ignorado"
+        ));
     }
     let candidate = &trimmed[start..];
     let mut stream = serde_json::Deserializer::from_str(candidate).into_iter::<Value>();
@@ -922,7 +1089,9 @@ fn interpret_risk_shift_text(raw: &str) -> Option<i32> {
     let mentions_tension = contains_any(&folded, &["tensao", "risco", "conflito"]);
     let mentions_reduction = contains_any(
         &folded,
-        &["reducao", "reduzir", "diminu", "menos", "alivia", "harmonia"],
+        &[
+            "reducao", "reduzir", "diminu", "menos", "alivia", "harmonia",
+        ],
     );
     let mentions_increase = contains_any(
         &folded,
@@ -986,7 +1155,10 @@ fn infer_relation_delta_from_text(raw: &str) -> RelationDelta {
         } else {
             amount
         };
-        if contains_any(&folded, &["aproximacao", "aproximar", "aproxima", "confidencia"]) {
+        if contains_any(
+            &folded,
+            &["aproximacao", "aproximar", "aproxima", "confidencia"],
+        ) {
             delta.trust += amount;
         }
     }
@@ -1044,7 +1216,14 @@ fn infer_relation_delta_from_text(raw: &str) -> RelationDelta {
     if !matched
         && contains_any(
             &folded,
-            &["aproxim", "confidenc", "gentil", "cordial", "prestativ", "apoio"],
+            &[
+                "aproxim",
+                "confidenc",
+                "gentil",
+                "cordial",
+                "prestativ",
+                "apoio",
+            ],
         )
     {
         delta.trust += amount;

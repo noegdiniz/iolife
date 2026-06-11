@@ -7,6 +7,10 @@ pub type FixtureId = u64;
 pub type ConversationId = u64;
 pub type EstablishmentId = u64;
 pub type EconomicTaskId = u64;
+pub type CombatId = u64;
+pub type CrimeCaseId = u64;
+pub type PoliticalFactionId = u64;
+pub type PoliticalIssueId = u64;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum Role {
@@ -19,6 +23,17 @@ pub enum Role {
 }
 
 impl Role {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Farmer => "campones",
+            Self::Blacksmith => "ferreiro",
+            Self::Baker => "padeiro",
+            Self::TavernKeeper => "taverneiro",
+            Self::Guard => "guarda",
+            Self::Headman => "lider_local",
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Farmer => "Campones",
@@ -71,6 +86,99 @@ impl LocationKind {
             Self::Manor => "Solar",
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceDef {
+    pub id: String,
+    pub display_name: String,
+    pub tags: Vec<String>,
+    pub base_price: i32,
+    pub consumption_priority: i32,
+    pub can_buy_external: bool,
+    pub can_sell_external: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoleDef {
+    pub id: String,
+    pub display_name: String,
+    pub allowed_establishment_type_ids: Vec<String>,
+    pub can_take_logistics_tasks: bool,
+    pub can_collect_payments: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecipeInputDef {
+    pub resource_id: String,
+    pub amount: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecipeDef {
+    pub id: String,
+    pub establishment_type_id: String,
+    pub output_resource_id: String,
+    pub output_amount: i32,
+    pub inputs: Vec<RecipeInputDef>,
+    pub capital_requirements: Vec<RecipeInputDef>,
+    pub labor_cost: i32,
+    pub tool_wear: i32,
+    pub priority: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum OwnerPolicyDef {
+    PrivateByRole { role_id: String },
+    SharedByRoles { role_ids: Vec<String> },
+    Civic,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpatialArchetypeDef {
+    pub id: String,
+    pub display_name: String,
+    pub location_kind: LocationKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EstablishmentTypeDef {
+    pub id: String,
+    pub display_name: String,
+    pub spatial_archetype_id: String,
+    pub location_kind: LocationKind,
+    pub public_service: bool,
+    pub owner_policy: OwnerPolicyDef,
+    pub wage_per_shift: i32,
+    pub stock_targets: Vec<ResourceStack>,
+    pub default_stock: Vec<ResourceStack>,
+    pub production_recipe_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalMarketRule {
+    pub resource_id: String,
+    pub buy_price: i32,
+    pub sell_price: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeedAgentDef {
+    pub id: u64,
+    pub name: String,
+    pub role_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EconomyCatalog {
+    pub version: u32,
+    pub resources: Vec<ResourceDef>,
+    pub roles: Vec<RoleDef>,
+    pub spatial_archetypes: Vec<SpatialArchetypeDef>,
+    pub establishment_types: Vec<EstablishmentTypeDef>,
+    pub recipes: Vec<RecipeDef>,
+    pub external_market_rules: Vec<ExternalMarketRule>,
+    pub seeded_agents: Vec<SeedAgentDef>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
@@ -154,6 +262,20 @@ pub struct TileSpec {
     pub room_id: Option<RoomId>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CropStage {
+    Planted,
+    Growing,
+    Ready,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct CropState {
+    pub stage: CropStage,
+    pub ticks_since_planted: u32,
+}
+
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum FixtureKind {
     Bed,
@@ -197,6 +319,10 @@ pub enum ResourceKind {
 }
 
 impl ResourceKind {
+    pub fn id(self) -> &'static str {
+        self.as_str()
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Graos => "graos",
@@ -216,19 +342,19 @@ impl ResourceKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceStack {
-    pub kind: ResourceKind,
+    pub resource_id: String,
     pub amount: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PostedPrice {
-    pub resource: ResourceKind,
+    pub resource_id: String,
     pub unit_price: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExternalMarketQuote {
-    pub resource: ResourceKind,
+    pub resource_id: String,
     pub buy_price: i32,
     pub sell_price: i32,
 }
@@ -242,7 +368,7 @@ pub struct PendingPaymentClaim {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScarcityMetric {
-    pub resource: ResourceKind,
+    pub resource_id: String,
     pub pressure: i32,
 }
 
@@ -253,9 +379,17 @@ pub struct HouseholdEconomy {
     pub member_ids: Vec<u64>,
     pub treasury: i32,
     pub pantry: Vec<ResourceStack>,
+    #[serde(default)]
+    pub reserved_food: Vec<ResourceStack>,
     pub minimum_food_units: i32,
     pub pending_payments: Vec<PendingPaymentClaim>,
     pub scarcity_pressure: i32,
+    #[serde(default)]
+    pub food_crisis_level: u8,
+    #[serde(default)]
+    pub reserved_food_workers: u8,
+    #[serde(default)]
+    pub last_food_shortage_tick: u64,
     pub tax_arrears: i32,
     pub last_tax_paid_day: u32,
 }
@@ -265,7 +399,8 @@ pub struct EstablishmentEconomy {
     pub id: EstablishmentId,
     pub building_id: Option<BuildingId>,
     pub name: String,
-    pub kind: LocationKind,
+    pub establishment_type_id: String,
+    pub location_kind: LocationKind,
     pub owner_household_ids: Vec<BuildingId>,
     pub storage_fixture_id: Option<FixtureId>,
     pub cash: i32,
@@ -317,6 +452,38 @@ impl EconomicTaskKind {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum EconomicTaskClass {
+    HouseholdFoodPurchase,
+    FoodSupplyTransport,
+    FoodProduction,
+    EssentialProduction,
+    GeneralCommerce,
+    SurplusSale,
+    PaymentCollection,
+}
+
+impl EconomicTaskClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HouseholdFoodPurchase => "household_food_purchase",
+            Self::FoodSupplyTransport => "food_supply_transport",
+            Self::FoodProduction => "food_production",
+            Self::EssentialProduction => "essential_production",
+            Self::GeneralCommerce => "general_commerce",
+            Self::SurplusSale => "surplus_sale",
+            Self::PaymentCollection => "payment_collection",
+        }
+    }
+
+    pub fn is_food_support(self) -> bool {
+        matches!(
+            self,
+            Self::HouseholdFoodPurchase | Self::FoodSupplyTransport
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum EconomicTaskPhase {
     AwaitingPickup,
     InTransit,
@@ -329,17 +496,37 @@ pub enum EconomicTaskPhase {
 pub struct EconomicTask {
     pub id: EconomicTaskId,
     pub kind: EconomicTaskKind,
+    #[serde(default = "default_economic_task_class")]
+    pub class: EconomicTaskClass,
+    #[serde(default = "default_task_priority")]
+    pub priority: u8,
+    #[serde(default = "default_lock_until_complete")]
+    pub lock_until_complete: bool,
+    #[serde(default)]
+    pub creates_household_reserve: bool,
     pub actor_household_id: BuildingId,
     pub assigned_agent_id: Option<u64>,
     pub source: EconomicNode,
     pub destination: EconomicNode,
-    pub resource: Option<ResourceKind>,
+    pub resource_id: Option<String>,
     pub amount: i32,
     pub unit_price: i32,
     pub total_price: i32,
     pub description: String,
     pub phase: EconomicTaskPhase,
     pub related_establishment_id: Option<EstablishmentId>,
+}
+
+fn default_economic_task_class() -> EconomicTaskClass {
+    EconomicTaskClass::GeneralCommerce
+}
+
+fn default_task_priority() -> u8 {
+    50
+}
+
+fn default_lock_until_complete() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -396,6 +583,16 @@ pub struct AgentProfile {
     pub long_term_desires: Vec<String>,
     pub moral_tolerances: Vec<String>,
     pub social_style: String,
+    #[serde(default)]
+    pub trauma_traits: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TraumaTracker {
+    pub consecutive_starving_ticks: u32,
+    pub consecutive_stressed_ticks: u32,
+    pub consecutive_wealthy_ticks: u32,
+    pub violence_witnessed_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -407,6 +604,23 @@ pub struct AgentState {
     pub stress: i32,
     pub current_focus: String,
     pub active_goals: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum AgentLifeStatus {
+    #[default]
+    Vivo,
+    Incapacitado,
+    Morto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct InjuryState {
+    pub light_wounds: u8,
+    pub severe_wounds: u8,
+    pub pain: i32,
+    pub bleeding: i32,
+    pub recovery_ticks: u32,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -457,6 +671,20 @@ pub enum IntentKind {
     Transportar,
     Vender,
     ReceberPagamento,
+    Agredir,
+    Combater,
+    Roubar,
+    Furtar,
+    Fugir,
+    Acusar,
+    Investigar,
+    Prender,
+    Punir,
+    Apoiar,
+    Opor,
+    Pressionar,
+    PedirApoio,
+    Mediar,
 }
 
 impl IntentKind {
@@ -472,6 +700,20 @@ impl IntentKind {
             Self::Transportar => "transportar",
             Self::Vender => "vender",
             Self::ReceberPagamento => "receber_pagamento",
+            Self::Agredir => "agredir",
+            Self::Combater => "combater",
+            Self::Roubar => "roubar",
+            Self::Furtar => "furtar",
+            Self::Fugir => "fugir",
+            Self::Acusar => "acusar",
+            Self::Investigar => "investigar",
+            Self::Prender => "prender",
+            Self::Punir => "punir",
+            Self::Apoiar => "apoiar",
+            Self::Opor => "opor",
+            Self::Pressionar => "pressionar",
+            Self::PedirApoio => "pedir_apoio",
+            Self::Mediar => "mediar",
         }
     }
 }
@@ -497,6 +739,14 @@ impl SocialMove {
             Self::Favor => "ajudar",
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SimplifiedTask {
+    pub kind: IntentKind,
+    pub target_semantic: Option<String>,
+    pub target_agent: Option<u64>,
+    pub social_move: Option<SocialMove>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -540,6 +790,214 @@ pub enum ConversationOutcome {
     CriticalNeed,
     PhysicalConflict,
     ProviderTimeout,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CombatStatus {
+    Active,
+    Ended,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CombatOutcome {
+    Ongoing,
+    Fled,
+    Incapacitation,
+    Death,
+    DistanceBreak,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CombatState {
+    pub id: CombatId,
+    pub participants: [u64; 2],
+    pub aggressor_id: u64,
+    pub started_at_tick: u64,
+    pub round: u32,
+    pub status: CombatStatus,
+    pub outcome: CombatOutcome,
+    pub end_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CrimeType {
+    Assault,
+    Theft,
+    Robbery,
+    Homicide,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CrimeCaseStatus {
+    Open,
+    Investigating,
+    Proven,
+    Arrested,
+    Punished,
+    Closed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SentenceKind {
+    None,
+    Restitution,
+    Fine,
+    Detention,
+    Corporal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrimeCase {
+    pub id: CrimeCaseId,
+    pub crime_type: CrimeType,
+    pub victim_id: Option<u64>,
+    pub suspect_id: Option<u64>,
+    pub witnesses: Vec<u64>,
+    pub evidence: Vec<String>,
+    pub severity: u8,
+    pub confidence: u8,
+    pub status: CrimeCaseStatus,
+    pub sentence: SentenceKind,
+    pub opened_day: u32,
+    pub opened_tick: u32,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum PolicyDomain {
+    Tax,
+    Justice,
+    Rationing,
+}
+
+impl PolicyDomain {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tax => "imposto",
+            Self::Justice => "justica",
+            Self::Rationing => "racionamento",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum JusticeSeverity {
+    Lenient,
+    #[default]
+    Normal,
+    Severe,
+}
+
+impl JusticeSeverity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lenient => "branda",
+            Self::Normal => "normal",
+            Self::Severe => "severa",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum RationingPolicy {
+    HouseholdFirst,
+    ProducersFirst,
+    CivicFirst,
+    #[default]
+    Balanced,
+}
+
+impl RationingPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HouseholdFirst => "lares",
+            Self::ProducersFirst => "produtores",
+            Self::CivicFirst => "civico",
+            Self::Balanced => "equilibrado",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LocalNorms {
+    pub justice_severity: JusticeSeverity,
+    pub rationing_policy: RationingPolicy,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PoliticalIssueStatus {
+    Open,
+    Passed,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoliticalPressure {
+    pub actor_id: u64,
+    pub household_id: Option<BuildingId>,
+    pub agenda_tag: String,
+    pub domain: PolicyDomain,
+    pub proposed_value: String,
+    pub intensity: i32,
+    pub reason: String,
+    pub day: u32,
+    pub tick: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoliticalIssue {
+    pub id: PoliticalIssueId,
+    pub agenda_tag: String,
+    pub domain: PolicyDomain,
+    pub proposed_value: String,
+    pub summary: String,
+    pub proposed_by: Option<u64>,
+    pub support_score: i32,
+    pub opposition_score: i32,
+    pub supporter_ids: Vec<u64>,
+    pub opposer_ids: Vec<u64>,
+    pub status: PoliticalIssueStatus,
+    pub opened_day: u32,
+    pub resolved_day: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum FactionObjective {
+    FoodRiot {
+        barn_building_id: BuildingId,
+        target_grains: i32,
+        grains_stolen: i32,
+    },
+    TaxBoycott {
+        day_activated: u32,
+    },
+    DeposeLeader {
+        leader_agent_id: u64,
+    },
+    VigilanteJustice {
+        suspect_agent_id: u64,
+        crime_case_id: u64,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoliticalFaction {
+    pub id: PoliticalFactionId,
+    pub name: String,
+    pub agenda_tag: String,
+    pub domain: PolicyDomain,
+    pub proposed_value: String,
+    pub founder_id: u64,
+    pub member_ids: Vec<u64>,
+    pub influence: i32,
+    pub support_issue_ids: Vec<PoliticalIssueId>,
+    pub opposition_issue_ids: Vec<PoliticalIssueId>,
+    #[serde(default)]
+    pub objective: Option<FactionObjective>,
+    #[serde(default)]
+    pub is_action_active: bool,
+    #[serde(default)]
+    pub rage: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -599,6 +1057,19 @@ pub enum EventKind {
     ConversationStarted,
     ConversationTurn,
     ConversationEnded,
+    Violence,
+    Theft,
+    CrimeReported,
+    Investigation,
+    Arrest,
+    Punishment,
+    Death,
+    PoliticalPressure,
+    FactionShift,
+    PolicyProposal,
+    PoliticalSupport,
+    NormChanged,
+    InstitutionalDispute,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -616,12 +1087,14 @@ pub struct WorldEvent {
 pub struct AgentSnapshot {
     pub id: u64,
     pub name: String,
-    pub role: Role,
+    pub role_id: String,
     pub home_building_id: Option<BuildingId>,
     pub work_building_id: Option<BuildingId>,
     pub home_bed: Option<TileCoord>,
     pub profile: AgentProfile,
     pub state: AgentState,
+    pub life_status: AgentLifeStatus,
+    pub injury: InjuryState,
     pub relations: HashMap<u64, AgentRelation>,
     pub memories: Vec<AgentMemory>,
     pub inventory: Vec<ResourceStack>,
@@ -636,6 +1109,8 @@ pub struct AgentSnapshot {
     pub last_social_act: Option<String>,
     pub social_cooldown_until: u64,
     pub last_intent: Option<AgentIntent>,
+    #[serde(default)]
+    pub task_queue: Vec<SimplifiedTask>,
     pub last_thought: String,
     pub llm_cooldown_until: u64,
     pub llm_calls: u64,
@@ -661,11 +1136,14 @@ pub struct AgentSnapshot {
     pub last_deliberation_health: i32,
     #[serde(default)]
     pub last_deliberation_stress: i32,
+    #[serde(default)]
+    pub trauma_tracker: TraumaTracker,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimulationSnapshot {
     pub schema_version: u32,
+    pub catalog_version: u32,
     pub village_name: String,
     pub day: u32,
     pub tick_of_day: u32,
@@ -674,14 +1152,26 @@ pub struct SimulationSnapshot {
     pub next_memory_id: u64,
     pub next_conversation_id: ConversationId,
     pub next_economic_task_id: EconomicTaskId,
+    pub next_combat_id: CombatId,
+    pub next_crime_case_id: CrimeCaseId,
+    pub next_political_faction_id: PoliticalFactionId,
+    pub next_political_issue_id: PoliticalIssueId,
     pub agents: Vec<AgentSnapshot>,
     pub conversations: Vec<ConversationState>,
+    pub combats: Vec<CombatState>,
+    pub crime_cases: Vec<CrimeCase>,
+    pub political_factions: Vec<PoliticalFaction>,
+    pub political_issues: Vec<PoliticalIssue>,
+    pub political_pressures: Vec<PoliticalPressure>,
+    pub local_norms: LocalNorms,
     pub households: Vec<HouseholdEconomy>,
     pub establishments: Vec<EstablishmentEconomy>,
     pub village_economy: VillageEconomy,
     pub economic_tasks: Vec<EconomicTask>,
     pub spatial: SpatialSnapshot,
     pub events: Vec<WorldEvent>,
+    #[serde(default)]
+    pub crops: HashMap<TileCoord, CropState>,
 }
 
 fn default_carrying_capacity() -> i32 {

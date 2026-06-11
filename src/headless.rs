@@ -1,8 +1,9 @@
 use crate::llm_adapter::LlmAdapter;
 use crate::persistence::Persistence;
-use crate::sim_core::{AgentView, Simulation};
+use crate::sim_core::{AgentView, DEFAULT_TICKS_PER_SECOND, Simulation, tick_interval_ms};
 use anyhow::Result;
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeadlessConfig {
@@ -12,6 +13,7 @@ pub struct HeadlessConfig {
     pub summary_every_ticks: u64,
     pub event_tail: usize,
     pub render_map: bool,
+    pub ticks_per_second: u32,
 }
 
 impl Default for HeadlessConfig {
@@ -23,6 +25,7 @@ impl Default for HeadlessConfig {
             summary_every_ticks: 24,
             event_tail: 8,
             render_map: false,
+            ticks_per_second: DEFAULT_TICKS_PER_SECOND,
         }
     }
 }
@@ -46,7 +49,7 @@ pub fn run_headless(
     let mut ran_ticks = 0_u64;
 
     println!(
-        "[headless] iniciado | provider={} | resumo={} | limite_ticks={} | limite_dias={}",
+        "[headless] iniciado | provider={} | resumo={} | limite_ticks={} | limite_dias={} | ticks_por_segundo={}",
         provider_name,
         sim.summary(),
         config
@@ -56,11 +59,13 @@ pub fn run_headless(
         config
             .max_days
             .map(|value| value.to_string())
-            .unwrap_or_else(|| "nenhum".to_string())
+            .unwrap_or_else(|| "nenhum".to_string()),
+        config.ticks_per_second
     );
     print_report(&mut sim, &config, "estado_inicial");
 
     while !should_stop(&sim, ran_ticks, stop_total_ticks, stop_day) {
+        let tick_started = Instant::now();
         sim.tick(llm.as_ref())?;
         ran_ticks += 1;
 
@@ -77,6 +82,12 @@ pub fn run_headless(
 
         if config.summary_every_ticks > 0 && ran_ticks % config.summary_every_ticks == 0 {
             print_report(&mut sim, &config, "progresso");
+        }
+
+        let target_tick_duration = Duration::from_millis(tick_interval_ms(config.ticks_per_second));
+        let elapsed = tick_started.elapsed();
+        if elapsed < target_tick_duration {
+            std::thread::sleep(target_tick_duration - elapsed);
         }
     }
 
@@ -133,6 +144,12 @@ fn print_report(sim: &mut Simulation, config: &HeadlessConfig, label: &str) {
     for line in sim.economy_overview() {
         println!("[headless] economia | {}", line);
     }
+    for line in sim.legal_overview() {
+        println!("[headless] justica | {}", line);
+    }
+    for line in sim.politics_overview() {
+        println!("[headless] politica | {}", line);
+    }
 
     for view in views.iter().take(6) {
         let pantry = if view.household_pantry.is_empty() {
@@ -140,27 +157,38 @@ fn print_report(sim: &mut Simulation, config: &HeadlessConfig, label: &str) {
         } else {
             view.household_pantry
                 .iter()
-                .map(|stack| format!("{}x{}", stack.kind.as_str(), stack.amount))
+                .map(|stack| format!("{}x{}", stack.resource_id, stack.amount))
                 .collect::<Vec<_>>()
                 .join(",")
         };
         println!(
-            "[headless] agente | {} | papel={} | pos=({}, {}) | area={} | destino={} | intencao={} | caixa_lar={} | imposto_devendo={} | caixa_publico={} | pantry={} | salario_pendente={} | tarefa={} | pensamento={} ",
+            "[headless] agente | {} | papel={} | vida={:?} | ferimentos=leves:{} graves:{} dor:{} sangramento:{} | pos=({}, {}) | area={} | destino={} | intencao={} | politica={} | queixas={} | caixa_lar={} | imposto_devendo={} | caixa_publico={} | pantry={} | salario_pendente={} | tarefa={} | pensamento={} ",
             view.name,
-            view.role.as_str(),
+            view.role_name,
+            view.life_status,
+            view.injury.light_wounds,
+            view.injury.severe_wounds,
+            view.injury.pain,
+            view.injury.bleeding,
             view.position.x,
             view.position.y,
             view.area,
-            view
-                .destination_label
+            view.destination_label
                 .clone()
-                .or_else(|| view.destination.map(|coord| format!("({}, {})", coord.x, coord.y)))
+                .or_else(|| view
+                    .destination
+                    .map(|coord| format!("({}, {})", coord.x, coord.y)))
                 .unwrap_or_else(|| "-".to_string()),
-            view
-                .last_intent
+            view.last_intent
                 .as_ref()
                 .map(|intent| intent.kind.as_str().to_string())
                 .unwrap_or_else(|| "-".to_string()),
+            view.political_position,
+            if view.political_grievances.is_empty() {
+                "-".to_string()
+            } else {
+                view.political_grievances.join("; ")
+            },
             view.household_treasury,
             view.household_tax_arrears,
             view.public_treasury,
@@ -198,7 +226,7 @@ fn print_report(sim: &mut Simulation, config: &HeadlessConfig, label: &str) {
 fn summarize_roles(views: &[AgentView]) -> Vec<String> {
     let mut counts = BTreeMap::new();
     for view in views {
-        *counts.entry(view.role.as_str()).or_insert(0_usize) += 1;
+        *counts.entry(view.role_name.as_str()).or_insert(0_usize) += 1;
     }
     counts
         .into_iter()
@@ -239,7 +267,7 @@ fn truncate_for_log(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{HeadlessConfig, should_stop};
-    use crate::sim_core::{Simulation, SimulationConfig};
+    use crate::sim_core::{DEFAULT_TICKS_PER_SECOND, Simulation, SimulationConfig};
 
     #[test]
     fn headless_defaults_are_safe_for_batch_runs() {
@@ -250,6 +278,7 @@ mod tests {
         assert_eq!(config.summary_every_ticks, 24);
         assert_eq!(config.event_tail, 8);
         assert!(!config.render_map);
+        assert_eq!(config.ticks_per_second, DEFAULT_TICKS_PER_SECOND);
     }
 
     #[test]

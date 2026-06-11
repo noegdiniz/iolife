@@ -157,7 +157,9 @@ O mundo ECS armazena componentes separados para:
 `Simulation::seeded()` cria a primeira vila com:
 
 - nome padrao `Santa Bruma`;
-- 24 ticks por dia;
+- 1 tick representa 1 minuto simulado;
+- 1440 ticks por dia por default;
+- ritmo real default de 1 tick por segundo;
 - ate 12 agentes por default;
 - locais semanticos como praca, campo, forja, padaria, taverna, posto da guarda e solar;
 - aldeoes seedados com papeis sociais distintos;
@@ -421,9 +423,10 @@ Flags principais:
 - `--save-every N`: grava checkpoint intervalar a cada `N` ticks; `0` desativa esse save intervalar;
 - `--summary-every N`: imprime um relatorio a cada `N` ticks;
 - `--event-tail N`: define quantos eventos recentes entram em cada relatorio;
+- `--ticks-per-second N`: define quantos ticks simulados rodam por segundo real no modo headless;
 - `--map`: inclui o mapa ASCII completo nos relatorios;
 - `--db PATH`: sobrescreve `VILLAGE_DB_PATH`;
-- `--seed`, `--agents`, `--ticks-per-day`, `--grid-width`, `--grid-height`, `--village-name`: configuram a criacao de um mundo novo.
+- `--seed`, `--agents`, `--grid-width`, `--grid-height`, `--village-name`: configuram a criacao de um mundo novo.
 
 ### Execucao com adaptador OpenAI-compatible
 
