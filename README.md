@@ -1,447 +1,373 @@
 # Medieval Village LLM
 
-Sandbox de terminal em Rust para simular uma vila medieval persistente com agentes orientados por LLM. O projeto combina um nucleo deterministico de simulacao com uma camada cognitiva que produz intencoes, reflexoes e trocas sociais em JSON estruturado.
+Sandbox de terminal em Rust para simular vilas medievais persistentes com agentes orientados por LLM. O projeto combina um nucleo deterministico de simulacao (grid espacial, fisica, tempo, recursos, economia) com uma camada cognitiva que produz decisoes, reflexoes e trocas sociais em JSON estruturado.
 
-O foco atual do V1 e profundidade psicologica e social, nao fidelidade economica total. A vila funciona como uma pequena sociedade emergente com rotinas, necessidades, memorias, relacoes, conflitos e reconciliacoes.
+O foco do V1 e profundidade psicologica e social com emergencia de comportamentos coletivos: economia de subsistencia, crimes, investigacoes, punicoes, faccoes politicas e disputas por normas locais.
 
 ## Objetivo do projeto
 
 Este projeto existe para testar uma arquitetura em que:
 
 - o mundo, o tempo, os recursos e a integridade do estado sao controlados por codigo deterministico;
-- as decisoes subjetivas dos agentes sao delegadas ao LLM;
-- o estado subjetivo de cada aldeao persiste entre execucoes;
-- a observacao do sistema e feita por uma TUI detalhada em vez de apenas logs brutos.
+- as decisoes subjetivas dos agentes sao delegadas ao LLM (ou a um adaptador mock heuristico);
+- o estado subjetivo de cada aldeao persiste entre execucoes via SQLite;
+- a observacao do sistema e feita por uma TUI detalhada ou por relatorios headless.
 
-Na pratica, isso significa que o motor nunca "escolhe" psicologicamente o que um agente quer fazer. Ele apenas:
+Na pratica, o motor nunca "escolhe" psicologicamente o que um agente quer fazer. Ele apenas:
 
-- monta o contexto relevante do agente;
+- monta o contexto cognitivo completo do agente (fisiologia, perfil, memorias, relacoes, economia, politica, legal);
 - chama o adaptador cognitivo;
-- valida a resposta;
+- valida e normaliza a resposta;
 - aplica efeitos no mundo;
 - registra memorias, relacoes e eventos.
 
-## Estado atual do V1
-
-O codigo ja implementa:
-
-- binario Rust com modulos separados para mundo, cognicao, persistencia, adaptador LLM e TUI;
-- nucleo ECS com agentes, locais, estoques, memorias, relacoes e timeline de eventos;
-- persistencia em SQLite com checkpoints completos;
-- retomada automatica do ultimo estado salvo;
-- TUI navegavel com visao geral, lista de agentes, detalhe do agente e timeline recente;
-- adaptador OpenAI-compatible e fallback para um adaptador `mock`;
-- testes de parsing do JSON do LLM, recuperacao de memoria, persistencia e simulacao de uma semana.
-
-Ainda nao esta implementado neste corte:
-
-- servico continuo de backend;
-- API externa JSON para outros clientes;
-- economia complexa com precos dinamicos;
-- politica institucional, faccoes ou guerra;
-- cadeia de dialogo longa com transcricao literal completa;
-- sumarizacao sofisticada de memoria de longo prazo.
-
 ## Arquitetura por modulo
 
-### `src/world_model.rs`
+### `src/world_model.rs` — Tipos de dominio
 
-Define os tipos serializaveis que representam o contrato do dominio.
+Define todos os tipos serializaveis que formam o contrato do dominio. Principais estruturas:
 
-Principais estruturas:
+- `TileCoord`, `TileKind`: grid espacial tile-based (grass, road, floor, wall, door, field, forest, rock, water).
+- `AgentProfile`: tracos, valores, medos, desejos de longo prazo, tolerancias morais, estilo social.
+- `AgentState`: estado fisiologico e emocional (hunger, energy, health, stress, mood, 0–100).
+- `AgentLifeStatus`: Vivo, Incapacitado, Morto.
+- `InjuryState`: ferimentos leves/graves, dor, sangramento, ticks de recuperacao.
+- `AgentMemory`: memoria episodica com peso emocional, tags, entidades relacionadas, dia e tick.
+- `AgentRelation`: vinculo bilateral entre dois agentes (trust, friendship, resentment, attraction, moral_debt, reputation).
+- `AgentIntent`: decisao estruturada produzida pelo LLM com ate 30+ tipos de acao.
+- `ConversationState` / `ConversationTurn`: dialogo multi-turno com ate 6 turnos por conversa.
+- `CombatState`: rounds de combate, desfechos (Fled, Incapacitation, Death, DistanceBreak).
+- `CrimeCase`: casos criminais com pipeline Open → Investigating → Proven → Arrested → Punished → Closed.
+- `PoliticalFaction` / `PoliticalIssue` / `PoliticalPressure`: faccoes com agendas, issues com votacao, pressoes por mudanca de normas.
+- `EconomyCatalog`, `HouseholdEconomy`, `EstablishmentEconomy`, `EconomicTask`: economia com recursos, receitas, precos, tarefas economicas multi-etapa.
+- `FixtureSpec`, `BuildingSpec`, `RoomSpec`: mobiliario e edificios com interiores.
+- `SimulationSnapshot`: snapshot completo serializavel com grid, agentes, edificios, economias, crimes, faccoes.
 
-- `Role`: papeis sociais dos aldeoes.
-- `LocationKind` e `LocationSpec`: tipagem de locais da vila.
-- `AgentProfile`: tracos, valores, medos, desejos e estilo social.
-- `AgentState`: estado fisiologico e emocional atual.
-- `AgentMemory`: memoria episodica ou subjetiva persistente.
-- `AgentRelation`: vinculo entre dois agentes.
-- `AgentIntent`: decisao estruturada produzida pelo LLM.
-- `SocialScene` e `RelationDelta`: resultado estruturado de interacoes sociais.
-- `WorldEvent`: evento resumido da timeline do mundo.
-- `SimulationSnapshot`: snapshot completo serializavel da simulacao.
+### `src/agent_mind.rs` — Camada cognitiva
 
-Esses tipos sao usados tanto pelo motor quanto pela persistencia e pela camada de LLM.
+Define os payloads enviados ao LLM e a logica auxiliar de cognicao:
 
-### `src/agent_mind.rs`
+- `DecisionInput`: contexto completo para planejamento de acoes (fisiologia, perfil, memorias, relacoes, contexto psicologico, economico, legal e politico).
+- `ConversationTurnInput`: contexto para geracao de turnos de dialogo.
+- `ThinkMakerInput` / `ThinkMakerOutput`: payload para geracao de pensamentos/reflexoes.
+- `retrieve_relevant_memories()`: ranking de memorias por peso emocional, sobreposicao de tags e recencia.
+- `parse_decision_json()`: parsing robusto de JSON do LLM com normalizacao de markdown fences, coercao de tipos, validacao de campos.
+- `parse_conversation_turn_json_with_notes()`: parsing de turnos de conversa com normalizacao de texto em portugues.
+- `validate_intent()`: sanity-check da saida do LLM contra restricoes do mundo.
 
-Define os payloads enviados ao LLM e a logica auxiliar de cognicao.
+### `src/llm_adapter.rs` — Interface LLM
 
-Responsabilidades:
+Contem o trait `LlmAdapter` com tres metodos:
 
-- modelar o contexto cognitivo (`DecisionInput`, `SocialExchangeInput`);
-- recuperar memorias relevantes por peso emocional, tags e contexto recente;
-- validar e normalizar a intencao retornada pelo modelo;
-- fazer o parse da resposta JSON.
+- `plan_actions()`: planejamento de tarefas (action planner).
+- `generate_thoughts()`: geracao de reflexoes, emocao dominante, atualizacao de crencas (think maker).
+- `generate_conversation_turn()`: geracao de fala, movimento social e deltas de relacao.
 
-O metodo `retrieve_relevant_memories` faz um ranking simples que mistura:
-
-- peso emocional da memoria;
-- intersecao entre tags e foco/metas/eventos recentes;
-- recencia da memoria.
-
-Isso reduz o contexto enviado ao modelo e evita mandar o historico inteiro do agente em toda decisao.
-
-### `src/llm_adapter.rs`
-
-Contem a interface cognitiva e duas implementacoes.
-
-#### `LlmAdapter`
-
-E o contrato principal da camada de IA:
-
-- `provider_name()`
-- `evaluate_and_decide()`
-- `generate_social_scene()`
+Duas implementacoes:
 
 #### `MockLlmAdapter`
 
-Implementacao local sem rede, usada quando nao ha credenciais configuradas. Ela nao e um "dummy" vazio: ja produz comportamento coerente o bastante para os testes e a TUI.
+Adaptador heuristico local (sem rede) que produz comportamento coerente com regras deterministicas:
 
-Heuristicas principais:
-
-- muita fome prioriza `Eat`;
-- pouca energia prioriza `Rest`;
-- muito stress prioriza `Reflect`;
-- relacoes com ressentimento alto podem virar `Offend`;
-- relacoes positivas podem virar `Favor`;
-- entre os ticks 6 e 14 o padrao dominante e `Work`;
-- entre os ticks 16 e 21 o agente tende a socializar;
-- se estiver sozinho, pode `Wander`.
-
-Alem da intencao, ele tambem gera:
-
-- reflexao curta;
-- movimento social (`Chat`, `Favor`, `Offend` etc.);
-- emocao dominante;
-- atualizacao textual de crenca/meta.
+- hunger > 65 → Eat; energy < 25 → Rest; stress > 70 → Reflect;
+- horario de trabalho (ticks 360–1080 / 06:00–18:00) → Work;
+- final de tarde (ticks 1080–1260) → Socialize;
+- salario pendente → CollectPayment;
+- despensa vazia e fome → compra automatica de comida;
+- relacoes com ressentimento alto → Assault, Steal ou movimento social agressivo;
+- relacoes positivas → Chat, Favor, Support;
+- sozinho → Wander.
 
 #### `OpenAiCompatibleAdapter`
 
-Implementa chamadas HTTP sincronas para uma API compativel com o formato de `chat/completions`.
+Chamadas HTTP sincronas para API compativel com `chat/completions`. Configurado via variaveis de ambiente:
 
-Entradas:
+- `OPENAI_API_KEY`
+- `OPENAI_MODEL` (ex: `gpt-4.1-mini`)
+- `OPENAI_BASE_URL` (ex: `https://api.openai.com/v1/chat/completions`)
 
-- prompt de sistema;
-- payload JSON com o contexto do agente.
+Inclui retry com backoff para erros transientes (timeout, 429, 5xx). Tres prompts de sistema distintos para action planner, think maker e conversation turn. Se as credenciais nao estiverem configuradas, cai automaticamente no `MockLlmAdapter`.
 
-Saida esperada:
+### `src/sim_core.rs` — Motor da simulacao (~10.400 linhas)
 
-- JSON puro compativel com `DecisionEnvelope` ou `SocialScene`.
+O coracao do projeto. Implementa:
 
-Se `OPENAI_API_KEY` nao estiver definida ou a inicializacao do adaptador falhar, o projeto cai automaticamente no `MockLlmAdapter`.
+#### Sistema ECS
 
-### `src/sim_core.rs`
+ECS baseado em `bevy_ecs` com 15+ componentes: `AgentCore`, `ProfileComponent`, `StateComponent`, `RelationComponent`, `MemoryComponent`, `InventoryComponent`, `PositionComponent`, `PathComponent`, `IntentComponent`, `ThoughtComponent`, `TaskQueueComponent`, `ConversationStatusComponent`, `EconomicActivityComponent`, `TraumaTrackerComponent`.
 
-E o coracao da simulacao.
+#### Grid espacial e pathfinding
 
-#### Componentes ECS
+- Grid padrao de 150×100 tiles com tipos: grass, road, floor, wall, door, field, forest, rock.
+- Pathfinding BFS considerando tiles caminhaveis.
+- Agentes seguem caminhos, respeitam tiles ocupados e re-roteiam em colisoes.
 
-O mundo ECS armazena componentes separados para:
+#### Ciclo de tick
 
-- identidade do agente (`AgentCore`);
-- perfil (`ProfileComponent`);
-- estado atual (`StateComponent`);
-- relacoes (`RelationComponent`);
-- memorias (`MemoryComponent`);
-- inventario (`InventoryComponent`);
-- posicao/local (`LocationRef`);
-- ultima intencao (`IntentComponent`);
-- ultimo pensamento/reflexao (`ThoughtComponent`);
-- orcamento/cooldown de decisao (`DecisionBudgetComponent`);
-- definicao do local (`LocationComponent`);
-- estoque do local (`StockpileComponent`).
+Cada tick (1 minuto simulado, 1440 por dia) executa:
 
-#### Configuracao inicial
+1. Avanca tempo global e degrada necessidades fisiologicas (hunger, energy, stress, health).
+2. Processa fila de tarefas assincronas pendentes (acoes em andamento como viajar, produzir).
+3. Colhe tarefas economicas completadas (producao, coleta de materia-prima).
+4. Avanca conversas ativas (ate 6 turnos, processamento paralelo com `rayon`).
+5. Dispara novas decisoes para agentes com budget cognitivo disponivel (chamadas LLM em background threads com `rayon`).
+6. Coleta decisoes assincronas ja concluidas e as aplica ao mundo.
+7. Resolve politica diaria (issues, faccoes, mudancas de normas).
+8. Coleta impostos diarios (1 coin por household/dia).
+9. Salva checkpoint se em fronteira de dia ou intervalo configurado.
 
-`Simulation::seeded()` cria a primeira vila com:
+#### Acoes implementadas (30+)
 
-- nome padrao `Santa Bruma`;
-- 1 tick representa 1 minuto simulado;
-- 1440 ticks por dia por default;
-- ritmo real default de 1 tick por segundo;
-- ate 12 agentes por default;
-- locais semanticos como praca, campo, forja, padaria, taverna, posto da guarda e solar;
-- aldeoes seedados com papeis sociais distintos;
-- memorias iniciais, relacoes iniciais e pequenos estoques.
+| Categoria | Acoes |
+|-----------|-------|
+| Basicas | Work, Rest, Eat, Reflect, Wander |
+| Sociais | Socialize, Chat, Favor, Offend, Support, Oppose, RequestSupport, Mediate |
+| Economicas | Produce, Buy, Sell, Transport, CollectPayment, ReceivePayment |
+| Combate | Assault, Combat, Flee |
+| Crime | Steal, Loot |
+| Legais | Accuse, Investigate, Arrest, Punish |
+| Politicas | Pressure |
 
-#### Loop de tick
+#### Combate
 
-Cada chamada de `Simulation::tick()` executa este fluxo:
+- Sistema de rounds com estados Active/Ended.
+- Desfechos: Fled (fuga), Incapacitation (incapacitacao), Death (morte), DistanceBreak (quebra por distancia).
+- Ferimentos leves e graves, dor, sangramento e recuperacao ao longo do tempo.
+- Morte por health = 0 (fome extrema ou ferimentos graves).
 
-1. avanca tempo global e tempo do dia;
-2. aplica degradacao de necessidades basicas;
-3. coleta o contexto de cada agente;
-4. filtra eventos recentes relevantes;
-5. recupera memorias relevantes;
-6. monta `DecisionInput`;
-7. chama o adaptador LLM;
-8. valida a intencao retornada;
-9. agenda a acao;
-10. aplica a acao ao mundo;
-11. registra evento e memoria resultante.
+#### Sistema legal/criminal
 
-#### Degradacao fisiologica
+- Tipos de crime: Assault, Theft, Robbery, Homicide.
+- Pipeline: Open → Investigating → Proven → Arrested → Punished → Closed.
+- Testemunhas: agentes proximos viram testemunhas e geram crime cases automaticamente.
+- Sentencas: Restitution (restituicao), Fine (multa), Detention (detencao), Corporal (castigo corporal).
+- Guardas e Lideres executam Investigate, Arrest e Punish.
 
-Por tick, o motor aumenta ou reduz:
+#### Economia
 
-- `hunger`;
-- `energy`;
-- `stress`;
-- `health` em situacoes extremas.
+- Catalogo economico unificado com recursos, affordances, papeis, estabelecimentos, receitas de producao e receitas de construcao.
+- Recursos incluem comida, combustivel, ferramenta/capital, moeda e materiais de construcao como madeira e pedra.
+- Estabelecimentos podem ter multiplas receitas: lenhal produz lenha/madeira e pedreira produz metal bruto/pedra.
+- Economia domestica (HouseholdEconomy): treasury, pantry, reserved_food, tax_arrears.
+- Economia de estabelecimento (EstablishmentEconomy): cash, stock, precos, salarios.
+- Mercado externo com precos de compra/venda por recurso.
+- Tarefas economicas multi-etapa: AwaitingPickup → InTransit → AwaitingPayment → Completed/Failed.
+- Coleta automatica de salario, compra de comida em emergencia, racionamento.
+- Producao de materia-prima: fazendas produzem grains, woodlots produzem firewood, quarries produzem raw metal.
+- Construcao urbana emergente: pressoes sistemicas abrem projetos, materiais sao entregues fisicamente e o predio concluido entra no grid.
+- Colheitas: campos tem ciclo plant → growing → ready, colheita produz grains.
 
-Esses valores afetam diretamente o tipo de intencao que o agente tende a produzir, especialmente no adaptador `mock`.
+#### Sistema politico
 
-#### Aplicacao de acoes
-
-As acoes implementadas hoje sao:
-
-- `Work`
-- `Rest`
-- `Eat`
-- `Reflect`
-- `Wander`
-- `Socialize`
-
-Exemplos de efeito:
-
-- `Work` altera energia, fome e stress, alem de produzir recursos no local;
-- `Eat` tenta consumir comida do inventario do agente ou do estoque do local;
-- `Wander` move o agente entre locais;
-- `Socialize` chama uma segunda etapa cognitiva para produzir uma cena social resumida e um `RelationDelta`.
-
-#### Relacoes e eventos sociais
-
-As interacoes sociais modificam:
-
-- confianca;
-- amizade;
-- ressentimento;
-- atracao;
-- divida moral;
-- reputacao.
-
-Essas mudancas sao persistidas dentro de `RelationComponent` e depois serializadas no snapshot.
-
-O motor tambem grava `WorldEvent` para explicar o que ocorreu. Isso alimenta a timeline da TUI e o contexto cognitivo futuro.
-
-#### Memoria
-
-As memorias sao adicionadas quando:
-
-- o agente reflete;
-- trabalha;
-- vive uma impressao social;
-- sofre ou causa ofensa;
-- realiza outras acoes significativas.
-
-Cada memoria guarda:
-
-- dia e tick;
-- tipo;
-- resumo;
-- detalhes;
-- peso emocional;
-- entidades relacionadas;
-- tags.
-
-Existe truncamento simples do historico por agente para evitar crescimento ilimitado do vetor em memoria.
-
-### `src/persistence.rs`
-
-Responsavel por persistencia local em SQLite.
-
-#### Estrategia
-
-O projeto salva snapshots completos em JSON dentro da tabela `checkpoints` e tambem armazena copias indexadas de:
-
-- eventos;
-- memorias;
-- relacoes.
-
-Isso cria duas camadas:
-
-- uma forma direta de restaurar a simulacao;
-- uma base relacional minima para inspecao futura e queries offline.
-
-#### Tabelas
-
-- `checkpoints`
-- `events`
-- `memories`
-- `relations`
-
-#### Politicas de save
-
-O codigo salva:
-
-- ao fim de cada dia simulado com `kind = "daily"`;
-- ao encerrar a aplicacao com `kind = "shutdown"`.
-
-Na inicializacao, o binario tenta carregar o checkpoint mais recente ordenado por `total_ticks`.
-
-### `src/tui.rs`
-
-Interface terminal baseada em `ratatui` e `crossterm`.
-
-#### Paineis atuais
-
-- cabecalho com estado da simulacao, provedor LLM, velocidade e filtro;
-- lista de aldeoes;
-- detalhe do aldeao selecionado;
-- timeline recente com destaque para eventos ligados ao agente selecionado;
-- barra de ajuda/controles.
-
-#### Informacoes por agente
-
-O painel de detalhe mostra:
-
-- nome;
-- papel;
-- local atual;
-- foco atual;
-- humor, energia, saude, fome e stress;
-- ultima intencao;
-- ultimo pensamento;
-- relacao mais forte;
-- memorias recentes.
-
-#### Controles
-
-- `q`: sair
-- `espaco`: pausar/retomar
-- `n`: avancar um tick manualmente
-- `+`: acelerar
-- `-`: desacelerar
-- `seta para cima/baixo`: trocar agente selecionado
-- `f`: alternar filtro por papel
-
-## Fluxo de execucao do programa
-
-O binario em `src/main.rs` faz o bootstrap nesta ordem:
-
-1. le `VILLAGE_DB_PATH` ou usa `village_sim.sqlite`;
-2. abre/inicializa o banco SQLite;
-3. interpreta os argumentos de CLI e escolhe entre TUI ou headless;
-4. tenta carregar o ultimo snapshot persistido, a menos que `--new` tenha sido usado;
-5. se nao houver snapshot, cria uma vila seeded;
-6. escolhe o adaptador LLM com `adapter_from_env()`;
-7. entra na TUI ou no loop headless;
-8. salva um checkpoint de encerramento ao sair.
-
-## Modelo cognitivo em detalhe
-
-O comportamento do agente hoje e dividido em duas decisoes LLM-compativeis:
-
-### 1. Decisao principal
-
-Entrada:
-
-- identidade do agente;
-- papel;
-- dia e tick;
-- local atual;
-- estado emocional/fisiologico;
-- resumo do perfil;
-- agentes proximos;
-- memorias relevantes;
-- eventos recentes;
-- metas atuais;
-- orcamento residual.
-
-Saida esperada:
-
-- `reflection`
-- `intent.kind`
-- `intent.target_agent`
-- `intent.target_location`
-- `intent.justification`
-- `intent.dominant_emotion`
-- `intent.perceived_risk`
-- `intent.belief_updates`
-- `intent.priority`
-- `intent.social_move`
-
-### 2. Cena social
-
-Quando a acao e social, o motor pede uma segunda resposta estruturada com:
-
-- resumo textual da troca;
-- nota subjetiva do ator;
-- nota subjetiva do alvo;
-- delta de relacao.
-
-## Persistencia e retomada
-
-O projeto ja e persistente por design.
-
-Detalhes relevantes:
-
-- o arquivo padrao do banco e `village_sim.sqlite`;
-- o snapshot salvo inclui agentes, locais, relacoes, memorias, estoques, ultimo pensamento, ultima intencao e timeline;
-- ao reiniciar, a simulacao retoma do ultimo checkpoint encontrado;
-- o banco cresce com o tempo porque nao ha politica de compactacao ou retencao historica ainda.
+- Issues (pautas) com suporte/oposicao nos dominios: Tax, Justice, Rationing.
+- Faccoes politicas com agenda, influencia e objetivos emergentes (Food Riot, Tax Boycott, Depose Leader, Vigilante Justice).
+- Pressoes politicas: agentes aplicam pressao em issues.
+- Resolucao diaria: normas locais mudam quando issues tem suporte suficiente.
+- Normas locais: Justice severity (Lenient/Normal/Severe), Rationing policy (HouseholdFirst, ProducersFirst, CivicFirst, Balanced).
+- Chaos pressure: 0–100, afeta probabilidade de violencia, agressividade social, tolerancia a roubo.
+
+#### Sistema social
+
+- Relacoes bilaterais com 6 dimensoes: trust, friendship, resentment, attraction, moral_debt, reputation.
+- Conversas multi-turno (ate 6 turnos) com processamento paralelo.
+- Desfechos de conversa: MutualEnd, OneSidedExit, MaxTurns, DistanceBreak, BlockingBreak, CriticalNeed, PhysicalConflict, ProviderTimeout.
+- Deltas de relacao por turno (mudancas incrementais em cada dimensao).
+
+#### Fisiologia e saude
+
+- Necessidades: hunger, energy, health, stress, mood (escala 0–100).
+- Degradacao por tick: fome aumenta, energia diminui, stress varia conforme contexto.
+- Ferimentos: light_wounds, severe_wounds, pain, bleeding, recovery_ticks.
+- Trauma tracker: ticks consecutivos de fome/stress/riqueza, violencia testemunhada.
+- Morte: health = 0 por fome extrema ou ferimentos nao tratados.
+
+#### Processamento assincrono
+
+- Dispatch de decisoes LLM em threads background via `rayon`.
+- Workers de action planner e think maker separados.
+- Loop assincrono: junta resultados de threads conforme completam.
+- Faccao emergente com objetivo dinamico definido pela IA.
+
+### `src/world_gen.rs` — Geracao procedural de mundo
+
+Cria um `SimulationSnapshot` completo a partir de `SimulationConfig`:
+
+- Grid espacial com terreno (grass, forest, fields, rocks).
+- 1–3 vilas com estradas conectando centros (estilo Manhattan).
+- Edificios por vila: 4 casas, solar/manor, guard post, forge, taverna, bakery, woodlot, farm/celeiro, quarry.
+- Interiores com paredes, portas, mobilia (camas, mesas, estacoes de trabalho, armazenamento com estoque inicial).
+- Agentes (ate 21) com nomes medievais portugueses e perfis deterministicos (traits, values, fears, desires tematicos).
+- Relacoes iniciais: co-vilagers positivas, cross-village com desconfianca xenofobica.
+- Economias domesticas e de estabelecimento pre-configuradas.
+
+### `src/persistence.rs` — Persistencia SQLite
+
+- Tabela `checkpoints`: snapshots completos em JSON com `schema_version` (atual: 11).
+- Tabelas `events`, `memories`, `relations`: copias indexadas para queries offline.
+- Politicas de save: diario (`kind = "daily"`), encerramento (`kind = "shutdown"`), intervalar configuravel.
+- Load: carrega checkpoint mais recente por `total_ticks DESC`, a menos que `--new`.
+- Validacao de schema: rejeita snapshots legados sem grid espacial/economia/construcao atualizada.
+
+### `src/tui.rs` — Interface de terminal
+
+TUI com `ratatui` + `crossterm`, 3 paineis:
+
+- **Lista de agentes**: nome, papel, estado, fome, energia, humor, localizacao. Filtro por papel (`f`).
+- **Mapa ASCII**: viewport 44×22 centralizada no agente selecionado, mostrando edificios, estradas, agentes e colheitas.
+- **Detalhe do agente**: posicao, estado fisiologico, intencao, pensamento, inventario, economia domestica, filiacao politica, conversa ativa, relacoes, memorias recentes, ferimentos.
+- **Timeline de eventos**: eventos recentes com destaque para o agente selecionado.
+- **Barra de controles**: ajuda com todos os atalhos.
+
+Controles:
+- `q` — sair
+- `espaco` — pausar/retomar
+- `n` — avancar um tick
+- `+`/`-` — acelerar/desacelerar
+- `setas` — selecionar agente
+- `f` — alternar filtro por papel
+
+### `src/headless.rs` — Modo batch
+
+Execucao sem TUI para lotes, geracao de checkpoints e observacao via stdout:
+
+- Relatorios periodicos com estatisticas de agentes, visao geral economica, legal e politica.
+- Mapa ASCII completo opcional (`--map`).
+- Limites de ticks ou dias simulados.
+- Save intervalar configuravel.
+- Ritmo de simulacao configuravel (`--ticks-per-second`).
+
+### `src/economy_catalog.rs` — Catalogo economico padrao
+
+Define `default_economy_catalog()` com todos os dados de referencia:
+
+- 7 recursos, 7 papeis, 9 arquetipos espaciais, 8 tipos de estabelecimento.
+- 6 receitas de producao com inputs/outputs.
+- Precos de compra/venda no mercado externo.
+- Funcao `validate_catalog()` que verifica integridade referencial de todos os IDs.
+
+### `src/cli.rs` — Interface de linha de comando
+
+Parser de argumentos com suporte a:
+
+| Flag | Descricao |
+|------|-----------|
+| `--headless` | Modo batch sem TUI |
+| `--tui` | Forca modo interativo (padrao) |
+| `--new` | Ignora save e cria mundo novo |
+| `--db PATH` | Caminho do banco SQLite |
+| `--seed N` | Seed do gerador procedural |
+| `--agents N` / `--population N` | Quantidade de agentes iniciais |
+| `--grid-width N` / `--width N` | Largura do grid |
+| `--grid-height N` / `--height N` | Altura do grid |
+| `--num-villages N` | Quantidade de vilas |
+| `--village-name NOME` | Nome da vila principal |
+| `--ticks N` | Encerra apos N ticks (headless) |
+| `--days N` | Encerra apos N dias (headless) |
+| `--save-every N` | Checkpoint intervalar (0 desativa) |
+| `--summary-every N` | Relatorio a cada N ticks |
+| `--event-tail N` | Eventos recentes no relatorio |
+| `--ticks-per-second N` | Ritmo da simulacao headless |
+| `--map` | Inclui mapa ASCII nos relatorios |
+| `--help` | Mostra ajuda |
+
+## Sistema cognitivo em detalhe
+
+O comportamento do agente e dividido em tres estagios:
+
+### 1. Action Planner (planejamento de acoes)
+
+Entrada (`DecisionInput`):
+- Identidade, papel, dia/tick, localizacao, estado fisiologico.
+- Perfil psicologico (traits, values, fears, desires, moral tolerances).
+- Memorias relevantes (ranking por peso emocional, tags e recencia).
+- Eventos recentes, metas atuais, orcamento residual.
+- Contexto psicologico (PsychologicalContextInput).
+- Contexto economico (EconomicContextInput): household treasury, pantry, salario pendente.
+- Contexto legal (LegalContextInput): crime cases proximos, testemunhas.
+- Contexto politico (PoliticalContextInput): faccoes, issues, pressoes ativas.
+
+Saida (`DecisionEnvelope`):
+- Sequencia de 3–6 tarefas com tipo, alvo, local, justificativa, prioridade, risco percebido.
+- Emocao dominante, atualizacoes de crenca, movimento social.
+
+### 2. Think Maker (geracao de reflexoes)
+
+Entrada (`ThinkMakerInput`):
+- Contexto similar ao action planner, focado em estado interno.
+
+Saida (`ThinkMakerOutput`):
+- `thought`: reflexao textual curta.
+- `dominant_emotion`: emocao atual.
+- `belief_updates`: mudancas em crencas/metas.
+- `memory_tags`: tags para indexacao da memoria gerada.
+
+### 3. Conversation Turn (turnos de dialogo)
+
+Quando a acao e social, o motor solicita turnos de dialogo:
+
+- Ate 6 turnos por conversa, alternando entre falantes.
+- Cada turno gera fala, movimento social e deltas de relacao.
+- Desfechos variados (mutuo, unilateral, timeout, escalacao para conflito fisico).
+- Processamento paralelo de multiplas conversas no mesmo tick.
+
+### Parsing robusto
+
+O parser de JSON do LLM lida com:
+- Markdown fences (```json ... ```).
+- Coercao de tipos (string → number, booleanos textuais em portugues/ingles).
+- Normalizacao de nomes de movimentos sociais em portugues.
+- Validacao de intencoes contra restricoes do mundo.
+
+## Valores padrao da simulacao
+
+| Parametro | Valor padrao |
+|-----------|-------------|
+| Nome da vila | Santa Bruma |
+| Ticks por dia | 1440 (1 tick = 1 minuto) |
+| Agentes iniciais | 21 |
+| Grid | 150 × 100 tiles |
+| Vilas | 3 |
+| World seed | 1 |
+| Banco de dados | `village_sim.sqlite` |
+| Schema version | 10 |
 
 ## Como rodar
 
 ### Requisitos
 
-- Rust toolchain recente;
-- ambiente capaz de compilar o target do seu sistema;
-- opcionalmente, uma chave de API compativel com o adaptador OpenAI.
+- Rust toolchain recente (edition 2024).
+- Opcional: chave de API compativel com OpenAI para o adaptador real.
 
-### Execucao com mock local na TUI
-
-Sem configurar credenciais, o projeto usa automaticamente o `MockLlmAdapter`.
+### TUI com mock local (padrao)
 
 ```bash
 cargo run
 ```
 
-### Execucao headless
-
-O binario tambem suporta execucao sem interface para rodar lotes, gerar checkpoints e observar a vila pelo stdout.
-
-Exemplo curto:
+### Headless (batch)
 
 ```bash
+# Curto: 48 ticks, relatorio a cada 6
 cargo run -- --headless --new --ticks 48 --summary-every 6 --event-tail 6
-```
 
-Exemplo com mapa ASCII e save intervalar:
-
-```bash
+# Longo com mapa ASCII e save intervalar
 cargo run -- --headless --ticks 96 --save-every 24 --summary-every 12 --map
+
+# Mundo customizado
+cargo run -- --headless --new --seed 42 --agents 30 --num-villages 2 \
+  --grid-width 200 --grid-height 120 --village-name "Pedra Clara" \
+  --ticks 240 --summary-every 24 --save-every 48 --map
+
+# Por dias simulados
+cargo run -- --headless --new --days 3 --summary-every 24 --event-tail 10
 ```
 
-Flags principais:
-
-- `--headless`: ativa o modo sem TUI;
-- `--new`: ignora o save atual e cria uma vila nova;
-- `--ticks N`: encerra apos `N` ticks executados neste processo;
-- `--days N`: encerra apos `N` dias simulados neste processo;
-- `--save-every N`: grava checkpoint intervalar a cada `N` ticks; `0` desativa esse save intervalar;
-- `--summary-every N`: imprime um relatorio a cada `N` ticks;
-- `--event-tail N`: define quantos eventos recentes entram em cada relatorio;
-- `--ticks-per-second N`: define quantos ticks simulados rodam por segundo real no modo headless;
-- `--map`: inclui o mapa ASCII completo nos relatorios;
-- `--db PATH`: sobrescreve `VILLAGE_DB_PATH`;
-- `--seed`, `--agents`, `--grid-width`, `--grid-height`, `--village-name`: configuram a criacao de um mundo novo.
-
-### Execucao com adaptador OpenAI-compatible
-
-Defina as variaveis:
+### Com adaptador OpenAI
 
 ```bash
-OPENAI_API_KEY=...
-OPENAI_MODEL=gpt-4.1-mini
-OPENAI_BASE_URL=https://api.openai.com/v1/chat/completions
-VILLAGE_DB_PATH=village_sim.sqlite
-```
-
-Depois execute:
-
-```bash
+export OPENAI_API_KEY=sk-...
+export OPENAI_MODEL=gpt-4.1-mini
+export OPENAI_BASE_URL=https://api.openai.com/v1/chat/completions
 cargo run
 ```
 
@@ -451,44 +377,58 @@ cargo run
 cargo test
 ```
 
-Os testes atuais cobrem:
+29 testes integrados cobrindo:
 
-- parse do JSON cognitivo;
-- ranking de memorias relevantes;
-- persistencia e restauracao de snapshot;
-- simulacao de uma semana com eventos sociais.
+- Parsing de JSON cognitivo (action planner, think maker, conversation turn).
+- Normalizacao de markdown fences, coercao de tipos, texto em portugues.
+- Recuperacao e ranking de memorias.
+- Geracao procedural de mundo (edificios, mobilia, agentes).
+- Pathfinding e movimento com tiles ocupados.
+- Mecanica de conversas (adjacencia, alternancia de turnos, timeout).
+- Persistencia e restauracao de snapshot (round-trip).
+- Processamento paralelo de conversas.
+- Rejeicao de snapshots de schema legado.
+- Simulacao de uma semana completa com restricoes fisicas do grid.
+- Geracao de woodlot/quarry.
+- Coleta diaria de impostos e producao de materia-prima.
+- Combate (assault → combat rounds → crime case).
+- Roubo (theft → transferencia de recursos → crime case).
+- Pipeline de investigacao/arresto/punicao pela guarda.
+- Pressao politica, criacao de issues, formacao de faccoes, mudanca de normas.
+- Consumo emergencial de comida em fome critica.
+- Processamento assincrono de decisoes (background LLM threads com rayon).
+- Ciclo agricola completo (plant → growing → ready → colheita).
 
 ## Compatibilidade de ambiente
 
-Neste workspace, a validacao foi feita com sucesso via WSL usando `cargo test`.
+Validado com sucesso via WSL usando `cargo test`.
 
-No Windows nativo desta maquina, o toolchain Rust nao estava totalmente funcional para linkedicao porque faltavam:
+No Windows nativo, o toolchain Rust pode falhar na linkedicao por falta de `link.exe` e bibliotecas do Windows SDK. Solucoes:
 
-- `link.exe`
-- bibliotecas do Windows SDK como `kernel32.lib`
-
-Se isso acontecer no seu ambiente Windows, ha dois caminhos praticos:
-
-- instalar Visual Studio Build Tools com o SDK de C++;
-- rodar o projeto via WSL/Linux.
+- Instalar Visual Studio Build Tools com o SDK de C++.
+- Rodar o projeto via WSL/Linux.
 
 ## Limitacoes atuais
 
-- o adaptador OpenAI-compatible usa `chat/completions`, nao `responses`;
-- chamadas LLM sao sincronas;
-- ainda nao ha retry/backoff sofisticado;
-- o orcamento de chamadas por agente e basico e hoje serve mais como metadado do que como limitador rigido;
-- os agentes ainda nao formam instituicoes, familias formais ou cadeias economicas profundas;
-- a explicabilidade e boa na TUI, mas ainda resumida;
-- a memoria de longo prazo ainda nao tem compressao semantica.
+- Chamadas LLM usam `chat/completions` (nao `responses` nem streaming).
+- Chamadas HTTP sao sincronas (o paralelismo vem do dispatch em multiplas threads, nao de IO assincrono).
+- A compressao semantica de memoria de longo prazo ainda nao foi implementada (truncamento simples por vetor).
+- O banco SQLite cresce indefinidamente (sem politica de compactacao/retencao).
+- Nao ha API externa JSON para clientes remotos.
+- Agentes nao formam familias formais ou lacos de parentesco.
+- A explicabilidade na TUI e boa mas resumida (sem visualizacao de grid completa ou grafo de relacoes).
+- Nao ha conceito de geracoes, envelhecimento ou substituicao populacional.
 
-## Proximos passos recomendados
+## Proximos passos
 
-- adicionar configuracao externa para tamanho da populacao, ticks por dia e seed;
-- introduzir politica real de orcamento de tokens e cooldown cognitivo;
-- expandir o sistema de dialogo para conversas multi-turno;
-- separar evento factual de interpretacao subjetiva com mais rigor;
-- adicionar inspecao por relacao bilateral na TUI;
-- criar export de snapshots para analise offline;
-- evoluir o adaptador para `responses` e/ou streaming;
-- introduzir economia mais consistente entre producao, consumo e escassez.
+- Compressao semantica de memoria (sumarizacao periodica de memorias antigas).
+- Evoluir adaptador LLM para `responses` e/ou streaming.
+- API externa JSON/WebSocket para observacao e controle remotos.
+- Visualizacao expandida na TUI (mapa completo, grafo de relacoes, dashboard economico).
+- Relacoes de parentesco e familias formais.
+- Export de snapshots para analise offline.
+- Politica de retencao/compactacao do banco SQLite.
+- Suporte a customizacao de catalogo economico via arquivo externo.
+
+
+passar para os agentes a lista completa de lugares do mundo de forma semnatica e obrigar a llm a usar estritamente esses lugares na conversas. e açoes adicionar a possibilidade dos agentes marcarem encontros em lugares especifcos em horarios especificos, adicionar ciclor de dia e noita e horas do dia que sao passados para o contexto cognitivo dos agentes. 

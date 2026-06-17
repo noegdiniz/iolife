@@ -150,6 +150,12 @@ fn print_report(sim: &mut Simulation, config: &HeadlessConfig, label: &str) {
     for line in sim.politics_overview() {
         println!("[headless] politica | {}", line);
     }
+    for line in sim.culture_overview() {
+        println!("[headless] cultura | {}", line);
+    }
+    for line in sim.meetings_overview() {
+        println!("[headless] encontros | {}", line);
+    }
 
     for view in views.iter().take(6) {
         let pantry = if view.household_pantry.is_empty() {
@@ -161,8 +167,18 @@ fn print_report(sim: &mut Simulation, config: &HeadlessConfig, label: &str) {
                 .collect::<Vec<_>>()
                 .join(",")
         };
+        let rumors = if view.known_rumors.is_empty() {
+            "-".to_string()
+        } else {
+            view.known_rumors.join("; ")
+        };
+        let stories = if view.known_stories.is_empty() {
+            "-".to_string()
+        } else {
+            view.known_stories.join("; ")
+        };
         println!(
-            "[headless] agente | {} | papel={} | vida={:?} | ferimentos=leves:{} graves:{} dor:{} sangramento:{} | pos=({}, {}) | area={} | destino={} | intencao={} | politica={} | queixas={} | caixa_lar={} | imposto_devendo={} | caixa_publico={} | pantry={} | salario_pendente={} | tarefa={} | pensamento={} ",
+            "[headless] agente | {} | papel={} | vida={:?} | ferimentos=leves:{} graves:{} dor:{} sangramento:{} | pos=({}, {}) | area={} | destino={} | intencao={} | politica={} | queixas={} | instituicoes=lider:{} justica:{} imposto:{} rac:{} guardas:{} guerra:{} medo:{} corrupcao:{} equidade:{} | feudal=titulo:{} senhor:{} poder:{} obrigacoes:{} sucessao:{} | psicologia={} | rumores={} | historias={} | caixa_lar={} | imposto_devendo={} | caixa_publico={} | pantry={} | salario_pendente={} | tarefa={} | pensamento={} ",
             view.name,
             view.role_name,
             view.life_status,
@@ -189,6 +205,35 @@ fn print_report(sim: &mut Simulation, config: &HeadlessConfig, label: &str) {
             } else {
                 view.political_grievances.join("; ")
             },
+            view.institutional_perception.leader_legitimacy,
+            view.institutional_perception.justice_legitimacy,
+            view.institutional_perception.tax_legitimacy,
+            view.institutional_perception.rationing_legitimacy,
+            view.institutional_perception.guard_trust,
+            view.institutional_perception.war_support,
+            view.institutional_perception.fear_of_authority,
+            view.institutional_perception.perceived_corruption,
+            view.institutional_perception.perceived_fairness,
+            view.feudal_title.clone().unwrap_or_else(|| "-".to_string()),
+            view.direct_lord_name
+                .clone()
+                .unwrap_or_else(|| "-".to_string()),
+            view.feudal_power_summary
+                .clone()
+                .unwrap_or_else(|| "-".to_string()),
+            if view.feudal_obligations.is_empty() {
+                "-".to_string()
+            } else {
+                view.feudal_obligations.join("; ")
+            },
+            if view.succession_status.is_empty() {
+                "-".to_string()
+            } else {
+                view.succession_status.join("; ")
+            },
+            view.psychological_state.summary(),
+            rumors,
+            stories,
             view.household_treasury,
             view.household_tax_arrears,
             view.public_treasury,

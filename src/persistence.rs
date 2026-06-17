@@ -121,9 +121,9 @@ impl Persistence {
                 .ok_or_else(|| {
                     anyhow::anyhow!("legacy snapshot without spatial grid is not supported")
                 })?;
-            if schema_version != 10 {
+            if schema_version != 20 {
                 return Err(anyhow::anyhow!(
-                    "unsupported snapshot schema_version={schema_version}; expected 10"
+                    "unsupported snapshot schema_version={schema_version}; expected 20"
                 ));
             }
             let snapshot = serde_json::from_value(value)

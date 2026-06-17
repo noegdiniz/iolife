@@ -1,6 +1,7 @@
 use crate::world_model::{
     AgentIntent, AgentMemory, AgentRelation, AgentState, EconomicTaskClass, EconomicTaskKind,
-    EventKind, FixtureKind, IntentKind, RelationDelta, SimplifiedTask, SocialMove, WorldEvent,
+    EventKind, FixtureKind, IntentKind, PromiseCondition, RelationDelta, SimplifiedTask,
+    SocialMove, WorldEvent,
 };
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -86,6 +87,7 @@ pub struct EconomicContextInput {
     pub grain_availability: String,
     pub external_grain_offer: Option<String>,
     pub public_treasury_status: String,
+    pub war_supply_status: Vec<String>,
     pub open_tasks: Vec<EconomicOpportunityInput>,
 }
 
@@ -112,12 +114,84 @@ pub struct PoliticalContextInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstitutionalContextInput {
+    pub leader_legitimacy: i32,
+    pub justice_legitimacy: i32,
+    pub tax_legitimacy: i32,
+    pub rationing_legitimacy: i32,
+    pub guard_trust: i32,
+    pub war_support: i32,
+    pub fear_of_authority: i32,
+    pub perceived_corruption: i32,
+    pub perceived_fairness: i32,
+    pub summary: String,
+    pub likely_reactions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FeudalContextInput {
+    pub title: Option<String>,
+    pub direct_lord: Option<String>,
+    pub subordinate_summaries: Vec<String>,
+    pub holdings: Vec<String>,
+    pub obligations: Vec<String>,
+    pub contract_pressures: Vec<String>,
+    pub succession_status: Vec<String>,
+    pub authority_conflicts: Vec<String>,
+    pub sanction_risk: String,
+    pub power_summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InformationContextInput {
+    pub known_rumors: Vec<String>,
+    pub believed_rumors: Vec<String>,
+    pub known_secrets: Vec<String>,
+    pub credibility_notes: Vec<String>,
+    pub slander_risks: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CulturalContextInput {
+    pub known_stories: Vec<String>,
+    pub locally_relevant_stories: Vec<String>,
+    pub family_stories: Vec<String>,
+    pub faction_stories: Vec<String>,
+    pub stories_likely_to_tell: Vec<String>,
+    pub cultural_risks: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeContextInput {
+    pub day: u32,
+    pub tick_of_day: u32,
+    pub hour: u32,
+    pub minute: u32,
+    pub time_label: String,
+    pub day_phase: String,
+    pub is_daylight: bool,
+    pub is_work_time: bool,
+    pub is_meal_time: bool,
+    pub is_sleep_time: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorldPlaceInput {
+    pub place_id: String,
+    pub display_name: String,
+    pub kind: String,
+    pub semantic_tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionInput {
     pub actor_id: u64,
     pub actor_name: String,
     pub role: String,
     pub day: u32,
     pub tick: u32,
+    pub time_context: TimeContextInput,
+    pub world_places: Vec<WorldPlaceInput>,
     pub current_area: String,
     pub current_building: Option<String>,
     pub current_building_kind: Option<String>,
@@ -137,6 +211,10 @@ pub struct DecisionInput {
     pub economic_context: EconomicContextInput,
     pub legal_context: LegalContextInput,
     pub political_context: PoliticalContextInput,
+    pub institutional_context: InstitutionalContextInput,
+    pub feudal_context: FeudalContextInput,
+    pub information_context: InformationContextInput,
+    pub cultural_context: CulturalContextInput,
     pub profile_summary: Vec<String>,
     pub llm_budget_remaining: u32,
     pub chaos_pressure: u32,
@@ -158,7 +236,6 @@ pub struct ThinkMakerOutput {
     pub dominant_emotion: String,
     pub belief_updates: Vec<String>,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionEnvelope {
@@ -209,6 +286,8 @@ pub struct ConversationTurnInput {
     pub speaker_name: String,
     pub speaker_role: String,
     pub speaker_state: AgentState,
+    pub time_context: TimeContextInput,
+    pub world_places: Vec<WorldPlaceInput>,
     pub speaker_profile_summary: Vec<String>,
     pub speaker_psychology: PsychologicalContextInput,
     pub listener: ConversationObservedAgentInput,
@@ -220,6 +299,76 @@ pub struct ConversationTurnInput {
     pub chaos_pressure: u32,
     pub personality_traits: Vec<String>,
     pub trauma_traits: Vec<String>,
+    #[serde(default)]
+    pub known_secrets: Vec<String>,
+    #[serde(default)]
+    pub information_context: InformationContextInput,
+    #[serde(default)]
+    pub cultural_context: CulturalContextInput,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EconomicTransfer {
+    pub recipient_id: Option<u64>,
+    pub amount: i32,
+    pub resource_id: String,       // "moedas" ou "graos"
+    pub use_public_treasury: bool, // Corrupção
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RevealedSecret {
+    pub secret_id: u64,
+    pub recipient_id: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProposedPromise {
+    pub recipient_id: u64,
+    pub condition: PromiseCondition,
+    pub duration_ticks: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProposedRumor {
+    pub target_agent_id: u64,
+    pub topic: String,
+    pub claim: Option<String>,
+    pub is_true: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProposedStoryShare {
+    pub story_id: Option<u64>,
+    pub title: Option<String>,
+    pub version: String,
+    pub kind: Option<String>,
+    pub tone: Option<String>,
+    pub moral: Option<String>,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProposedEscrow {
+    pub target_agent_id: u64,
+    pub resource_id: String,
+    pub amount: i32,
+    pub condition_secret_id: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProposedMeeting {
+    pub invitee_id: u64,
+    pub place_id: String,
+    pub scheduled_day: u32,
+    pub scheduled_time: String,
+    pub purpose: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MeetingResponse {
+    pub meeting_id: u64,
+    pub accept: bool,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -232,6 +381,22 @@ pub struct ConversationTurnOutput {
     pub relation_delta_hint: RelationDelta,
     pub tone: Option<String>,
     pub risk_shift: Option<i32>,
+    #[serde(default)]
+    pub economic_transfer: Option<EconomicTransfer>,
+    #[serde(default)]
+    pub revealed_secret: Option<RevealedSecret>,
+    #[serde(default)]
+    pub make_promise: Option<ProposedPromise>,
+    #[serde(default)]
+    pub spread_rumor: Option<ProposedRumor>,
+    #[serde(default)]
+    pub shared_story: Option<ProposedStoryShare>,
+    #[serde(default)]
+    pub escrow_deposit: Option<ProposedEscrow>,
+    #[serde(default)]
+    pub propose_meeting: Option<ProposedMeeting>,
+    #[serde(default)]
+    pub meeting_response: Option<MeetingResponse>,
 }
 
 pub fn retrieve_relevant_memories(
@@ -384,7 +549,7 @@ pub fn parse_action_planner_output(raw: &str) -> Vec<SimplifiedTask> {
     let mut tokens = Vec::new();
     let mut current_token = String::new();
     let mut paren_depth = 0;
-    
+
     for c in raw.chars() {
         match c {
             '(' => {
@@ -425,8 +590,11 @@ pub fn parse_action_planner_output(raw: &str) -> Vec<SimplifiedTask> {
             };
             let close_paren_idx = token.rfind(')').unwrap_or(token.len());
             let params_str = &token[open_paren_idx + 1..close_paren_idx];
-            let params: Vec<&str> = params_str.split(',').map(|p| p.trim_matches(|c| c == '\'' || c == '"' || c == ' ')).collect();
-            
+            let params: Vec<&str> = params_str
+                .split(',')
+                .map(|p| p.trim_matches(|c| c == '\'' || c == '"' || c == ' '))
+                .collect();
+
             let mut target_agent = None;
             let mut target_semantic = None;
             let mut social_move = None;
@@ -494,7 +662,6 @@ pub fn parse_think_maker_json(payload: &str) -> Result<ThinkMakerOutput> {
     })
 }
 
-
 pub fn parse_conversation_turn_json(payload: &str) -> Result<ConversationTurnOutput> {
     parse_conversation_turn_json_with_notes(payload).map(|(output, _)| output)
 }
@@ -528,6 +695,15 @@ pub(crate) fn parse_conversation_turn_json_with_notes(
         &mut notes,
     ));
 
+    let economic_transfer = parse_economic_transfer(object.get("economic_transfer"), &mut notes);
+    let revealed_secret = parse_revealed_secret(object.get("revealed_secret"), &mut notes);
+    let make_promise = parse_proposed_promise(object.get("make_promise"), &mut notes);
+    let spread_rumor = parse_proposed_rumor(object.get("spread_rumor"), &mut notes);
+    let shared_story = parse_proposed_story_share(object.get("shared_story"), &mut notes);
+    let escrow_deposit = parse_proposed_escrow(object.get("escrow_deposit"), &mut notes);
+    let propose_meeting = parse_proposed_meeting(object.get("propose_meeting"), &mut notes);
+    let meeting_response = parse_meeting_response(object.get("meeting_response"), &mut notes);
+
     Ok((
         ConversationTurnOutput {
             utterance,
@@ -538,6 +714,14 @@ pub(crate) fn parse_conversation_turn_json_with_notes(
             relation_delta_hint,
             tone,
             risk_shift,
+            economic_transfer,
+            revealed_secret,
+            make_promise,
+            spread_rumor,
+            shared_story,
+            escrow_deposit,
+            propose_meeting,
+            meeting_response,
         },
         notes,
     ))
@@ -629,6 +813,7 @@ fn parse_strict_intent_kind(value: Option<&Value>) -> Result<IntentKind> {
         "transportar" => Ok(IntentKind::Transportar),
         "vender" => Ok(IntentKind::Vender),
         "receberpagamento" => Ok(IntentKind::ReceberPagamento),
+        "construir" => Ok(IntentKind::Construir),
         "agredir" => Ok(IntentKind::Agredir),
         "combater" => Ok(IntentKind::Combater),
         "roubar" => Ok(IntentKind::Roubar),
@@ -640,9 +825,23 @@ fn parse_strict_intent_kind(value: Option<&Value>) -> Result<IntentKind> {
         "punir" => Ok(IntentKind::Punir),
         "apoiar" => Ok(IntentKind::Apoiar),
         "opor" => Ok(IntentKind::Opor),
-        "pressionar" => Ok(IntentKind::Pressionar),
         "pedirapoio" => Ok(IntentKind::PedirApoio),
         "mediar" => Ok(IntentKind::Mediar),
+        "decretar" => Ok(IntentKind::Decretar),
+        "jurarlealdade" => Ok(IntentKind::JurarLealdade),
+        "romperlealdade" => Ok(IntentKind::RomperLealdade),
+        "concedertitulo" => Ok(IntentKind::ConcederTitulo),
+        "revogartitulo" => Ok(IntentKind::RevogarTitulo),
+        "nomearoficial" => Ok(IntentKind::NomearOficial),
+        "exigirtributo" => Ok(IntentKind::ExigirTributo),
+        "cobrarcorveia" => Ok(IntentKind::CobrarCorveia),
+        "convocarlevy" => Ok(IntentKind::ConvocarLevy),
+        "reconhecerherdeiro" => Ok(IntentKind::ReconhecerHerdeiro),
+        "apoiarpretendente" => Ok(IntentKind::ApoiarPretendente),
+        "usurpar" => Ok(IntentKind::Usurpar),
+        "reivindicarterritorio" => Ok(IntentKind::ReivindicarTerritorio),
+        "negociarsuserania" => Ok(IntentKind::NegociarSuserania),
+        "esconder" => Ok(IntentKind::Esconder),
         _ => Err(anyhow!(
             "decision payload field `kind` has invalid value `{raw}`"
         )),
@@ -1011,6 +1210,9 @@ fn parse_social_move(value: Option<&Value>, notes: &mut Vec<String>) -> SocialMo
         | "solitary"
         | "manutencao" => Some(SocialMove::Chat),
         "fofoca" | "fofocar" | "rumor" | "rumores" => Some(SocialMove::Gossip),
+        "contarhistoria" | "historia" | "lenda" | "contarlenda" | "narrar" | "memoriacultural" => {
+            Some(SocialMove::TellStory)
+        }
         "promessa" | "prometer" | "compromisso" => Some(SocialMove::Promise),
         "ofensa" | "ofender" | "hostil" | "pressionar" | "cobrar" => Some(SocialMove::Offend),
         "reconciliar" | "reconciliacao" | "desculpa" | "fazeraspazes" => {
@@ -1283,6 +1485,48 @@ fn semantic_fold_text(raw: &str) -> String {
         .collect()
 }
 
+fn parse_economic_transfer(
+    value: Option<&Value>,
+    notes: &mut Vec<String>,
+) -> Option<EconomicTransfer> {
+    let val = value?;
+    if val.is_null() {
+        return None;
+    }
+    let obj = val.as_object()?;
+    let recipient_id = parse_target_agent(obj.get("recipient_id"), notes);
+    let amount = obj.get("amount").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let resource_id = obj
+        .get("resource_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("moedas")
+        .to_string();
+    let use_public_treasury = obj
+        .get("use_public_treasury")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Some(EconomicTransfer {
+        recipient_id,
+        amount,
+        resource_id,
+        use_public_treasury,
+    })
+}
+
+fn parse_revealed_secret(value: Option<&Value>, notes: &mut Vec<String>) -> Option<RevealedSecret> {
+    let val = value?;
+    if val.is_null() {
+        return None;
+    }
+    let obj = val.as_object()?;
+    let secret_id = obj.get("secret_id").and_then(|v| v.as_u64())?;
+    let recipient_id = obj.get("recipient_id").and_then(|v| v.as_u64())?;
+    Some(RevealedSecret {
+        secret_id,
+        recipient_id,
+    })
+}
+
 fn fold_text(raw: &str) -> String {
     raw.chars()
         .filter_map(|ch| match ch {
@@ -1297,4 +1541,268 @@ fn fold_text(raw: &str) -> String {
             _ => None,
         })
         .collect()
+}
+
+fn parse_proposed_promise(
+    value: Option<&Value>,
+    notes: &mut Vec<String>,
+) -> Option<ProposedPromise> {
+    let val = value?;
+    if val.is_null() {
+        return None;
+    }
+    let obj = val.as_object()?;
+    let recipient_id = parse_target_agent(obj.get("recipient_id"), notes)?;
+    let condition_type = obj
+        .get("condition_type")
+        .and_then(|v| v.as_str())?
+        .to_string();
+    let resource_id = obj
+        .get("resource_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let amount = obj.get("amount").and_then(|v| v.as_i64()).map(|v| v as i32);
+    let policy_domain = obj
+        .get("policy_domain")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let policy_value = obj
+        .get("policy_value")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let secret_id = obj.get("secret_id").and_then(|v| v.as_u64());
+    let duration_ticks = obj
+        .get("duration_ticks")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(24) as u32;
+
+    let condition = match condition_type.as_str() {
+        "DeliverResource" => PromiseCondition::DeliverResource {
+            resource_id: resource_id.unwrap_or_else(|| "moedas".to_string()),
+            amount: amount.unwrap_or(0),
+        },
+        "VoteForPolicy" => PromiseCondition::VoteForPolicy {
+            domain: policy_domain.unwrap_or_else(|| "taxa_imposto".to_string()),
+            value: policy_value.unwrap_or_else(|| "10".to_string()),
+        },
+        "KeepSecret" => PromiseCondition::KeepSecret {
+            secret_id: secret_id.unwrap_or(0),
+        },
+        _ => return None,
+    };
+
+    Some(ProposedPromise {
+        recipient_id,
+        condition,
+        duration_ticks,
+    })
+}
+
+fn parse_proposed_rumor(value: Option<&Value>, notes: &mut Vec<String>) -> Option<ProposedRumor> {
+    let val = value?;
+    if val.is_null() {
+        return None;
+    }
+    let obj = val.as_object()?;
+    let target_agent_id = parse_target_agent(obj.get("target_agent_id"), notes)?;
+    let topic = obj
+        .get("topic")
+        .and_then(|v| v.as_str())
+        .unwrap_or("assunto_geral")
+        .to_string();
+    let claim = obj
+        .get("claim")
+        .and_then(|v| v.as_str())
+        .filter(|entry| !entry.trim().is_empty())
+        .map(|entry| entry.trim().to_string());
+    let is_true = obj.get("is_true").and_then(|v| v.as_bool()).unwrap_or(true);
+    Some(ProposedRumor {
+        target_agent_id,
+        topic,
+        claim,
+        is_true,
+    })
+}
+
+fn parse_proposed_story_share(
+    value: Option<&Value>,
+    notes: &mut Vec<String>,
+) -> Option<ProposedStoryShare> {
+    let val = value?;
+    if val.is_null() {
+        return None;
+    }
+    let obj = match val.as_object() {
+        Some(obj) => obj,
+        None => {
+            notes.push("shared_story ignorado: valor nao e objeto".to_string());
+            return None;
+        }
+    };
+    let story_id = parse_target_agent(obj.get("story_id"), notes);
+    let version = obj
+        .get("version")
+        .or_else(|| obj.get("short_version"))
+        .or_else(|| obj.get("claim"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(ToOwned::to_owned)?;
+    let title = obj
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(ToOwned::to_owned);
+    let kind = obj
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(ToOwned::to_owned);
+    let tone = obj
+        .get("tone")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(ToOwned::to_owned);
+    let moral = obj
+        .get("moral")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(ToOwned::to_owned);
+    let tags = obj
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .take(6)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Some(ProposedStoryShare {
+        story_id,
+        title,
+        version,
+        kind,
+        tone,
+        moral,
+        tags,
+    })
+}
+
+fn parse_proposed_escrow(value: Option<&Value>, notes: &mut Vec<String>) -> Option<ProposedEscrow> {
+    let val = value?;
+    if val.is_null() {
+        return None;
+    }
+    let obj = val.as_object()?;
+    let target_agent_id = parse_target_agent(obj.get("target_agent_id"), notes)?;
+    let resource_id = obj
+        .get("resource_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("moedas")
+        .to_string();
+    let amount = obj.get("amount").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let condition_secret_id = obj
+        .get("condition_secret_id")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    Some(ProposedEscrow {
+        target_agent_id,
+        resource_id,
+        amount,
+        condition_secret_id,
+    })
+}
+
+fn parse_proposed_meeting(
+    value: Option<&Value>,
+    notes: &mut Vec<String>,
+) -> Option<ProposedMeeting> {
+    let val = value?;
+    if val.is_null() {
+        return None;
+    }
+    let obj = match val.as_object() {
+        Some(obj) => obj,
+        None => {
+            notes.push("propose_meeting ignorado: valor nao e objeto".to_string());
+            return None;
+        }
+    };
+    let invitee_id = parse_target_agent(obj.get("invitee_id"), notes)?;
+    let place_id = obj
+        .get("place_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(ToOwned::to_owned)?;
+    let scheduled_day = obj
+        .get("scheduled_day")
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|raw| raw.trim().parse::<u64>().ok()))
+        })
+        .unwrap_or(0) as u32;
+    let scheduled_time = obj
+        .get("scheduled_time")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(ToOwned::to_owned)?;
+    let purpose = obj
+        .get("purpose")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .unwrap_or("encontro")
+        .to_string();
+    Some(ProposedMeeting {
+        invitee_id,
+        place_id,
+        scheduled_day,
+        scheduled_time,
+        purpose,
+    })
+}
+
+fn parse_meeting_response(
+    value: Option<&Value>,
+    notes: &mut Vec<String>,
+) -> Option<MeetingResponse> {
+    let val = value?;
+    if val.is_null() {
+        return None;
+    }
+    let obj = match val.as_object() {
+        Some(obj) => obj,
+        None => {
+            notes.push("meeting_response ignorado: valor nao e objeto".to_string());
+            return None;
+        }
+    };
+    let meeting_id = obj.get("meeting_id").and_then(|v| {
+        v.as_u64()
+            .or_else(|| v.as_str().and_then(|raw| raw.trim().parse::<u64>().ok()))
+    })?;
+    let accept = parse_boolish_field(obj.get("accept"), "meeting_response.accept", false, notes);
+    let reason = obj
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .unwrap_or(if accept { "aceito" } else { "recusado" })
+        .to_string();
+    Some(MeetingResponse {
+        meeting_id,
+        accept,
+        reason,
+    })
 }

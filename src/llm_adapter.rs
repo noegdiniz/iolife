@@ -1,7 +1,6 @@
 use crate::agent_mind::{
-    ActionPlannerInput, ThinkMakerInput, ThinkMakerOutput,
-    ConversationTurnInput, ConversationTurnOutput,
-    parse_conversation_turn_json_with_notes, parse_think_maker_json,
+    ActionPlannerInput, ConversationTurnInput, ConversationTurnOutput, ThinkMakerInput,
+    ThinkMakerOutput, parse_conversation_turn_json_with_notes, parse_think_maker_json,
 };
 use crate::world_model::RelationDelta;
 use anyhow::{Context, Result as AnyResult};
@@ -20,7 +19,7 @@ Sua resposta deve conter APENAS uma lista de acoes separadas por virgula no form
 NUNCA use blocos de codigo (como ``` ou ```json) ou qualquer explicacao fora das acoes.
 
 Formatos validos de Acao:
-- Acao(parametro_semantico) (ex: Comer(taverna), Trabalhar(posto_de_trabalho), Andar(casa))
+- Acao(place_id) para qualquer destino fisico (ex: Andar(building:3), Descansar(fixture:12), Trabalhar(fixture:18))
 - Acao(alvo_id, movimento_social) (apenas para Socializar; ex: Socializar(3, conversar), Socializar(5, fofocar))
 - Acao(alvo_id) (apenas para acoes com alvo; ex: Agredir(2), Roubar(4), Prender(1))
 - Acao (para acoes sem parametro; ex: Descansar, Refletir, Fugir, ReceberPagamento, Investigar)
@@ -34,6 +33,7 @@ Acoes Permitidas e Seus Parametros:
 - Andar(destino) (deslocar-se fisicamente ate um local)
 - Comprar(recurso) (comprar insumos/alimentos)
 - Transportar(recurso) (mover recursos de um estoque/local para outro)
+- Construir(projeto) (trabalhar em projeto de obra urbana aberto)
 - Vender(recurso) (colocar produtos a venda ou comercializar)
 - ReceberPagamento (reivindicar salarios ou compensacoes financeiras devidas)
 - Agredir(alvo_id) (ataque fisico imediato contra agente adjacente)
@@ -50,17 +50,43 @@ Acoes Permitidas e Seus Parametros:
 - Pressionar(alvo_id) (pressionar agente adjacente em disputa institucional)
 - PedirApoio(alvo_id) (pedir apoio politico a agente adjacente)
 - Mediar(alvo_id) (tentar reduzir conflito institucional)
+- Decretar(tag) (somente lider local; muda norma por decreto. tags validas: reduzir_imposto, aumentar_imposto, justica_branda, justica_normal, justica_severa, racionamento_lares, racionamento_produtores, racionamento_civico, racionamento_equilibrado, trabalho_forcado_campos, racionamento_estrito, imposto_guerra, proibicao_tavernas, confisco_metais)
+- JurarLealdade(alvo_id) (aceitar ou reforcar vinculo de vassalagem com um superior)
+- RomperLealdade(alvo_id) (romper ou enfraquecer laço feudal com o suserano)
+- ConcederTitulo(alvo_id) (autoridade feudal concede titulo existente a um agente)
+- RevogarTitulo(alvo_id) (autoridade feudal remove titulo de um agente)
+- NomearOficial(alvo_id) (autoridade feudal nomeia agente para oficio local)
+- ExigirTributo(alvo_id) (cobrar tributo feudal de um dependente ou vassalo)
+- CobrarCorveia(alvo_id) (impor mais dias de trabalho obrigatorio)
+- ConvocarLevy(alvo_id) (convocar servico militar/levy)
+- ReconhecerHerdeiro(alvo_id) (reconhecer formalmente um herdeiro ou pretendente)
+- ApoiarPretendente(alvo_id) (apoiar candidato em disputa sucessoria)
+- Usurpar(alvo_id) (tentar tomar a posicao/titulo de outro agente)
+- ReivindicarTerritorio(place_id_territory) (reforcar reivindicacao politica sobre territorio canonico)
+- NegociarSuserania(alvo_id) (renegociar submissao, protecao e termos feudais)
 
 Regras de Validacao e Negocio:
 1. Retorne entre 3 e 6 acoes em sequencia, separadas por virgula.
 2. Use APENAS IDs numericos de agentes para os campos alvo_id (ex: use 3 em vez de "Alda").
+2b. Para qualquer local fisico, use OBRIGATORIAMENTE um place_id exato de world_places. Nunca invente nomes livres como "taverna", "casa", "forja" ou "praca" em campos estruturados.
+2c. time_context informa hora, fase do dia, luz, trabalho, refeicao e sono; use isso para escolher trabalho, refeicao, descanso e encontros.
 3. Se o aldeao estiver com fome alta (hunger >= 65), inclua a tarefa "Comer" no planejamento. Se estiver muito cansado (energy <= 25), inclua "Descansar". Se estiver muito estressado (stress >= 70), inclua "Refletir".
-4. Personalidade, Caos e Faixas de chaos_pressure (0-100):
+4. Planejamento Estratégico e Tramas:
+   Você NUNCA deve planejar ações sem um propósito de longo prazo ou interesse estratégico. Cada sequência de ações deve funcionar como uma trama ou esquema tático para atingir seus objetivos de vida (como acumular riqueza, garantir segurança, obter vingança contra inimigos, apoiar/opor pautas políticas para benefício próprio ou derrubar líderes indesejados). Evite ações casuais ou sem objetivo prático.
+5. Personalidade, Caos e Faixas de chaos_pressure (0-100):
    - chaos_pressure 0-30: Comportamento normal, cooperativo. Violencia APENAS em defesa propria.
    - chaos_pressure 31-50: Comportamento tenso. Permitido ofender, fofocar, pressionar. Furto apenas se fome > 80.
    - chaos_pressure 51-70: Comportamento volatil. Furtar, roubar de estranhos, agredir com resentment alto.
    - chaos_pressure 71-85: Comportamento perigoso. Agredir qualquer agente proximo, roubar com violencia, acusar sem evidencia.
    - chaos_pressure 86-100: Comportamento desesperado. Qualquer acao anti-social e justificada pela sobrevivencia: matar, saquear, trair, fugir.
+6. Contexto institucional:
+   - Use institutional_context para decidir obediencia, medo, boicote, denuncia, apoio a guerra, resistencia e conspiracao.
+   - Baixa legitimidade nao muda normas diretamente; normas so mudam por Decretar, guerra civil vencida ou troca de controlador.
+   - Medo alto da autoridade pode gerar obediencia publica e resistencia secreta.
+7. Contexto feudal:
+   - Use feudal_context para avaliar quem manda em quem, obrigacoes de tributo/corveia/levy, conflitos de autoridade e crise sucessoria.
+   - Voce NUNCA altera titulos, holdings, controlador ou soberania diretamente; apenas escolhe a acao individual. O motor valida jurisdição, cargo e capacidade real.
+   - Se quiser agir sobre territorio, use exclusivamente um place_id de territorio vindo de world_places.
 
 Exemplo de Resposta Valida:
 Comer(taverna), Trabalhar(posto_de_trabalho), Descansar"#;
@@ -81,7 +107,8 @@ Use EXATAMENTE esta estrutura de chaves e tipos:
 
 Regras:
 1. Baseie-se no estado do agente, chaos_pressure, traits, traumas, memorias e nas acoes planejadas.
-2. Seja extremamente conciso. No maximo 2 frases em reflection e em cada item de belief_updates.
+2. Pensamento Estratégico: A 'reflection' e 'belief_updates' devem explicitar o objetivo estratégico oculto, o alvo da manipulação/influência e como a sequência de ações planejadas serve a essa trama/esquema. Nunca expresse pensamentos vazios ou triviais; foque inteiramente no ganho estratégico.
+3. Seja extremamente conciso. No maximo 2 frases em reflection e em cada item de belief_updates.
 
 Exemplo de Resposta Valida:
 {
@@ -90,7 +117,7 @@ Exemplo de Resposta Valida:
   "belief_updates": ["Preciso economizar moedas para tempos dificeis."]
 }"#;
 
-const CONVERSATION_TURN_PROMPT: &str = r#"Voce responde apenas pela mente de UM unico aldeao em uma conversa social medieval.
+const CONVERSATION_TURN_PROMPT: &str = r#"Voce responde apenas pela mente de UM unico aldeao in uma conversa social medieval.
 
 Seja extremamente conciso nas strings de justificativa e pensamento. Use no maximo 2 frases.
 
@@ -119,19 +146,80 @@ Use EXATAMENTE este shape:
     "reputation": 0
   },
   "tone": "string",
-  "risk_shift": 0
+  "risk_shift": 0,
+  "economic_transfer": null ou {
+    "recipient_id": numero inteiro ou null,
+    "amount": numero inteiro,
+    "resource_id": "moedas" ou "graos",
+    "use_public_treasury": boolean
+  },
+  "revealed_secret": null ou {
+    "secret_id": numero inteiro,
+    "recipient_id": numero inteiro
+  },
+  "make_promise": null ou {
+    "recipient_id": numero inteiro,
+    "condition_type": "DeliverResource" ou "VoteForPolicy" ou "KeepSecret",
+    "resource_id": "moedas" ou "graos" ou null,
+    "amount": numero inteiro ou null,
+    "policy_domain": "taxa_imposto" ou null,
+    "policy_value": "10" ou null,
+    "secret_id": numero inteiro ou null,
+    "duration_ticks": numero inteiro
+  },
+  "spread_rumor": null ou {
+    "target_agent_id": numero inteiro,
+    "topic": "encontro_com_armas" ou "roubo_planejado" ou "desvio_recursos",
+    "claim": "frase curta do que esta sendo alegado",
+    "is_true": boolean
+  },
+  "shared_story": null ou {
+    "story_id": numero inteiro ou null,
+    "title": "titulo curto da historia" ou null,
+    "version": "versao curta contada em uma frase",
+    "kind": "Lenda" ou "HistoriaFamiliar" ou "CantoDeGuerra" ou "Martirio" ou "Milagre" ou "Assombracao" ou "Fundacao" ou "Traicao" ou "Heroismo" ou "AdvertenciaMoral" ou null,
+    "tone": "tom da narrativa" ou null,
+    "moral": "moral curta" ou null,
+    "tags": ["tags culturais curtas"]
+  },
+  "escrow_deposit": null ou {
+    "target_agent_id": numero inteiro,
+    "resource_id": "moedas" ou "graos",
+    "amount": numero inteiro,
+    "condition_secret_id": numero inteiro
+  },
+  "propose_meeting": null ou {
+    "invitee_id": numero inteiro,
+    "place_id": "place_id exato de world_places",
+    "scheduled_day": numero inteiro,
+    "scheduled_time": "HH:MM",
+    "purpose": "string curta"
+  },
+  "meeting_response": null ou {
+    "meeting_id": numero inteiro,
+    "accept": boolean,
+    "reason": "string curta"
+  }
 }
 
 Tipos obrigatorios:
 - utterance: string nao vazia
 - speech_act: string nao vazia
 - emotion: string nao vazia
-- intent_to_continue: boolean true ou false, nunca numero e nunca string
+- intent_to_continue: boolean true ou false, never numero e never string
 - belief_updates: array de strings, mesmo com 1 item
-- relation_delta_hint: objeto, nunca string
+- relation_delta_hint: objeto, never string
 - trust/friendship/resentment/attraction/moral_debt/reputation: inteiros pequenos entre -2 e 2
 - tone: string ou null
-- risk_shift: inteiro pequeno entre -5 e 5, nunca string
+- risk_shift: inteiro pequeno entre -5 e 5, never string
+- economic_transfer: null ou objeto contendo recipient_id (inteiro/null), amount (inteiro), resource_id ("moedas"/"graos"), use_public_treasury (boolean)
+- revealed_secret: null ou objeto contendo secret_id (inteiro) e recipient_id (inteiro)
+- make_promise: null ou objeto com recipient_id (inteiro), condition_type ("DeliverResource"/"VoteForPolicy"/"KeepSecret"), resource_id/amount/policy_domain/policy_value/secret_id (valores ou null) e duration_ticks (inteiro)
+- spread_rumor: null ou objeto com target_agent_id (inteiro), topic (string), claim (string curta opcional) e is_true (boolean)
+- shared_story: null ou objeto com story_id (inteiro/null), title (string/null), version (string curta obrigatoria), kind (string/null), tone (string/null), moral (string/null), tags (array de strings)
+- escrow_deposit: null ou objeto com target_agent_id (inteiro), resource_id ("moedas"/"graos"), amount (inteiro) e condition_secret_id (inteiro)
+- propose_meeting: null ou objeto com invitee_id (inteiro), place_id (string exata de world_places), scheduled_day (inteiro), scheduled_time ("HH:MM") e purpose (string curta)
+- meeting_response: null ou objeto com meeting_id (inteiro), accept (boolean) e reason (string curta)
 
 Regras obrigatorias:
 - Se a fala for amigavel, use deltas pequenos e coerentes.
@@ -142,12 +230,29 @@ Regras obrigatorias:
 - Nunca substitua intent_to_continue por score como 0.8.
 - Nunca inclua chaves extras.
 - Seja extremamente conciso nas strings de justificativa e pensamento. Use no maximo 2 frases no campo belief_updates.
+- Rumores: voce pode contar, negar, distorcer ou evitar rumores, mas o motor decide credibilidade, distorcao e consequencias. Nunca trate rumor como prova judicial definitiva.
+- Se usar spread_rumor, topic deve ser categoria curta e claim deve ser a alegacao concreta em uma frase curta.
+- Historias culturais: voce pode contar, reinterpretar, negar ou evitar uma historia conhecida em cultural_context. Se usar shared_story, nao decida se ela vira verdade ou norma; o motor calcula forca cultural, distorcao e efeitos.
+- Se usar shared_story, version deve ser uma frase curta e concreta, diferente de rumor factual recente.
+- Encontros: voce pode propor ou responder a encontro, mas qualquer local estruturado DEVE usar place_id exato de world_places. O motor valida horario futuro, pathfinding e presenca fisica.
+
+Regras de Diálogo e Manipulação:
+- NUNCA participe de conversas fúteis, casuais ou conversas fiadas amigáveis sem interesse prático.
+- Cada fala (`utterance`) deve ter como único propósito manipular o interlocutor, extrair informações cruciais, defender seus próprios interesses, negociar termos favoráveis, ou alinhar o outro agente aos seus objetivos de longo prazo.
+- Se o tom for amigável, deve ser de forma puramente tática e calculada (para ganhar confiança e manipular). Se o tom for hostil, deve ser para pressionar, intimidar ou ameaçar para atingir seu objetivo.
+- Use speech_acts como:
+  * 'bajular' (elogiar falsamente e fingir simpatia para diminuir as defesas do outro e obter cooperação);
+  * 'desinformar' (espalhar boatos falsos, desinformação ou mentiras sobre oponentes para desestabilizar ou minar alianças);
+  * 'chantagear' (pressionar o alvo usando segredos, ameaças de denúncia ou retaliação física/social);
+  * 'subornar' (oferecer moedas, favores materiais ou de influência para comprar apoio político ou silêncio);
+  * 'prometer' (fechar acordos táticos com promessas que você pode quebrar depois);
+  * 'ofender' ou 'pressionar' (para extrair concessões ou intimidar oponentes).
 
 Regras de Personalidade na Conversa:
 O campo "chaos_pressure" e os "personality_traits"/"trauma_traits" guiam o tom e as acoes sociais:
 - Se chaos_pressure >= 50: permitido 'ofender' espontaneamente, mentir em promessas, aumentar deltas negativos de resentment/trust.
 - Se chaos_pressure >= 70: o agente pode ameacar, chantagear, ou encerrar a conversa com agressao (intent_to_continue=false + risk_shift alto).
-- Tracos como 'manipulador' permitem speech_act 'prometer' com falsidade implicita.
+- Tracos como 'manipulador' permitem speech_act 'prometer' ou 'bajular' com falsidade implicita.
 - Tracos como 'paranoico' geram interpretacoes hostis de falas neutras.
 - Tracos como 'cinico' reduzem trust em qualquer promessa recebida.
 
@@ -157,6 +262,11 @@ Se estiver em duvida sobre um campo:
 - relation_delta_hint = { "trust": 0, "friendship": 0, "resentment": 0, "attraction": 0, "moral_debt": 0, "reputation": 0 }
 - tone = null
 - risk_shift = 0
+- economic_transfer = null
+- revealed_secret = null
+- shared_story = null
+- propose_meeting = null
+- meeting_response = null
 
 Exemplo valido:
 {
@@ -174,7 +284,12 @@ Exemplo valido:
     "reputation": 0
   },
   "tone": "cordial",
-  "risk_shift": -1
+  "risk_shift": -1,
+  "economic_transfer": null,
+  "revealed_secret": null,
+  "shared_story": null,
+  "propose_meeting": null,
+  "meeting_response": null
 }"#;
 
 pub type LlmResult<T> = std::result::Result<T, LlmError>;
@@ -292,9 +407,31 @@ impl LlmAdapter for MockLlmAdapter {
 
     fn plan_actions(&self, input: &ActionPlannerInput) -> LlmResult<String> {
         let mut tasks = Vec::new();
+        let place_with_tag = |needle: &str| {
+            input
+                .world_places
+                .iter()
+                .find(|place| place.semantic_tags.iter().any(|tag| tag.contains(needle)))
+                .map(|place| place.place_id.clone())
+        };
+        let food_place = place_with_tag("taverna")
+            .or_else(|| place_with_tag("mesa"))
+            .or_else(|| place_with_tag("social"))
+            .unwrap_or_else(|| "special:external_market".to_string());
+        let work_place = place_with_tag("trabalho")
+            .or_else(|| place_with_tag("oficina"))
+            .unwrap_or_else(|| "special:external_market".to_string());
+        let walk_place = place_with_tag("praca")
+            .or_else(|| {
+                input
+                    .world_places
+                    .first()
+                    .map(|place| place.place_id.clone())
+            })
+            .unwrap_or_else(|| "special:external_market".to_string());
 
         if input.state.hunger >= 65 {
-            tasks.push("Comer(taverna)".to_string());
+            tasks.push(format!("Comer({food_place})"));
         }
         if input.state.energy <= 25 {
             tasks.push("Descansar".to_string());
@@ -316,39 +453,61 @@ impl LlmAdapter for MockLlmAdapter {
         if !input.political_context.open_issues.is_empty()
             && !input.political_context.household_grievances.is_empty()
         {
-            let issue = input.political_context.open_issues.first().cloned().unwrap_or_default();
+            let issue = input
+                .political_context
+                .open_issues
+                .first()
+                .cloned()
+                .unwrap_or_default();
             tasks.push(format!("Apoiar({})", issue));
         } else if input.role.to_lowercase().contains("lider")
             && !input.political_context.open_issues.is_empty()
         {
-            let target = input.nearby_agents.first().map(|a| a.id.to_string()).unwrap_or_else(|| "null".to_string());
+            let target = input
+                .nearby_agents
+                .first()
+                .map(|a| a.id.to_string())
+                .unwrap_or_else(|| "null".to_string());
             tasks.push(format!("Mediar({})", target));
         }
 
         for task in &input.economic_context.open_tasks {
             let action = match task.kind {
-                crate::world_model::EconomicTaskKind::Produzir => format!("Trabalhar({})", task.summary.to_lowercase()),
-                crate::world_model::EconomicTaskKind::Comprar => format!("Comprar({})", task.summary.to_lowercase()),
-                crate::world_model::EconomicTaskKind::Transportar => format!("Transportar({})", task.summary.to_lowercase()),
-                crate::world_model::EconomicTaskKind::Vender => format!("Vender({})", task.summary.to_lowercase()),
-                crate::world_model::EconomicTaskKind::ReceberPagamento => "ReceberPagamento".to_string(),
+                crate::world_model::EconomicTaskKind::Produzir => {
+                    format!("Trabalhar({})", task.summary.to_lowercase())
+                }
+                crate::world_model::EconomicTaskKind::Comprar => {
+                    format!("Comprar({})", task.summary.to_lowercase())
+                }
+                crate::world_model::EconomicTaskKind::Transportar => {
+                    format!("Transportar({})", task.summary.to_lowercase())
+                }
+                crate::world_model::EconomicTaskKind::Construir => {
+                    format!("Construir({})", task.summary.to_lowercase())
+                }
+                crate::world_model::EconomicTaskKind::Vender => {
+                    format!("Vender({})", task.summary.to_lowercase())
+                }
+                crate::world_model::EconomicTaskKind::ReceberPagamento => {
+                    "ReceberPagamento".to_string()
+                }
             };
             tasks.push(action);
         }
 
         if tasks.is_empty() {
             if (6..=14).contains(&input.tick) {
-                tasks.push("Trabalhar(posto_de_trabalho)".to_string());
+                tasks.push(format!("Trabalhar({work_place})"));
             } else if (16..=21).contains(&input.tick) && !input.nearby_agents.is_empty() {
                 let target = input.nearby_agents.first().map(|a| a.id).unwrap_or(0);
                 tasks.push(format!("Socializar({}, conversar)", target));
             } else {
-                tasks.push("Andar(praca)".to_string());
+                tasks.push(format!("Andar({walk_place})"));
             }
         }
 
         if tasks.len() < 3 {
-            tasks.push("Andar(praca)".to_string());
+            tasks.push(format!("Andar({walk_place})"));
             tasks.push("Refletir".to_string());
         }
         tasks.truncate(5);
@@ -372,7 +531,10 @@ impl LlmAdapter for MockLlmAdapter {
             } else {
                 "contido".to_string()
             },
-            belief_updates: vec![format!("Manter prioridades de {}.", input.decision_input.role)],
+            belief_updates: vec![format!(
+                "Manter prioridades de {}.",
+                input.decision_input.role
+            )],
         })
     }
 
@@ -467,6 +629,14 @@ impl LlmAdapter for MockLlmAdapter {
                 "medido".to_string()
             }),
             risk_shift: Some(if hostile { 2 } else { -1 }),
+            economic_transfer: None,
+            revealed_secret: None,
+            make_promise: None,
+            spread_rumor: None,
+            shared_story: None,
+            escrow_deposit: None,
+            propose_meeting: None,
+            meeting_response: None,
         })
     }
 }
@@ -656,6 +826,22 @@ impl OpenAiCompatibleAdapter {
     }
 }
 
+fn log_action_planner_time(actor_name: &str, actor_id: u64, duration_ms: u128) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("action_planner_response_times.txt")
+    {
+        use std::io::Write;
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        let _ = writeln!(
+            file,
+            "[{}] Agent {} (ID: {}): {} ms",
+            timestamp, actor_name, actor_id, duration_ms
+        );
+    }
+}
+
 impl LlmAdapter for OpenAiCompatibleAdapter {
     fn clone_box(&self) -> Box<dyn LlmAdapter> {
         Box::new(self.clone())
@@ -666,11 +852,15 @@ impl LlmAdapter for OpenAiCompatibleAdapter {
     }
 
     fn plan_actions(&self, input: &ActionPlannerInput) -> LlmResult<String> {
+        let start = std::time::Instant::now();
         let payload = serde_json::to_value(input).map_err(|error| LlmError::Schema {
             operation: "action_planning".to_string(),
             message: format!("failed to serialize action planning input: {}", error),
         })?;
-        self.fetch_message_content("action_planning", ACTION_PLANNER_PROMPT, &payload)
+        let res = self.fetch_message_content("action_planning", ACTION_PLANNER_PROMPT, &payload);
+        let duration = start.elapsed().as_millis();
+        log_action_planner_time(&input.actor_name, input.actor_id, duration);
+        res
     }
 
     fn generate_thoughts(&self, input: &ThinkMakerInput) -> LlmResult<ThinkMakerOutput> {
@@ -678,7 +868,8 @@ impl LlmAdapter for OpenAiCompatibleAdapter {
             operation: "thought_generation".to_string(),
             message: format!("failed to serialize thought generation input: {}", error),
         })?;
-        let content = self.fetch_message_content("thought_generation", THINK_MAKER_PROMPT, &payload)?;
+        let content =
+            self.fetch_message_content("thought_generation", THINK_MAKER_PROMPT, &payload)?;
         parse_think_maker_json(&content).map_err(|error| LlmError::Schema {
             operation: "thought_generation".to_string(),
             message: error.to_string(),

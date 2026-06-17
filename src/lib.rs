@@ -6,5 +6,5 @@ pub mod llm_adapter;
 pub mod persistence;
 pub mod sim_core;
 pub mod tui;
-pub mod world_model;
 pub mod world_gen;
+pub mod world_model;

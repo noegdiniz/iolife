@@ -341,8 +341,23 @@ fn render_agent_detail(frame: &mut Frame<'_>, area: Rect, view: Option<&AgentVie
                 .unwrap_or_else(|| "-".to_string())
         )
     };
+    let rumors = if view.known_rumors.is_empty() {
+        "-".to_string()
+    } else {
+        view.known_rumors.join("; ")
+    };
+    let stories = if view.known_stories.is_empty() {
+        "-".to_string()
+    } else {
+        view.known_stories.join("; ")
+    };
+    let meetings = if view.scheduled_meetings.is_empty() {
+        "-".to_string()
+    } else {
+        view.scheduled_meetings.join("; ")
+    };
     let detail = format!(
-        "Nome: {}\nPapel: {}\nVida: {:?}\nFerimentos: leves={} graves={} dor={} sangramento={}\nLar: {}\nArea: {}\nEdificio: {}\nSala: {}\nPosicao: ({}, {})\nDestino: {}\nCaminho pendente: {} tiles\nFoco: {}\nHumor:{} Energia:{} Saude:{} Fome:{} Stress:{}\n\nIntento geral: {}\nUltimo pensamento: {}\n\nPolitica:\nPosicao: {}\nQueixas: {}\n\nEconomia:\nCaixa do lar: {}\nDivida de imposto: {}\nDespensa: {}\nSalario pendente: {}\nCaixa publico: {}\nTarefa economica: {}\nCarregando: {}\nEstabelecimento: {}\nCaixa do estabelecimento: {}\nEstoque do estabelecimento: {}\nPrecos locais: {}\n\n{}\n\n{}\n\nMemorias recentes:\n{}",
+        "Nome: {}\nPapel: {}\nVida: {:?}\nFerimentos: leves={} graves={} dor={} sangramento={}\nLar: {}\nArea: {}\nEdificio: {}\nSala: {}\nPosicao: ({}, {})\nDestino: {}\nCaminho pendente: {} tiles\nFoco: {}\nHumor:{} Energia:{} Saude:{} Fome:{} Stress:{}\n\nIntento geral: {}\nUltimo pensamento: {}\n\nPolitica:\nPosicao: {}\nQueixas: {}\nInstituicoes: lider={} justica={} imposto={} racionamento={} guardas={} guerra={} medo={} corrupcao={} equidade={}\nFeudal:\nTitulo: {}\nSenhor direto: {}\nSubordinados: {}\nObrigacoes: {}\nPoder: {}\nSucessao: {}\nPsicologia: {}\nRumores acreditados: {}\nHistorias conhecidas: {}\nEncontros: {}\n\nEconomia:\nCaixa do lar: {}\nDivida de imposto: {}\nDespensa: {}\nSalario pendente: {}\nCaixa publico: {}\nTarefa economica: {}\nCarregando: {}\nEstabelecimento: {}\nCaixa do estabelecimento: {}\nEstoque do estabelecimento: {}\nPrecos locais: {}\n\n{}\n\n{}\n\nMemorias recentes:\n{}",
         view.name,
         view.role_name,
         view.life_status,
@@ -382,6 +397,41 @@ fn render_agent_detail(frame: &mut Frame<'_>, area: Rect, view: Option<&AgentVie
         } else {
             view.political_grievances.join("; ")
         },
+        view.institutional_perception.leader_legitimacy,
+        view.institutional_perception.justice_legitimacy,
+        view.institutional_perception.tax_legitimacy,
+        view.institutional_perception.rationing_legitimacy,
+        view.institutional_perception.guard_trust,
+        view.institutional_perception.war_support,
+        view.institutional_perception.fear_of_authority,
+        view.institutional_perception.perceived_corruption,
+        view.institutional_perception.perceived_fairness,
+        view.feudal_title.clone().unwrap_or_else(|| "-".to_string()),
+        view.direct_lord_name
+            .clone()
+            .unwrap_or_else(|| "-".to_string()),
+        if view.subordinate_names.is_empty() {
+            "-".to_string()
+        } else {
+            view.subordinate_names.join(", ")
+        },
+        if view.feudal_obligations.is_empty() {
+            "-".to_string()
+        } else {
+            view.feudal_obligations.join("; ")
+        },
+        view.feudal_power_summary
+            .clone()
+            .unwrap_or_else(|| "-".to_string()),
+        if view.succession_status.is_empty() {
+            "-".to_string()
+        } else {
+            view.succession_status.join("; ")
+        },
+        view.psychological_state.summary(),
+        rumors,
+        stories,
+        meetings,
         view.household_treasury,
         view.household_tax_arrears,
         pantry,
