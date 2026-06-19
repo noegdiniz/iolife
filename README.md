@@ -1,344 +1,294 @@
 # Medieval Village LLM
 
-Sandbox de terminal em Rust para simular vilas medievais persistentes com agentes orientados por LLM. O projeto combina um nucleo deterministico de simulacao (grid espacial, fisica, tempo, recursos, economia) com uma camada cognitiva que produz decisoes, reflexoes e trocas sociais em JSON estruturado.
+Sandbox de terminal em Rust que simula vilas medievais persistentes com agentes orientados por LLM. O nucleo deterministico controla grid espacial, tempo, recursos, economia feudal e combate; a camada cognitiva produz decisoes, reflexoes e dialogos em JSON estruturado — com fallback heuristico offline.
 
-O foco do V1 e profundidade psicologica e social com emergencia de comportamentos coletivos: economia de subsistencia, crimes, investigacoes, punicoes, faccoes politicas e disputas por normas locais.
+O projeto gera dezenas de anos de pre-historia genealogica e politica, depois executa a simulacao viva onde agentes trabalham, comem, socializam, cometem crimes, investigam, guerreiam, formam faccoes, disputam titulos feudais e moldam a cultura coletiva via rumores e historias.
 
-## Objetivo do projeto
+## Objetivo
 
-Este projeto existe para testar uma arquitetura em que:
+Testar uma arquitetura onde:
 
-- o mundo, o tempo, os recursos e a integridade do estado sao controlados por codigo deterministico;
-- as decisoes subjetivas dos agentes sao delegadas ao LLM (ou a um adaptador mock heuristico);
-- o estado subjetivo de cada aldeao persiste entre execucoes via SQLite;
-- a observacao do sistema e feita por uma TUI detalhada ou por relatorios headless.
+- mundo, grid, tempo, recursos e integridade de estado sao deterministicos;
+- decisoes subjetivas sao delegadas ao LLM (ou mock heuristico);
+- estado subjetivo persiste entre execucoes via SQLite;
+- observacao se da por TUI interativa ou relatorios headless.
 
-Na pratica, o motor nunca "escolhe" psicologicamente o que um agente quer fazer. Ele apenas:
+O motor nunca "escolhe" o que um agente sente ou quer. Ele apenas monta contexto, invoca o adaptador cognitivo, valida a resposta e aplica efeitos.
 
-- monta o contexto cognitivo completo do agente (fisiologia, perfil, memorias, relacoes, economia, politica, legal);
-- chama o adaptador cognitivo;
-- valida e normaliza a resposta;
-- aplica efeitos no mundo;
-- registra memorias, relacoes e eventos.
+---
 
-## Arquitetura por modulo
+## Arquitetura de modulos
 
-### `src/world_model.rs` — Tipos de dominio
+### `src/sim_core/` — Motor da simulacao (modularizado em 11 sub-modulos)
 
-Define todos os tipos serializaveis que formam o contrato do dominio. Principais estruturas:
+| Sub-modulo | Linhas | Responsabilidade |
+|---|---|---|
+| `cognition.rs` | ~1340 | Pipeline cognitivo: coleta de contexto (`AgentContext`), disparo de decisoes (sem intencao, necessidade critica, bloqueio, evento social, falha economica), montagem de `DecisionInput` com todos os dominios (psicologico, economico, legal, politico, institucional, feudal, informacional, cultural), chamadas LLM paralelas via `rayon`, Think Maker em background, turnos de conversa |
+| `tick.rs` | ~450 | Loop principal: crescimento de colheitas, fronteira de dia (fechamento economico, envelhecimento, nascimentos, casamentos, luto, caravanas, rumores, historias culturais, guerras), fila de tarefas, execucao de intencoes, comportamento autonomo de sobrevivencia |
+| `navigation.rs` | ~1105 | Pathfinding BFS no grid respeitando paredes/portas, resolucao de destinos por intencao (trabalho, descanso, alimentacao, social), avanco de movimento com eventos de entrada/saida de edificios, consultas de vizinhanca |
+| `economy.rs` | ~1195 | Degradacao de necessidades, cura de partes do corpo (contusoes, laceraoes, fraturas, dano permanente), economia de sobrevivencia autonoma, tarefas economicas multi-etapa, transferencia de recursos, compra/venda de itens, projetos de construcao, demandas militares |
+| `conflict.rs` | ~1276 | Sistema de combate com partes do corpo, armas/armaduras, descricoes viscerais, roubo/furto, fuga, acusacao/investigacao/prisao/punicao, casos criminais com testemunhas, morte com heranca (sucessao de oficio, transferencia de dinheiro, luto familiar) |
+| `politics.rs` | ~1321 | Sistema feudal completo, atos politicos (decretos), faccoes, issues, pressoes, sistema de insurreicao (Agitacao → Tumulto → Revolta → Guerra Civil), relacoes externas entre polities, guerras (5 estagios) |
+| `social.rs` | ~1260 | Protocolo de conversas multi-turno, espalhamento de rumores (com distorcao e credibilidade), historias culturais (ciclo de vida: emergente → estavel → canonizada/esquecida), segredos, encontros agendados, promessas, transferencias economicas durante dialogo |
+| `fauna.rs` | ~849 | Criaturas magicas (4 especies), combate, loot, missoes de caca, efeitos territoriais |
+| `views.rs` | ~974 | Projecoes read-only para TUI/headless/persistencia: sumarios, visao de agentes (40+ campos), overviews (economia, justica, politica, cultura, feudal), mapa ASCII |
+| `helpers.rs` | ~1005 | Utilitarios: merge de recursos, pathfinding, deltas de relacao, sentencas, proficiencia de oficio, itens (instancias, equipamento, degradacao), consultas de agentes |
+| `debug.rs` | ~626 | API de debug com 50+ metodos para testes e intervencao manual |
 
-- `TileCoord`, `TileKind`: grid espacial tile-based (grass, road, floor, wall, door, field, forest, rock, water).
-- `AgentProfile`: tracos, valores, medos, desejos de longo prazo, tolerancias morais, estilo social.
-- `AgentState`: estado fisiologico e emocional (hunger, energy, health, stress, mood, 0–100).
-- `AgentLifeStatus`: Vivo, Incapacitado, Morto.
-- `InjuryState`: ferimentos leves/graves, dor, sangramento, ticks de recuperacao.
-- `AgentMemory`: memoria episodica com peso emocional, tags, entidades relacionadas, dia e tick.
-- `AgentRelation`: vinculo bilateral entre dois agentes (trust, friendship, resentment, attraction, moral_debt, reputation).
-- `AgentIntent`: decisao estruturada produzida pelo LLM com ate 30+ tipos de acao.
-- `ConversationState` / `ConversationTurn`: dialogo multi-turno com ate 6 turnos por conversa.
-- `CombatState`: rounds de combate, desfechos (Fled, Incapacitation, Death, DistanceBreak).
-- `CrimeCase`: casos criminais com pipeline Open → Investigating → Proven → Arrested → Punished → Closed.
-- `PoliticalFaction` / `PoliticalIssue` / `PoliticalPressure`: faccoes com agendas, issues com votacao, pressoes por mudanca de normas.
-- `EconomyCatalog`, `HouseholdEconomy`, `EstablishmentEconomy`, `EconomicTask`: economia com recursos, receitas, precos, tarefas economicas multi-etapa.
-- `FixtureSpec`, `BuildingSpec`, `RoomSpec`: mobiliario e edificios com interiores.
-- `SimulationSnapshot`: snapshot completo serializavel com grid, agentes, edificios, economias, crimes, faccoes.
+Arquivo raiz `src/sim_core.rs` (~978 linhas) declara todos os componentes ECS, `SimulationConfig`, `AgentView`, e a struct `Simulation`.
 
-### `src/agent_mind.rs` — Camada cognitiva
+### `src/world_model.rs` (~2668 linhas) — Tipos de dominio
 
-Define os payloads enviados ao LLM e a logica auxiliar de cognicao:
+Todos os tipos serializaveis do projeto:
 
-- `DecisionInput`: contexto completo para planejamento de acoes (fisiologia, perfil, memorias, relacoes, contexto psicologico, economico, legal e politico).
-- `ConversationTurnInput`: contexto para geracao de turnos de dialogo.
-- `ThinkMakerInput` / `ThinkMakerOutput`: payload para geracao de pensamentos/reflexoes.
-- `retrieve_relevant_memories()`: ranking de memorias por peso emocional, sobreposicao de tags e recencia.
-- `parse_decision_json()`: parsing robusto de JSON do LLM com normalizacao de markdown fences, coercao de tipos, validacao de campos.
-- `parse_conversation_turn_json_with_notes()`: parsing de turnos de conversa com normalizacao de texto em portugues.
-- `validate_intent()`: sanity-check da saida do LLM contra restricoes do mundo.
+- **Grid espacial**: `TileCoord`, `TileKind` (Grass, Road, Floor, Wall, Door, Field, Forest, Rock, Water).
+- **Agentes**: `AgentProfile` (tracos, valores, medos, desejos, tolerancias morais), `AgentState` (hunger, energy, health, stress, mood 0–100), `AgentLifeStatus`, `InjuryState`, `AgentMemory`, `AgentRelation`, `AgentIntent` (45+ tipos de acao).
+- **Combate**: `CombatState`, body parts (15+ tipos), `InjurySeverity` (Bruised → Destroyed).
+- **Crime**: `CrimeCase` com pipeline Open → Investigating → Proven → Arrested → Punished → Closed.
+- **Itens**: `ItemInstance` com durabilidade, qualidade, material, stats de combate. `EquipmentSlot` (6 slots), `ItemClass` (Weapon, Armor, Clothing, Jewelry, Tool).
+- **Feudal**: `FeudalTitle` (7 ranks: Rei → Oficial), `FeudalContract` (tribute, levy, corvee), `EstateHolding`, `SuccessionCrisis`, `PowerCenter`, `AuthorityOffice` (6 oficios).
+- **Politica**: `PoliticalFaction`, `PoliticalIssue`, `PoliticalPressure`, `PolicyAct`, `InsurrectionState` (6 estagios), `WarState` (5 estagios), `ForeignRelation`, `Territory`.
+- **Cultura**: `CulturalStory` (com lifecycle), `StoryVersion`, `StoryBelief`, `Rumor`, `Secret`.
+- **Economia**: `EconomyCatalog` (recursos, papeis, receitas, precos), `HouseholdEconomy`, `EstablishmentEconomy`, `EconomicTask`.
+- **Fauna**: `Creature`, `HuntingQuest`.
+- **Historia**: `HistoricalBootstrapSummary`, `HistoricalEventKind` (10 categorias).
+- `SimulationSnapshot`: snapshot completo serializavel com todos os subsistemas.
 
-### `src/llm_adapter.rs` — Interface LLM
+### `src/agent_mind.rs` (~1650 linhas) — Camada cognitiva
 
-Contem o trait `LlmAdapter` com tres metodos:
+- `DecisionInput`: payload para o action planner com 8 dominios de contexto (psicologico, economico, legal, politico, institucional, feudal, informacional, cultural).
+- `ConversationTurnInput`: contexto para turnos de dialogo.
+- `ThinkMakerInput` / `ThinkMakerOutput`: payload de reflexao.
+- `retrieve_relevant_memories()`: ranking por peso emocional, tags e recencia.
+- Parsing robusto: markdown fences, coercao de tipos, normalizacao de texto em portugues, validacao contra restricoes do mundo.
 
-- `plan_actions()`: planejamento de tarefas (action planner).
-- `generate_thoughts()`: geracao de reflexoes, emocao dominante, atualizacao de crencas (think maker).
-- `generate_conversation_turn()`: geracao de fala, movimento social e deltas de relacao.
+### `src/llm_adapter.rs` (~953 linhas) — Interface LLM
 
-Duas implementacoes:
+Trait `LlmAdapter` com 3 metodos: `plan_actions`, `generate_thoughts`, `generate_conversation_turn`.
 
-#### `MockLlmAdapter`
+**MockLlmAdapter** — heuristico offline:
+- Fome > 65 → Eat; Energia < 25 → Rest; Stress > 70 → Reflect.
+- Horario de trabalho (06:00–18:00) → Work; fim de tarde → Socialize.
+- Salario pendente → CollectPayment; despensa vazia → compra automatica.
+- Contexto feudal → respostas de tributo, corveia, levy; contexto institucional → obediencia/contestacao.
+- Relacoes hostis → Assault, Steal; positivas → Chat, Favor, Support.
 
-Adaptador heuristico local (sem rede) que produz comportamento coerente com regras deterministicas:
+**OpenAiCompatibleAdapter** — HTTP sincrono com retry/backoff para erros transientes. Tres prompts de sistema distintos. Respostas logadas em arquivo para analise de latencia.
 
-- hunger > 65 → Eat; energy < 25 → Rest; stress > 70 → Reflect;
-- horario de trabalho (ticks 360–1080 / 06:00–18:00) → Work;
-- final de tarde (ticks 1080–1260) → Socialize;
-- salario pendente → CollectPayment;
-- despensa vazia e fome → compra automatica de comida;
-- relacoes com ressentimento alto → Assault, Steal ou movimento social agressivo;
-- relacoes positivas → Chat, Favor, Support;
-- sozinho → Wander.
+### `src/world_gen.rs` (~3921 linhas) — Geracao procedural de mundo
 
-#### `OpenAiCompatibleAdapter`
+- Grid 150×100 com terreno (grass, forest, fields, rocks).
+- 1–3 vilas conectadas por estradas Manhattan.
+- Edificios com interiores (paredes, portas, mobilia com estoque inicial).
+- Agentes com nomes medievais portugueses e perfis deterministicos.
+- Relacoes iniciais: co-vilagers positivas, cross-village com desconfianca.
+- Integracao com `world_history`: consume o `HistoricalWorldState` para nomear vilas e armazenar sumario historico.
 
-Chamadas HTTP sincronas para API compativel com `chat/completions`. Configurado via variaveis de ambiente:
+### `src/world_history.rs` (~1973 linhas) — Pre-historia deterministica
 
-- `OPENAI_API_KEY`
-- `OPENAI_MODEL` (ex: `gpt-4.1-mini`)
-- `OPENAI_BASE_URL` (ex: `https://api.openai.com/v1/chat/completions`)
+Gera 100 anos de historia genealogica e politica antes da simulacao comecar:
 
-Inclui retry com backoff para erros transientes (timeout, 429, 5xx). Tres prompts de sistema distintos para action planner, think maker e conversation turn. Se as credenciais nao estiverem configuradas, cai automaticamente no `MockLlmAdapter`.
+- **Demografia**: casamentos, nascimentos, mortes, envelhecimento.
+- **Economia historica**: producao sazonal (primavera/verao/outono/inverno), escassez, construcao.
+- **Politica**: tributacao, decretos, obrigacoes feudais, sucessoes de lideranca, crises de legitimidade.
+- **Conflitos**: guerras entre vilas (5 estagios), insurreicoes (Agitacao → Guerra Civil).
+- **Justica**: casos criminais historicos, sentencas.
+- **Cultura**: transmissao de historias entre geracoes.
+- Estruturas de dados: `HistoricalWorldState`, `HistoricalSettlement`, `HistoricalPerson` (com arvore genealogica, 5 skills), `HistoricalHousehold`, `HistoricalWarRecord`, `HistoricalInsurrectionSeed`, `HistoricalSuccessionSeed`.
+- Seed deterministica (`--history-seed` ou fallback `--seed`).
 
-### `src/sim_core.rs` — Motor da simulacao (~10.400 linhas)
+### `src/economy_catalog.rs` (~1811 linhas) — Catalogo economico
 
-O coracao do projeto. Implementa:
+- **35+ recursos**: graos, lenha, madeira, pedra, metal_bruto, tecido, couro, cobre, prata, pao, caldo, ferramentas, moedas, 5 armas, 5 armaduras, 4 roupas, 4 joias.
+- **6 papeis sociais**: Campones, Ferreiro, Padeiro, Taverneiro, Guarda, Lider Local.
+- **15+ estabelecimentos**: casa, fazenda, lenhal, pedreira, forja, padaria, taverna, posto_guarda, solar, alfaiataria, ourivesaria, armazem_oculto, taverna_secreta.
+- **30+ receitas**: producao de materia-prima, forja de ferramentas/armas, costura de roupas, preparo de armaduras, ourivesaria de joias, 13 receitas de construcao.
+- **Sistema de itens**: `RefinementLevel` (Rudimentar → Excepcional) com tier scaling, `ItemCombatStats` (dano, precisao, protecao), proficiencias de oficio (smithing, tailoring, jewelry, leatherwork).
 
-#### Sistema ECS
+### `src/persistence.rs` (~200 linhas) — Persistencia SQLite
 
-ECS baseado em `bevy_ecs` com 15+ componentes: `AgentCore`, `ProfileComponent`, `StateComponent`, `RelationComponent`, `MemoryComponent`, `InventoryComponent`, `PositionComponent`, `PathComponent`, `IntentComponent`, `ThoughtComponent`, `TaskQueueComponent`, `ConversationStatusComponent`, `EconomicActivityComponent`, `TraumaTrackerComponent`.
+- Tabela `checkpoints`: snapshots JSON completos com `schema_version`.
+- Tabelas indexadas: `events`, `memories`, `relations`.
+- Politicas de save: diario, shutdown, intervalar configuravel.
+- Load: checkpoint mais recente por `total_ticks DESC`.
 
-#### Grid espacial e pathfinding
+### `src/tui.rs` (~553 linhas) — Interface de terminal
 
-- Grid padrao de 150×100 tiles com tipos: grass, road, floor, wall, door, field, forest, rock.
-- Pathfinding BFS considerando tiles caminhaveis.
-- Agentes seguem caminhos, respeitam tiles ocupados e re-roteiam em colisoes.
+TUI com `ratatui` + `crossterm`:
 
-#### Ciclo de tick
+- **Lista de agentes**: nome, papel, estado, fome, energia, humor, localizacao. Filtro por papel (`f`).
+- **Mapa ASCII**: viewport 44×22 centrada no agente selecionado.
+- **Detalhe do agente** (40+ campos): fisiologia, intencao, pensamento, inventario, equipamento, economia domestica, posicao feudal (titulo, suserano, subordinados, obrigacoes), filiacao politica, conversa ativa, relacoes, memorias, rumores, historias, percepcao institucional.
+- **Timeline de eventos** com destaque para agente selecionado.
 
-Cada tick (1 minuto simulado, 1440 por dia) executa:
+Controles: `q` sair, `espaco` pausar, `n` avancar tick, `+/-` velocidade, `setas` selecionar agente, `f` filtrar por papel.
 
-1. Avanca tempo global e degrada necessidades fisiologicas (hunger, energy, stress, health).
-2. Processa fila de tarefas assincronas pendentes (acoes em andamento como viajar, produzir).
-3. Colhe tarefas economicas completadas (producao, coleta de materia-prima).
-4. Avanca conversas ativas (ate 6 turnos, processamento paralelo com `rayon`).
-5. Dispara novas decisoes para agentes com budget cognitivo disponivel (chamadas LLM em background threads com `rayon`).
-6. Coleta decisoes assincronas ja concluidas e as aplica ao mundo.
-7. Resolve politica diaria (issues, faccoes, mudancas de normas).
-8. Coleta impostos diarios (1 coin por household/dia).
-9. Salva checkpoint se em fronteira de dia ou intervalo configurado.
+### `src/headless.rs` (~367 linhas) — Modo batch
 
-#### Acoes implementadas (30+)
+Execucao sem TUI com relatorios periodicos completos:
+
+- Estatisticas de agentes, distribuicao de papeis.
+- Overview economico, de justica, politico, cultural, feudal, de encontros.
+- Detalhe verbose por agente.
+- Mapa ASCII completo (`--map`).
+- Limites por ticks ou dias.
+
+### `src/cli.rs` (~316 linhas) — Interface de linha de comando
+
+| Flag | Tipo | Padrao | Descricao |
+|---|---|---|---|
+| `--headless` | flag | off | Modo batch sem TUI |
+| `--tui` | flag | on | Forca modo interativo |
+| `--new` | flag | off | Ignora save, cria mundo novo |
+| `--db PATH` | string | `village_sim.sqlite` | Caminho do banco SQLite |
+| `--seed N` | u64 | `1` | Seed do gerador procedural |
+| `--agents N` / `--population N` | usize | `21` | Agentes iniciais |
+| `--grid-width N` / `--width N` | i32 | `150` | Largura do grid |
+| `--grid-height N` / `--height N` | i32 | `100` | Altura do grid |
+| `--num-villages N` | usize | `3` | Quantidade de vilas |
+| `--village-name NOME` | string | `Santa Bruma` | Nome da vila principal |
+| `--history-years N` | u32 | `100` | Anos de pre-historia |
+| `--history-founding-households N` | usize | `3` | Casas fundadoras |
+| `--history-seed N` | u64 | usa `--seed` | Seed da pre-historia |
+| `--ticks N` | u64 | sem limite | Encerra apos N ticks |
+| `--days N` | u32 | sem limite | Encerra apos N dias |
+| `--save-every N` | u64 | `24` | Checkpoint intervalar (0 desativa) |
+| `--summary-every N` | u64 | `24` | Relatorio a cada N ticks |
+| `--event-tail N` | usize | `8` | Eventos por relatorio |
+| `--ticks-per-second N` | u32 | `1` | Ritmo headless |
+| `--map` | flag | off | Mapa ASCII nos relatorios |
+| `--help` | — | — | Ajuda |
+
+---
+
+## Sistemas implementados
+
+### Grid espacial e pathfinding
+
+- Grid 150×100 (configuravel) com 9 tipos de tile.
+- Pathfinding BFS respeitando paredes, portas e tiles ocupados.
+- Agentes seguem caminhos com resolucao de colisoes.
+- Destinos resolvidos por intencao: trabalho → oficina/campo, descanso → cama, alimentacao → mesa.
+
+### Cognicao (3 estagios)
+
+1. **Action Planner**: planeja 3–6 tarefas com 45+ tipos de acao. Contexto de 8 dominios.
+2. **Think Maker**: gera reflexao, emocao dominante, atualizacao de crencas.
+3. **Conversation Turn**: turnos de dialogo com fala, movimento social e deltas de relacao.
+
+Processamento assincrono com `rayon`: dispatch em background threads, join de resultados.
+
+### Acoes (45+ tipos)
 
 | Categoria | Acoes |
-|-----------|-------|
+|---|---|
 | Basicas | Work, Rest, Eat, Reflect, Wander |
 | Sociais | Socialize, Chat, Favor, Offend, Support, Oppose, RequestSupport, Mediate |
 | Economicas | Produce, Buy, Sell, Transport, CollectPayment, ReceivePayment |
 | Combate | Assault, Combat, Flee |
-| Crime | Steal, Loot |
-| Legais | Accuse, Investigate, Arrest, Punish |
-| Politicas | Pressure |
+| Crime | Steal, Loot, Accuse |
+| Justica | Investigate, Arrest, Punish |
+| Politicas | Pressure, Decree |
+| Feudais (14 novas) | JurarLealdade, RomperLealdade, ConcederTitulo, RevogarTitulo, NomearOficial, ExigirTributo, CobrarCorveia, ConvocarLevy, ReconhecerHerdeiro, ApoiarPretendente, Usurpar, ReivindicarTerritorio, NegociarSuserania, Esconder |
 
-#### Combate
+### Fisiologia e combate
 
-- Sistema de rounds com estados Active/Ended.
-- Desfechos: Fled (fuga), Incapacitation (incapacitacao), Death (morte), DistanceBreak (quebra por distancia).
-- Ferimentos leves e graves, dor, sangramento e recuperacao ao longo do tempo.
-- Morte por health = 0 (fome extrema ou ferimentos graves).
+- Necessidades: hunger, energy, health, stress, mood (0–100). Degradacao por tick.
+- **Sistema de partes do corpo** (15+ partes): cranio, olhos, pescoco, peito, abdomen, costas, ombros, bracos, maos, pernas, pes.
+- **Injuries**: Bruised → Lacerated → Fractured → Severed → Destroyed. Dano permanente para Severed/Destroyed.
+- **Cura**: contusoes/laceraoes em ticks, fraturas 4× mais lentas, partes perdidas sao permanentes.
+- **Armas e armaduras**: 5 armas, 5 armaduras com stats de combate. Degradacao por uso.
+- **Morte**: por health = 0. Heranca (sucessao de oficio, dinheiro, luto familiar).
 
-#### Sistema legal/criminal
+### Sistema feudal
 
-- Tipos de crime: Assault, Theft, Robbery, Homicide.
-- Pipeline: Open → Investigating → Proven → Arrested → Punished → Closed.
-- Testemunhas: agentes proximos viram testemunhas e geram crime cases automaticamente.
-- Sentencas: Restitution (restituicao), Fine (multa), Detention (detencao), Corporal (castigo corporal).
-- Guardas e Lideres executam Investigate, Arrest e Punish.
+- **Titulos**: Rei, Duque, Conde, Barao, Senhor, Cavaleiro, Oficial.
+- **Contratos**: suserano-vassalo com tribute diario, dever de levy, corveia, auxilio judicial.
+- **Cadeia de tributos**: propagacao bottom-up ordenada por rank.
+- **Estates**: concessoes de terra com edificios, valor anualizado, obrigacoes militares.
+- **Sucessao**: regras (HerdeiroDireto, ConjugeRegente, NomeacaoDoSuserano), crises com multiplos pretendentes.
+- **Oficios de autoridade**: Intendente, Coletor, JuizLocal, CapitaoDaGuarda, Carcereiro, AdministradorDoSolar.
+- **Usurpacao**: tomada de titulo por forca ou manobra politica.
 
-#### Economia
+### Sistema de guerra
 
-- Catalogo economico unificado com recursos, affordances, papeis, estabelecimentos, receitas de producao e receitas de construcao.
-- Recursos incluem comida, combustivel, ferramenta/capital, moeda e materiais de construcao como madeira e pedra.
-- Estabelecimentos podem ter multiplas receitas: lenhal produz lenha/madeira e pedreira produz metal bruto/pedra.
-- Economia domestica (HouseholdEconomy): treasury, pantry, reserved_food, tax_arrears.
-- Economia de estabelecimento (EstablishmentEconomy): cash, stock, precos, salarios.
-- Mercado externo com precos de compra/venda por recurso.
-- Tarefas economicas multi-etapa: AwaitingPickup → InTransit → AwaitingPayment → Completed/Failed.
-- Coleta automatica de salario, compra de comida em emergencia, racionamento.
-- Producao de materia-prima: fazendas produzem grains, woodlots produzem firewood, quarries produzem raw metal.
-- Construcao urbana emergente: pressoes sistemicas abrem projetos, materiais sao entregues fisicamente e o predio concluido entra no grid.
-- Colheitas: campos tem ciclo plant → growing → ready, colheita produz grains.
+- **5 estagios**: Mobilization → Raids → Siege → DecisiveBattle → Occupation.
+- **Demandas militares**: recursos, dinheiro, prazos, status de suprimento.
+- **Relacoes externas**: 6 stances (Neutral, TradePartner, Ally, Rival, AtWar, Tributary).
+- **Transferencia de territorio** ao vencer batalhas decisivas.
 
-#### Sistema politico
+### Insurreicao
 
-- Issues (pautas) com suporte/oposicao nos dominios: Tax, Justice, Rationing.
-- Faccoes politicas com agenda, influencia e objetivos emergentes (Food Riot, Tax Boycott, Depose Leader, Vigilante Justice).
-- Pressoes politicas: agentes aplicam pressao em issues.
-- Resolucao diaria: normas locais mudam quando issues tem suporte suficiente.
-- Normas locais: Justice severity (Lenient/Normal/Severe), Rationing policy (HouseholdFirst, ProducersFirst, CivicFirst, Balanced).
-- Chaos pressure: 0–100, afeta probabilidade de violencia, agressividade social, tolerancia a roubo.
+- **6 estagios**: Agitation → Riot → OrganizedRevolt → CivilWar → Suppressed/Victorious.
+- Suporte popular, repressao, guerra vinculada.
 
-#### Sistema social
+### Economia de itens
+
+- **35+ recursos** incluindo itens craftados com qualidade e durabilidade.
+- **30+ receitas**: producao, forja, costura, ourivesaria, construcao.
+- **6 slots de equipamento**: MainHand, OffHand, Body, Outer, Accessory1, Accessory2.
+- **Proficiencias de oficio**: smithing, tailoring, jewelry, leatherwork.
+- **Mercado externo**: precos de compra/venda para 27 recursos.
+- **Projetos de construcao**: coleta de materiais, dias de trabalho, progresso.
+- **Economia domestica autonoma**: comer da despensa → comprar comida → coletar salario → descansar → trabalhar.
+
+### Crime e justica
+
+- **Crimes**: Assault, Theft, Robbery, Homicide.
+- **Pipeline**: Open → Investigating → Proven → Arrested → Punished → Closed.
+- **Testemunhas**: propagacao automatica, contágio psicologico em predios.
+- **Sentencas**: Restitution, Fine, Detention, Corporal.
+- **Percepcao institucional**: confianca na guarda/justica afetada por severidade de punicoes.
+
+### Sistema cultural
+
+- **Rumores**: espalhamento com distorcao e credibilidade, decaimento diario.
+- **Historias culturais**: ciclo de vida (Emergente → Estavel → Canonizada/Esquecida), forca cultural, versoes multiplas, crencas com apego emocional.
+- **Segredos**: criacao por calunia investigada, revelacao durante conversas.
+- **Tradicoes**: transmitidas entre geracoes.
+
+### Fauna magica
+
+- **4 especies**: Silvafaro (estabilidade +2/dia), Pedrapiro (agressivo, ataca agentes), Lebre-zelo (fugitivo), Brumalisco (estabilidade -2/dia).
+- **Combate**: mesmas regras de partes do corpo que agentes.
+- **Missoes de caca**: diarias, com recompensas em ouro (50–100).
+- **Loot**: recursos magicos (essencia_silvafaro, nucleo_pedrapiro, etc.).
+- **Historias lendarias**: criadas ao abater criaturas lendarias.
+
+### Sistema social
 
 - Relacoes bilaterais com 6 dimensoes: trust, friendship, resentment, attraction, moral_debt, reputation.
-- Conversas multi-turno (ate 6 turnos) com processamento paralelo.
-- Desfechos de conversa: MutualEnd, OneSidedExit, MaxTurns, DistanceBreak, BlockingBreak, CriticalNeed, PhysicalConflict, ProviderTimeout.
-- Deltas de relacao por turno (mudancas incrementais em cada dimensao).
+- Conversas multi-turno (ate 6 turnos) com processamento paralelo de multiplas conversas.
+- 8 desfechos de conversa: MutualEnd, OneSidedExit, MaxTurns, DistanceBreak, BlockingBreak, CriticalNeed, PhysicalConflict, ProviderTimeout.
+- Encontros agendados: propor, aceitar, viajar, executar.
+- Transferencias economicas e promessas durante dialogo.
 
-#### Fisiologia e saude
+---
 
-- Necessidades: hunger, energy, health, stress, mood (escala 0–100).
-- Degradacao por tick: fome aumenta, energia diminui, stress varia conforme contexto.
-- Ferimentos: light_wounds, severe_wounds, pain, bleeding, recovery_ticks.
-- Trauma tracker: ticks consecutivos de fome/stress/riqueza, violencia testemunhada.
-- Morte: health = 0 por fome extrema ou ferimentos nao tratados.
+## Valores padrao
 
-#### Processamento assincrono
-
-- Dispatch de decisoes LLM em threads background via `rayon`.
-- Workers de action planner e think maker separados.
-- Loop assincrono: junta resultados de threads conforme completam.
-- Faccao emergente com objetivo dinamico definido pela IA.
-
-### `src/world_gen.rs` — Geracao procedural de mundo
-
-Cria um `SimulationSnapshot` completo a partir de `SimulationConfig`:
-
-- Grid espacial com terreno (grass, forest, fields, rocks).
-- 1–3 vilas com estradas conectando centros (estilo Manhattan).
-- Edificios por vila: 4 casas, solar/manor, guard post, forge, taverna, bakery, woodlot, farm/celeiro, quarry.
-- Interiores com paredes, portas, mobilia (camas, mesas, estacoes de trabalho, armazenamento com estoque inicial).
-- Agentes (ate 21) com nomes medievais portugueses e perfis deterministicos (traits, values, fears, desires tematicos).
-- Relacoes iniciais: co-vilagers positivas, cross-village com desconfianca xenofobica.
-- Economias domesticas e de estabelecimento pre-configuradas.
-
-### `src/persistence.rs` — Persistencia SQLite
-
-- Tabela `checkpoints`: snapshots completos em JSON com `schema_version` (atual: 11).
-- Tabelas `events`, `memories`, `relations`: copias indexadas para queries offline.
-- Politicas de save: diario (`kind = "daily"`), encerramento (`kind = "shutdown"`), intervalar configuravel.
-- Load: carrega checkpoint mais recente por `total_ticks DESC`, a menos que `--new`.
-- Validacao de schema: rejeita snapshots legados sem grid espacial/economia/construcao atualizada.
-
-### `src/tui.rs` — Interface de terminal
-
-TUI com `ratatui` + `crossterm`, 3 paineis:
-
-- **Lista de agentes**: nome, papel, estado, fome, energia, humor, localizacao. Filtro por papel (`f`).
-- **Mapa ASCII**: viewport 44×22 centralizada no agente selecionado, mostrando edificios, estradas, agentes e colheitas.
-- **Detalhe do agente**: posicao, estado fisiologico, intencao, pensamento, inventario, economia domestica, filiacao politica, conversa ativa, relacoes, memorias recentes, ferimentos.
-- **Timeline de eventos**: eventos recentes com destaque para o agente selecionado.
-- **Barra de controles**: ajuda com todos os atalhos.
-
-Controles:
-- `q` — sair
-- `espaco` — pausar/retomar
-- `n` — avancar um tick
-- `+`/`-` — acelerar/desacelerar
-- `setas` — selecionar agente
-- `f` — alternar filtro por papel
-
-### `src/headless.rs` — Modo batch
-
-Execucao sem TUI para lotes, geracao de checkpoints e observacao via stdout:
-
-- Relatorios periodicos com estatisticas de agentes, visao geral economica, legal e politica.
-- Mapa ASCII completo opcional (`--map`).
-- Limites de ticks ou dias simulados.
-- Save intervalar configuravel.
-- Ritmo de simulacao configuravel (`--ticks-per-second`).
-
-### `src/economy_catalog.rs` — Catalogo economico padrao
-
-Define `default_economy_catalog()` com todos os dados de referencia:
-
-- 7 recursos, 7 papeis, 9 arquetipos espaciais, 8 tipos de estabelecimento.
-- 6 receitas de producao com inputs/outputs.
-- Precos de compra/venda no mercado externo.
-- Funcao `validate_catalog()` que verifica integridade referencial de todos os IDs.
-
-### `src/cli.rs` — Interface de linha de comando
-
-Parser de argumentos com suporte a:
-
-| Flag | Descricao |
-|------|-----------|
-| `--headless` | Modo batch sem TUI |
-| `--tui` | Forca modo interativo (padrao) |
-| `--new` | Ignora save e cria mundo novo |
-| `--db PATH` | Caminho do banco SQLite |
-| `--seed N` | Seed do gerador procedural |
-| `--agents N` / `--population N` | Quantidade de agentes iniciais |
-| `--grid-width N` / `--width N` | Largura do grid |
-| `--grid-height N` / `--height N` | Altura do grid |
-| `--num-villages N` | Quantidade de vilas |
-| `--village-name NOME` | Nome da vila principal |
-| `--ticks N` | Encerra apos N ticks (headless) |
-| `--days N` | Encerra apos N dias (headless) |
-| `--save-every N` | Checkpoint intervalar (0 desativa) |
-| `--summary-every N` | Relatorio a cada N ticks |
-| `--event-tail N` | Eventos recentes no relatorio |
-| `--ticks-per-second N` | Ritmo da simulacao headless |
-| `--map` | Inclui mapa ASCII nos relatorios |
-| `--help` | Mostra ajuda |
-
-## Sistema cognitivo em detalhe
-
-O comportamento do agente e dividido em tres estagios:
-
-### 1. Action Planner (planejamento de acoes)
-
-Entrada (`DecisionInput`):
-- Identidade, papel, dia/tick, localizacao, estado fisiologico.
-- Perfil psicologico (traits, values, fears, desires, moral tolerances).
-- Memorias relevantes (ranking por peso emocional, tags e recencia).
-- Eventos recentes, metas atuais, orcamento residual.
-- Contexto psicologico (PsychologicalContextInput).
-- Contexto economico (EconomicContextInput): household treasury, pantry, salario pendente.
-- Contexto legal (LegalContextInput): crime cases proximos, testemunhas.
-- Contexto politico (PoliticalContextInput): faccoes, issues, pressoes ativas.
-
-Saida (`DecisionEnvelope`):
-- Sequencia de 3–6 tarefas com tipo, alvo, local, justificativa, prioridade, risco percebido.
-- Emocao dominante, atualizacoes de crenca, movimento social.
-
-### 2. Think Maker (geracao de reflexoes)
-
-Entrada (`ThinkMakerInput`):
-- Contexto similar ao action planner, focado em estado interno.
-
-Saida (`ThinkMakerOutput`):
-- `thought`: reflexao textual curta.
-- `dominant_emotion`: emocao atual.
-- `belief_updates`: mudancas em crencas/metas.
-- `memory_tags`: tags para indexacao da memoria gerada.
-
-### 3. Conversation Turn (turnos de dialogo)
-
-Quando a acao e social, o motor solicita turnos de dialogo:
-
-- Ate 6 turnos por conversa, alternando entre falantes.
-- Cada turno gera fala, movimento social e deltas de relacao.
-- Desfechos variados (mutuo, unilateral, timeout, escalacao para conflito fisico).
-- Processamento paralelo de multiplas conversas no mesmo tick.
-
-### Parsing robusto
-
-O parser de JSON do LLM lida com:
-- Markdown fences (```json ... ```).
-- Coercao de tipos (string → number, booleanos textuais em portugues/ingles).
-- Normalizacao de nomes de movimentos sociais em portugues.
-- Validacao de intencoes contra restricoes do mundo.
-
-## Valores padrao da simulacao
-
-| Parametro | Valor padrao |
-|-----------|-------------|
+| Parametro | Padrao |
+|---|---|
 | Nome da vila | Santa Bruma |
 | Ticks por dia | 1440 (1 tick = 1 minuto) |
 | Agentes iniciais | 21 |
-| Grid | 150 × 100 tiles |
+| Grid | 150 × 100 |
 | Vilas | 3 |
 | World seed | 1 |
-| Banco de dados | `village_sim.sqlite` |
-| Schema version | 10 |
+| Anos de pre-historia | 100 |
+| Casas fundadoras | 3 |
+| Schema version | (dinamico) |
+
+---
 
 ## Como rodar
 
 ### Requisitos
 
-- Rust toolchain recente (edition 2024).
-- Opcional: chave de API compativel com OpenAI para o adaptador real.
+- Rust toolchain (edition 2024).
+- Opcional: chave de API OpenAI-compatible.
 
-### TUI com mock local (padrao)
+### TUI com mock (padrao)
 
 ```bash
 cargo run
@@ -356,6 +306,7 @@ cargo run -- --headless --ticks 96 --save-every 24 --summary-every 12 --map
 # Mundo customizado
 cargo run -- --headless --new --seed 42 --agents 30 --num-villages 2 \
   --grid-width 200 --grid-height 120 --village-name "Pedra Clara" \
+  --history-years 50 --history-founding-households 5 \
   --ticks 240 --summary-every 24 --save-every 48 --map
 
 # Por dias simulados
@@ -371,64 +322,42 @@ export OPENAI_BASE_URL=https://api.openai.com/v1/chat/completions
 cargo run
 ```
 
+---
+
 ## Como testar
 
 ```bash
 cargo test
 ```
 
-29 testes integrados cobrindo:
+~15 testes de integracao cobrindo: pathfinding com paredes, rumores e historias culturais, combate com partes do corpo, crime e justica, pressao politica e faccoes, decretos e atos politicos, guerra com demandas militares, tributos feudais recursivos, corveia feudal, expansao territorial, e fauna magica.
 
-- Parsing de JSON cognitivo (action planner, think maker, conversation turn).
-- Normalizacao de markdown fences, coercao de tipos, texto em portugues.
-- Recuperacao e ranking de memorias.
-- Geracao procedural de mundo (edificios, mobilia, agentes).
-- Pathfinding e movimento com tiles ocupados.
-- Mecanica de conversas (adjacencia, alternancia de turnos, timeout).
-- Persistencia e restauracao de snapshot (round-trip).
-- Processamento paralelo de conversas.
-- Rejeicao de snapshots de schema legado.
-- Simulacao de uma semana completa com restricoes fisicas do grid.
-- Geracao de woodlot/quarry.
-- Coleta diaria de impostos e producao de materia-prima.
-- Combate (assault → combat rounds → crime case).
-- Roubo (theft → transferencia de recursos → crime case).
-- Pipeline de investigacao/arresto/punicao pela guarda.
-- Pressao politica, criacao de issues, formacao de faccoes, mudanca de normas.
-- Consumo emergencial de comida em fome critica.
-- Processamento assincrono de decisoes (background LLM threads com rayon).
-- Ciclo agricola completo (plant → growing → ready → colheita).
+---
 
-## Compatibilidade de ambiente
+## Compatibilidade
 
-Validado com sucesso via WSL usando `cargo test`.
+Validado em WSL/Linux. No Windows nativo pode falhar linkedicao por falta de `link.exe` e Windows SDK — instale Visual Studio Build Tools ou use WSL.
 
-No Windows nativo, o toolchain Rust pode falhar na linkedicao por falta de `link.exe` e bibliotecas do Windows SDK. Solucoes:
-
-- Instalar Visual Studio Build Tools com o SDK de C++.
-- Rodar o projeto via WSL/Linux.
+---
 
 ## Limitacoes atuais
 
-- Chamadas LLM usam `chat/completions` (nao `responses` nem streaming).
-- Chamadas HTTP sao sincronas (o paralelismo vem do dispatch em multiplas threads, nao de IO assincrono).
-- A compressao semantica de memoria de longo prazo ainda nao foi implementada (truncamento simples por vetor).
-- O banco SQLite cresce indefinidamente (sem politica de compactacao/retencao).
-- Nao ha API externa JSON para clientes remotos.
-- Agentes nao formam familias formais ou lacos de parentesco.
-- A explicabilidade na TUI e boa mas resumida (sem visualizacao de grid completa ou grafo de relacoes).
-- Nao ha conceito de geracoes, envelhecimento ou substituicao populacional.
+- Chamadas HTTP sao sincronas (paralelismo via threads rayon, nao IO assincrono).
+- Sem compressao semantica de memoria de longo prazo (truncamento simples).
+- Banco SQLite cresce indefinidamente (sem compactacao/retencao).
+- Sem API externa JSON/WebSocket.
+- Agentes nao formam familias formais com lacos de parentesco completos na simulacao viva (apenas na pre-historia).
+- Nao ha envelhecimento ou substituicao populacional plena na simulacao.
+
+---
 
 ## Proximos passos
 
-- Compressao semantica de memoria (sumarizacao periodica de memorias antigas).
-- Evoluir adaptador LLM para `responses` e/ou streaming.
-- API externa JSON/WebSocket para observacao e controle remotos.
-- Visualizacao expandida na TUI (mapa completo, grafo de relacoes, dashboard economico).
-- Relacoes de parentesco e familias formais.
-- Export de snapshots para analise offline.
-- Politica de retencao/compactacao do banco SQLite.
-- Suporte a customizacao de catalogo economico via arquivo externo.
-
-
-passar para os agentes a lista completa de lugares do mundo de forma semnatica e obrigar a llm a usar estritamente esses lugares na conversas. e açoes adicionar a possibilidade dos agentes marcarem encontros em lugares especifcos em horarios especificos, adicionar ciclor de dia e noita e horas do dia que sao passados para o contexto cognitivo dos agentes. 
+- Compressao semantica de memorias antigas.
+- Streaming e `responses` no adaptador LLM.
+- API externa para observacao e controle remotos.
+- Visualizacao expandida na TUI (mapa completo, grafo de relacoes).
+- Familias formais e parentesco na simulacao viva.
+- Politica de retencao do banco SQLite.
+- Catalogo economico customizavel via arquivo externo.
+- Envelhecimento e renovacao populacional completos.
