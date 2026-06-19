@@ -1,4 +1,5 @@
 use super::*;
+use crate::world_model::{BodyPartKind, PartInjuryStatus};
 use std::collections::HashSet;
 // Political pressure, faction, issue and local norm systems.
 
@@ -538,7 +539,7 @@ impl Simulation {
         })
     }
 
-    fn agent_core_snapshot(&self, agent_id: u64) -> Option<AgentCore> {
+    pub(super) fn agent_core_snapshot(&self, agent_id: u64) -> Option<AgentCore> {
         let entity = self.find_agent_entity(agent_id).ok()?;
         self.world.get::<AgentCore>(entity).cloned()
     }
@@ -633,15 +634,12 @@ impl Simulation {
             .iter()
             .filter(|office| office.active && office.holder_agent_id.is_some())
             .filter(|office| {
-                office
-                    .title_id
-                    .and_then(|title_id| {
-                        self.feudal_titles
-                            .iter()
-                            .find(|title| title.id == title_id)
-                            .and_then(|title| title.polity_id)
-                    })
-                    == Some(polity_id)
+                office.title_id.and_then(|title_id| {
+                    self.feudal_titles
+                        .iter()
+                        .find(|title| title.id == title_id)
+                        .and_then(|title| title.polity_id)
+                }) == Some(polity_id)
             })
             .map(|office| office.authority_score / 3)
             .sum::<i32>();
@@ -1098,14 +1096,20 @@ impl Simulation {
     }
 
     pub(super) fn refresh_feudal_state(&mut self) -> Result<()> {
-        self.apply_daily_feudal_obligations()?;
+        self.apply_daily_feudal_obligations(false)?;
         self.refresh_power_centers();
         self.refresh_succession_crises()?;
+        if self.tick_of_day + 1 == self.ticks_per_day {
+            self.recalculate_territory_values();
+            self.apply_daily_organic_expansion();
+            self.spawn_daily_common_creatures();
+            let _ = self.generate_fauna_quests();
+        }
         Ok(())
     }
 
-    pub(super) fn apply_daily_feudal_obligations(&mut self) -> Result<()> {
-        if self.tick_of_day + 1 != self.ticks_per_day {
+    pub fn apply_daily_feudal_obligations(&mut self, force: bool) -> Result<()> {
+        if !force && self.tick_of_day + 1 != self.ticks_per_day {
             return Ok(());
         }
         let households = self.households.clone();
@@ -1182,6 +1186,129 @@ impl Simulation {
             }
         }
         self.events.extend(events);
+
+        // --- Vassal to Suzerain Tribute Propagation (Bottom-Up) ---
+        let mut contracts = self.feudal_contracts.clone();
+        contracts.retain(|c| c.status == FeudalContractStatus::Active);
+
+        let get_agent_rank_level = |agent_id: u64| -> u8 {
+            self.feudal_titles
+                .iter()
+                .filter(|title| title.active && title.holder_agent_id == Some(agent_id))
+                .map(|title| match title.rank {
+                    FeudalRank::Rei => 6,
+                    FeudalRank::Duque => 5,
+                    FeudalRank::Conde => 4,
+                    FeudalRank::Barao => 3,
+                    FeudalRank::Senhor => 2,
+                    FeudalRank::Cavaleiro => 1,
+                    FeudalRank::Oficial => 0,
+                })
+                .max()
+                .unwrap_or(0)
+        };
+
+        contracts.sort_by_key(|c| get_agent_rank_level(c.vassal_agent_id));
+
+        let mut contract_events = Vec::new();
+        for contract in contracts {
+            let suzerain_id = contract.suzerain_agent_id;
+            let vassal_id = contract.vassal_agent_id;
+
+            let vassal_household_id = self
+                .agent_core_snapshot(vassal_id)
+                .and_then(|core| core.home_building_id);
+            let suzerain_household_id = self
+                .agent_core_snapshot(suzerain_id)
+                .and_then(|core| core.home_building_id);
+
+            let Some(v_house_id) = vassal_household_id else {
+                continue;
+            };
+
+            let vassal_household_arrears = self
+                .households
+                .iter()
+                .find(|h| h.id == v_house_id)
+                .map(|h| h.feudal_arrears)
+                .unwrap_or(0);
+
+            let due = contract.tribute_due_per_day.max(0) + vassal_household_arrears.max(0);
+            if due <= 0 {
+                continue;
+            }
+
+            let available_treasury = self
+                .households
+                .iter()
+                .find(|h| h.id == v_house_id)
+                .map(|h| h.treasury)
+                .unwrap_or(0);
+
+            let payment = available_treasury.min(due);
+
+            if let Some(entry) = self
+                .households
+                .iter_mut()
+                .find(|entry| entry.id == v_house_id)
+            {
+                entry.treasury -= payment;
+                let unpaid = due - payment;
+                entry.feudal_arrears = unpaid;
+            }
+
+            if let Some(s_house_id) = suzerain_household_id {
+                if let Some(suzerain_household) = self
+                    .households
+                    .iter_mut()
+                    .find(|entry| entry.id == s_house_id)
+                {
+                    suzerain_household.treasury += payment;
+                }
+            }
+
+            let vassal_name = self
+                .agent_name(vassal_id)
+                .unwrap_or_else(|_| format!("agente {}", vassal_id));
+            let suzerain_name = self
+                .agent_name(suzerain_id)
+                .unwrap_or_else(|_| format!("agente {}", suzerain_id));
+
+            if payment > 0 {
+                contract_events.push(WorldEvent {
+                    day: self.day,
+                    tick: self.tick_of_day,
+                    actor: vassal_id,
+                    target: Some(suzerain_id),
+                    kind: EventKind::TributePaid,
+                    summary: format!(
+                        "{} pagou {} moeda(s) de tributo ao suserano {}.",
+                        vassal_name, payment, suzerain_name
+                    ),
+                    impact_tags: vec!["feudal".to_string(), "tributo".to_string()],
+                });
+            }
+
+            if payment < due {
+                contract_events.push(WorldEvent {
+                    day: self.day,
+                    tick: self.tick_of_day,
+                    actor: vassal_id,
+                    target: Some(suzerain_id),
+                    kind: EventKind::TributeRefused,
+                    summary: format!(
+                        "{} nao conseguiu pagar tributo feudal completo ao suserano {}: devia {}, pagou {}.",
+                        vassal_name, suzerain_name, due, payment
+                    ),
+                    impact_tags: vec![
+                        "feudal".to_string(),
+                        "inadimplencia".to_string(),
+                        "tributo".to_string(),
+                    ],
+                });
+            }
+        }
+        self.events.extend(contract_events);
         Ok(())
     }
 
@@ -1282,9 +1409,8 @@ impl Simulation {
                 && (crisis.claimant_ids.len() <= 1
                     || crisis.conflict_score <= 20
                     || (age >= 2 && crisis.legitimacy_gap <= 18));
-            let should_resolve_by_force = crisis.usurper_id.is_some()
-                && age >= 4
-                && crisis.conflict_score >= 50;
+            let should_resolve_by_force =
+                crisis.usurper_id.is_some() && age >= 4 && crisis.conflict_score >= 50;
             if !(should_resolve_regular || should_resolve_by_force) {
                 continue;
             }
@@ -2633,8 +2759,36 @@ impl Simulation {
             {
                 if let Some(mut injury) = entity_mut.get_mut::<InjuryComponent>() {
                     injury.0.light_wounds = injury.0.light_wounds.saturating_add(1);
-                    injury.0.pain = (injury.0.pain + 12).clamp(0, 100);
-                    injury.0.bleeding = (injury.0.bleeding + 2).clamp(0, 100);
+                    let target_part = if *agent_id % 2 == 0 {
+                        BodyPartKind::Chest
+                    } else {
+                        BodyPartKind::LeftLeg
+                    };
+                    if let Some(part) = injury
+                        .0
+                        .body_parts
+                        .iter_mut()
+                        .find(|p| p.kind == target_part)
+                    {
+                        part.health = (part.health - 12).clamp(0, 100);
+                        part.status = PartInjuryStatus::Lacerated;
+                        part.pain += 12;
+                        part.bleeding += 2;
+                    }
+                    injury.0.pain = injury
+                        .0
+                        .body_parts
+                        .iter()
+                        .map(|p| p.pain)
+                        .sum::<i32>()
+                        .clamp(0, 100);
+                    injury.0.bleeding = injury
+                        .0
+                        .body_parts
+                        .iter()
+                        .map(|p| p.bleeding)
+                        .sum::<i32>()
+                        .clamp(0, 10);
                 }
                 if let Some(mut state) = entity_mut.get_mut::<StateComponent>() {
                     state.0.health = (state.0.health - 12).clamp(0, 100);
@@ -3399,15 +3553,52 @@ impl Simulation {
         if create_civil_war {
             let rebel_polity_id = self.next_polity_id;
             self.next_polity_id += 1;
+            let founder_id = active_rebel_factions
+                .first()
+                .map(|faction| faction.founder_id)
+                .unwrap_or(0);
+            let rebel_name = self.generate_emergent_polity_name(founder_id);
+
             self.polities.push(Polity {
                 id: rebel_polity_id,
-                name: format!("Comuna Rebelde #{}", insurrection_id),
-                ruler_agent_id: active_rebel_factions
-                    .first()
-                    .map(|faction| faction.founder_id),
+                name: rebel_name.clone(),
+                ruler_agent_id: Some(founder_id),
                 capital_territory_id: Some(target_territory_id),
                 treasury: 0,
                 military_readiness: (support / 4).clamp(10, 80),
+            });
+
+            // Initial policy act (tax rate based on founder traits)
+            let mut tax_rate = 12;
+            if let Ok(profile) = self.agent_profile(founder_id) {
+                if profile.traits.iter().any(|t| t == "generoso") {
+                    tax_rate = 8;
+                } else if profile.traits.iter().any(|t| t == "ganancioso") {
+                    tax_rate = 18;
+                }
+            }
+
+            let policy_act_id = self.next_policy_act_id;
+            self.next_policy_act_id += 1;
+            self.policy_acts.push(PolicyAct {
+                id: policy_act_id,
+                agenda_tag: "imposto_inicial".to_string(),
+                summary: format!("Imposto inicial da nova polity {}.", rebel_name),
+                issuer_agent_id: Some(founder_id),
+                issuer_polity_id: Some(rebel_polity_id),
+                authority: PolicyAuthority::LocalLeader,
+                scope: PolicyScope::Polity(rebel_polity_id),
+                target: PolicyTarget::Polity(rebel_polity_id),
+                effects: vec![PolicyEffect::TaxRate {
+                    rate_percent: tax_rate,
+                }],
+                legitimacy: 60,
+                enforcement: 70,
+                resistance: 0,
+                status: PolicyActStatus::Active,
+                issued_day: self.day,
+                issued_tick: self.tick_of_day,
+                expires_day: None,
             });
             let war_id = self.next_war_id;
             self.next_war_id += 1;
@@ -4051,7 +4242,7 @@ impl Simulation {
         Ok(())
     }
 
-    pub(super) fn apply_feudal_oath_intent(
+    pub fn apply_feudal_oath_intent(
         &mut self,
         agent_id: u64,
         target_agent_id: Option<u64>,
@@ -4335,32 +4526,128 @@ impl Simulation {
         Ok(())
     }
 
-    pub(super) fn apply_levy_call_intent(
+    pub fn apply_levy_call_intent(
         &mut self,
         agent_id: u64,
         target_agent_id: Option<u64>,
     ) -> Result<()> {
-        let target_household_id =
-            target_agent_id.and_then(|target_id| self.household_id_for_agent_immutable(target_id));
+        let Some(vassal_id) = target_agent_id else {
+            return Ok(());
+        };
+
+        let target_household_id = self.household_id_for_agent_immutable(vassal_id);
         let Some(household_id) = target_household_id else {
             return Ok(());
         };
-        if let Some(household) = self
-            .households
-            .iter_mut()
-            .find(|household| household.id == household_id)
-        {
-            household.levy_service_due = (household.levy_service_due + 1).clamp(0, 10);
+
+        // 1. Get contract and title stats for refusal chance
+        let mut contract_loyalty = 50;
+        let mut levy_duty = 1;
+        let mut has_active_contract = false;
+
+        if let Some(contract) = self.feudal_contracts.iter().find(|c| {
+            c.vassal_agent_id == vassal_id
+                && c.suzerain_agent_id == agent_id
+                && c.status == FeudalContractStatus::Active
+        }) {
+            contract_loyalty = contract.loyalty;
+            levy_duty = contract.levy_duty;
+            has_active_contract = true;
         }
-        self.push_event(WorldEvent {
-            day: self.day,
-            tick: self.tick_of_day,
-            actor: agent_id,
-            target: target_agent_id,
-            kind: EventKind::LevyCalled,
-            summary: format!("{} convocou levy feudal.", self.agent_name(agent_id)?),
-            impact_tags: vec!["feudal".to_string(), "levy".to_string()],
-        });
+
+        let suzerain_title_opt = self.active_feudal_title_for_holder(agent_id).cloned();
+        let title_legitimacy = suzerain_title_opt
+            .as_ref()
+            .map(|t| t.legitimacy)
+            .unwrap_or(50);
+
+        // Refusal chance: (45 - loyalty).max(0) * 2 + (40 - legitimacy).max(0)
+        let raw_chance = (45 - contract_loyalty).max(0) * 2 + (40 - title_legitimacy).max(0);
+        let refusal_chance = raw_chance.clamp(0, 100);
+
+        use rand::Rng;
+        let mut rng = rand::rng();
+        let roll = rng.random_range(0..100);
+
+        let vassal_name = self.agent_name(vassal_id)?;
+        let suzerain_name = self.agent_name(agent_id)?;
+
+        if has_active_contract && roll < refusal_chance {
+            // Refusal path
+            if let Some(contract) = self.feudal_contracts.iter_mut().find(|c| {
+                c.vassal_agent_id == vassal_id
+                    && c.suzerain_agent_id == agent_id
+                    && c.status == FeudalContractStatus::Active
+            }) {
+                contract.loyalty = (contract.loyalty - 15).clamp(0, 100);
+            }
+
+            self.push_event(WorldEvent {
+                day: self.day,
+                tick: self.tick_of_day,
+                actor: vassal_id,
+                target: Some(agent_id),
+                kind: EventKind::LevyRefused,
+                summary: format!(
+                    "{} recusou a convocacao de levy de {}.",
+                    vassal_name, suzerain_name
+                ),
+                impact_tags: vec![
+                    "feudal".to_string(),
+                    "desobediencia".to_string(),
+                    "levy".to_string(),
+                ],
+            });
+        } else {
+            // Acceptance path
+            let member_ids = self
+                .households
+                .iter()
+                .find(|h| h.id == household_id)
+                .map(|h| h.member_ids.clone())
+                .unwrap_or_default();
+
+            // 1. Increment levy service due and consume food
+            if let Some(household) = self
+                .households
+                .iter_mut()
+                .find(|household| household.id == household_id)
+            {
+                household.levy_service_due = (household.levy_service_due + 1).clamp(0, 10);
+                Self::take_resource(&mut household.pantry, "graos", levy_duty * 2);
+            }
+
+            // 2. Increase suzerain polity military readiness
+            let polity_id = suzerain_title_opt
+                .as_ref()
+                .and_then(|t| t.polity_id)
+                .or_else(|| self.polities.first().map(|p| p.id));
+            if let Some(pid) = polity_id {
+                if let Some(polity) = self.polities.iter_mut().find(|p| p.id == pid) {
+                    polity.military_readiness = (polity.military_readiness + levy_duty * 4).max(0);
+                }
+            }
+
+            // 3. Increase household member stress
+            for member_id in member_ids {
+                if let Ok(entity) = self.find_agent_entity(member_id) {
+                    let mut entity_mut = self.world.entity_mut(entity);
+                    if let Some(mut state) = entity_mut.get_mut::<StateComponent>() {
+                        state.0.stress = (state.0.stress + levy_duty * 3).clamp(0, 100);
+                    }
+                }
+            }
+
+            self.push_event(WorldEvent {
+                day: self.day,
+                tick: self.tick_of_day,
+                actor: agent_id,
+                target: Some(vassal_id),
+                kind: EventKind::LevyCalled,
+                summary: format!("{} convocou levy feudal de {}.", suzerain_name, vassal_name),
+                impact_tags: vec!["feudal".to_string(), "levy".to_string()],
+            });
+        }
         Ok(())
     }
 
@@ -4570,5 +4857,378 @@ impl Simulation {
             impact_tags: vec!["feudal".to_string(), "suserania".to_string()],
         });
         Ok(())
+    }
+
+    pub(super) fn recalculate_territory_values(&mut self) {
+        let mut new_values = Vec::new();
+        for territory in &self.territories {
+            let mut value = 0;
+            // 1. Base por tiles
+            for coord in &territory.tile_coords {
+                if let Some(tile) = self.tile_at(*coord) {
+                    match tile.kind {
+                        TileKind::Forest => value += 1,
+                        TileKind::Rock => value += 1,
+                        TileKind::Field => value += 2,
+                        _ => {}
+                    }
+                }
+            }
+            // 2. Base por construções
+            for building_id in &territory.building_ids {
+                if let Some(building) = self.spatial.buildings.iter().find(|b| b.id == *building_id)
+                {
+                    let bonus = match building.kind {
+                        LocationKind::Home => 5,
+                        LocationKind::Farm => 8,
+                        LocationKind::Workshop | LocationKind::Bakery => 10,
+                        LocationKind::Tavern => 6,
+                        LocationKind::GuardPost => 12,
+                        LocationKind::Manor => 15,
+                        LocationKind::Common => 4,
+                        LocationKind::Woodlot | LocationKind::Quarry => 7,
+                    };
+                    value += bonus;
+                }
+            }
+            // 3. Bônus de estabilidade
+            if territory.stability > 70 {
+                value += 5;
+            } else if territory.stability < 40 {
+                value -= 5;
+            }
+
+            // 4. Bônus por fauna mágica
+            let mut fauna_bonus = 0;
+            let mut creature_query =
+                self.world
+                    .query::<(&CreatureCore, &PositionComponent, &LifeStatusComponent)>();
+            for (core, position, life) in creature_query.iter(&self.world) {
+                if life.0 == AgentLifeStatus::Vivo && territory.tile_coords.contains(&position.0) {
+                    match core.species.as_str() {
+                        "Silvafaro" => fauna_bonus += 8,
+                        "Pedrapiro" => fauna_bonus += 5,
+                        "Brumalisco" => fauna_bonus -= 5,
+                        _ => {}
+                    }
+                }
+            }
+            value += fauna_bonus;
+
+            let clamped_value = value.clamp(0, 200);
+            new_values.push((territory.id, clamped_value));
+        }
+
+        for (id, val) in new_values {
+            if let Some(territory) = self.territories.iter_mut().find(|t| t.id == id) {
+                territory.strategic_value = val;
+            }
+        }
+    }
+
+    pub(super) fn generate_emergent_polity_name(&self, founder_id: u64) -> String {
+        let prefixes = [
+            "Valen", "Crest", "Havel", "Dorn", "Gren", "Bram", "Solk", "Thur", "Wynd", "Eld",
+            "Ros", "Mont", "Fer", "Gald", "Holm",
+        ];
+        let suffixes = [
+            "forte", "vale", "monte", "burg", "heim", "dale", "wood", "field", "gar", "stead",
+            "haven", "rock", "thorpe",
+        ];
+
+        let seed = (self.day + founder_id as u32) as usize;
+        let prefix = prefixes[seed % prefixes.len()];
+        let suffix = suffixes[(seed / prefixes.len()) % suffixes.len()];
+        let base_name = format!("{}{}", prefix, suffix);
+
+        let title_rank = self
+            .active_feudal_title_for_holder(founder_id)
+            .map(|t| t.rank);
+
+        match title_rank {
+            Some(FeudalRank::Rei) => format!("Reino de {}", base_name),
+            Some(FeudalRank::Duque) => format!("Ducado de {}", base_name),
+            Some(FeudalRank::Conde) => format!("Condado de {}", base_name),
+            Some(FeudalRank::Barao) | Some(FeudalRank::Senhor) | Some(FeudalRank::Cavaleiro) => {
+                format!("Senhorio de {}", base_name)
+            }
+            _ => format!("Comuna de {}", base_name),
+        }
+    }
+
+    pub(super) fn apply_daily_organic_expansion(&mut self) {
+        let polity_ids: Vec<PolityId> = self.polities.iter().map(|p| p.id).collect();
+        for polity_id in polity_ids {
+            let Some(polity) = self.polities.iter().find(|p| p.id == polity_id).cloned() else {
+                continue;
+            };
+            let Some(ruler_id) = polity.ruler_agent_id else {
+                continue;
+            };
+            if self.life_status(ruler_id).unwrap_or(AgentLifeStatus::Morto) != AgentLifeStatus::Vivo
+            {
+                continue;
+            }
+
+            // 1. Calcular limiar de agressividade
+            let mut limiar = 60;
+            if let Ok(profile) = self.agent_profile(ruler_id) {
+                for t in &profile.traits {
+                    match t.as_str() {
+                        "ambicioso" => {
+                            limiar = 45;
+                            break;
+                        }
+                        "cauteloso" => {
+                            limiar = 75;
+                            break;
+                        }
+                        "orgulhoso" => {
+                            limiar = 55;
+                            break;
+                        }
+                        "covarde" => {
+                            limiar = 80;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // 2. Verificar prontidão militar
+            if polity.military_readiness < limiar {
+                continue;
+            }
+
+            // 3. Encontrar territórios adjacentes
+            let mut polity_tiles = HashSet::new();
+            for territory in &self.territories {
+                if territory.controller_polity_id == polity.id {
+                    for coord in &territory.tile_coords {
+                        polity_tiles.insert(*coord);
+                    }
+                }
+            }
+
+            let mut adjacent_territory_ids = Vec::new();
+            for territory in &self.territories {
+                if territory.controller_polity_id == polity.id {
+                    continue;
+                }
+                let is_adjacent = territory.tile_coords.iter().any(|coord| {
+                    coord
+                        .neighbors4()
+                        .iter()
+                        .any(|neighbor| polity_tiles.contains(neighbor))
+                });
+                if is_adjacent {
+                    adjacent_territory_ids.push(territory.id);
+                }
+            }
+
+            // 4. Avaliar e decidir anexação
+            for target_territory_id in adjacent_territory_ids {
+                // Find territory
+                let Some(territory) = self
+                    .territories
+                    .iter()
+                    .find(|t| t.id == target_territory_id)
+                    .cloned()
+                else {
+                    continue;
+                };
+
+                let target_val = territory.strategic_value;
+
+                // Check if target territory is free
+                let mut target_polity_exists = false;
+                let mut target_ruler_alive = false;
+                let mut target_polity_name = String::new();
+                if let Some(target_polity) = self
+                    .polities
+                    .iter()
+                    .find(|p| p.id == territory.controller_polity_id)
+                {
+                    target_polity_exists = true;
+                    target_polity_name = target_polity.name.clone();
+                    if let Some(target_ruler_id) = target_polity.ruler_agent_id {
+                        if self
+                            .life_status(target_ruler_id)
+                            .unwrap_or(AgentLifeStatus::Morto)
+                            == AgentLifeStatus::Vivo
+                        {
+                            target_ruler_alive = true;
+                        }
+                    }
+                }
+
+                let is_free = !target_polity_exists || !target_ruler_alive;
+
+                if is_free {
+                    // Claim directly
+                    if let Some(t_mut) = self
+                        .territories
+                        .iter_mut()
+                        .find(|t| t.id == target_territory_id)
+                    {
+                        t_mut.controller_polity_id = polity.id;
+                        if !t_mut.claimed_by.contains(&polity.id) {
+                            t_mut.claimed_by.push(polity.id);
+                        }
+                    }
+                    self.push_event(WorldEvent {
+                        day: self.day,
+                        tick: self.tick_of_day,
+                        actor: ruler_id,
+                        target: None,
+                        kind: EventKind::InstitutionalDispute,
+                        summary: format!(
+                            "A polity {} reivindica e anexa o territorio livre {} ({}).",
+                            polity.name, territory.name, territory.id
+                        ),
+                        impact_tags: vec![
+                            "expansao".to_string(),
+                            format!("polity:{}", polity.id),
+                            format!("territorio:{}", territory.id),
+                        ],
+                    });
+                } else if target_val > 15 {
+                    // Controlled by active polity: check if there is an active war already
+                    let war_exists = self.wars.iter().any(|war| {
+                        war.status == WarStatus::Active
+                            && ((war.attacker_polity_id == polity.id
+                                && war.defender_polity_id == territory.controller_polity_id)
+                                || (war.attacker_polity_id == territory.controller_polity_id
+                                    && war.defender_polity_id == polity.id))
+                            && war.target_territory_ids.contains(&target_territory_id)
+                    });
+
+                    if !war_exists {
+                        let war_id = self.next_war_id;
+                        self.next_war_id += 1;
+                        self.wars.push(WarState {
+                            id: war_id,
+                            attacker_polity_id: polity.id,
+                            defender_polity_id: territory.controller_polity_id,
+                            target_territory_ids: vec![target_territory_id],
+                            attacker_score: 0,
+                            defender_score: 0,
+                            stage: WarStage::Mobilization,
+                            status: WarStatus::Active,
+                            winner_polity_id: None,
+                            started_day: self.day,
+                            ended_day: None,
+                            summary: format!(
+                                "Guerra declarada por {} contra {} pelo territorio {}.",
+                                polity.name, target_polity_name, territory.name
+                            ),
+                        });
+
+                        self.push_event(WorldEvent {
+                            day: self.day,
+                            tick: self.tick_of_day,
+                            actor: ruler_id,
+                            target: Some(territory.controller_polity_id),
+                            kind: EventKind::InstitutionalDispute,
+                            summary: format!(
+                                "A polity {} declara guerra contra {} pelo territorio {}!",
+                                polity.name, target_polity_name, territory.name
+                            ),
+                            impact_tags: vec![
+                                "guerra".to_string(),
+                                format!("polity:{}", polity.id),
+                                format!("territorio:{}", territory.id),
+                            ],
+                        });
+                    }
+                }
+            }
+
+            // 5. Construção financiada por polity
+            let mut min_treasury = 150;
+            if let Ok(profile) = self.agent_profile(ruler_id) {
+                for t in &profile.traits {
+                    match t.as_str() {
+                        "generoso" | "ambicioso" => {
+                            min_treasury = 100;
+                            break;
+                        }
+                        "ganancioso" => {
+                            min_treasury = 200;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // Fetch current treasury from the mutable state
+            let current_treasury = self
+                .polities
+                .iter()
+                .find(|p| p.id == polity.id)
+                .map(|p| p.treasury)
+                .unwrap_or(0);
+
+            if current_treasury > min_treasury {
+                let controlled_tiles: HashSet<TileCoord> = self
+                    .territories
+                    .iter()
+                    .filter(|t| t.controller_polity_id == polity.id)
+                    .flat_map(|t| t.tile_coords.iter().copied())
+                    .collect();
+
+                let beds_in_polity = self
+                    .spatial
+                    .fixtures
+                    .iter()
+                    .filter(|f| f.kind == FixtureKind::Bed && controlled_tiles.contains(&f.coord))
+                    .count();
+
+                let mut living_agents_in_polity = 0;
+                let mut query = self.world.query::<(&AgentCore, &LifeStatusComponent)>();
+                for (core, life) in query.iter(&self.world) {
+                    if life.0 == AgentLifeStatus::Vivo {
+                        if let Some(bed_coord) = core.home_bed {
+                            if controlled_tiles.contains(&bed_coord) {
+                                living_agents_in_polity += 1;
+                            }
+                        } else if let Some(home_id) = core.home_building_id {
+                            let in_polity = self
+                                .territories
+                                .iter()
+                                .filter(|t| t.controller_polity_id == polity.id)
+                                .any(|t| t.building_ids.contains(&home_id));
+                            if in_polity {
+                                living_agents_in_polity += 1;
+                            }
+                        }
+                    }
+                }
+
+                if living_agents_in_polity > beds_in_polity {
+                    let deficit = living_agents_in_polity - beds_in_polity;
+                    let has_open = self.construction_projects.iter().any(|p| {
+                        p.establishment_type_id == "casa"
+                            && p.funding_polity_id == Some(polity.id)
+                            && !matches!(
+                                p.status,
+                                ConstructionStatus::Completed
+                                    | ConstructionStatus::Blocked
+                                    | ConstructionStatus::Cancelled
+                            )
+                    });
+                    if !has_open {
+                        self.open_construction_project(
+                            "casa",
+                            format!("deficit de {} camas na polity {}", deficit, polity.name),
+                            95,
+                            Some(polity.id),
+                        );
+                    }
+                }
+            }
+        }
     }
 }

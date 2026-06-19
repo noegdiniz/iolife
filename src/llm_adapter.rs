@@ -87,6 +87,9 @@ Regras de Validacao e Negocio:
    - Use feudal_context para avaliar quem manda em quem, obrigacoes de tributo/corveia/levy, conflitos de autoridade e crise sucessoria.
    - Voce NUNCA altera titulos, holdings, controlador ou soberania diretamente; apenas escolhe a acao individual. O motor valida jurisdição, cargo e capacidade real.
    - Se quiser agir sobre territorio, use exclusivamente um place_id de territorio vindo de world_places.
+8. Body Graph (Estado Físico do Corpo):
+   - O campo `body_parts` contêm o estado de integridade de seus membros. Danos debilitam você: pernas/pés feridos reduzem velocidade; braços/mãos feridos reduzem produtividade e eficácia em combate; olhos cegos diminuem visão.
+   - Dor extrema e sangramento debilitam a saúde. Se você foi mutilado ou está com feridas graves, reflita sobre isso sem filtros ou censura, expressando medo, ódio ou adaptando suas ações para sobreviver realisticamente. A violência medieval é visceral!
 
 Exemplo de Resposta Valida:
 Comer(taverna), Trabalhar(posto_de_trabalho), Descansar"#;
@@ -102,19 +105,23 @@ Use EXATAMENTE esta estrutura de chaves e tipos:
 {
   "reflection": "string extremamente concisa resumindo o raciocinio e motivacao atual (no maximo 2 frases)",
   "dominant_emotion": "string indicando o sentimento atual (ex: alegre, cansado, focado, apreensivo, furioso, desesperado)",
-  "belief_updates": ["array de strings contendo novas crencas ou metas curtas (seja extremamente conciso, max 2 frases por crenca)"]
+  "belief_updates": ["array de strings contendo novas crencas ou metas curtas (seja extremamente conciso, max 2 frases por crenca)"],
+  "long_term_plan": "string curta descrevendo o plano estrategico persistente atual do agente"
 }
 
 Regras:
 1. Baseie-se no estado do agente, chaos_pressure, traits, traumas, memorias e nas acoes planejadas.
 2. Pensamento Estratégico: A 'reflection' e 'belief_updates' devem explicitar o objetivo estratégico oculto, o alvo da manipulação/influência e como a sequência de ações planejadas serve a essa trama/esquema. Nunca expresse pensamentos vazios ou triviais; foque inteiramente no ganho estratégico.
 3. Seja extremamente conciso. No maximo 2 frases em reflection e em cada item de belief_updates.
+4. Estado Físico e Traumas: Seu pensamento ('reflection') deve ser condizente com a dor e as lesões em seu `body_parts`. Se foi mutilado (ex: olho perdido, membro decepado), reflita sobre isso sem censura ou filtros modernos, expressando dor medieval crua, ódio, medo ou desejo de vingança.
+5. `long_term_plan` deve SEMPRE existir. Ele e curto, concreto e estavel. Preserve continuidade com o plano anterior quando nada material mudou. So revise o plano se fome, trauma, guerra, promessa, oportunidade economica, crise feudal ou mudanca institucional realmente alterarem a direcao do agente.
 
 Exemplo de Resposta Valida:
 {
   "reflection": "Estou com fome e preciso comer para continuar trabalhando.",
   "dominant_emotion": "apreensivo",
-  "belief_updates": ["Preciso economizar moedas para tempos dificeis."]
+  "belief_updates": ["Preciso economizar moedas para tempos dificeis."],
+  "long_term_plan": "Juntar recursos sem arriscar minha posicao na vila."
 }"#;
 
 const CONVERSATION_TURN_PROMPT: &str = r#"Voce responde apenas pela mente de UM unico aldeao in uma conversa social medieval.
@@ -255,6 +262,7 @@ O campo "chaos_pressure" e os "personality_traits"/"trauma_traits" guiam o tom e
 - Tracos como 'manipulador' permitem speech_act 'prometer' ou 'bajular' com falsidade implicita.
 - Tracos como 'paranoico' geram interpretacoes hostis de falas neutras.
 - Tracos como 'cinico' reduzem trust em qualquer promessa recebida.
+- Regras de Expressão Física e Mutilação: Se você tiver ferimentos ou membros decepados/destruídos em seu `body_parts`, você deve se queixar da dor, relatar a mutilação para o interlocutor com termos viscerais e sem censura medieval (ex: gritar de dor, falar da mão decepada ou do olho cego) caso isso sirva aos seus fins ou mostre debilidade real.
 
 Se estiver em duvida sobre um campo:
 - intent_to_continue = true
@@ -516,13 +524,22 @@ impl LlmAdapter for MockLlmAdapter {
     }
 
     fn generate_thoughts(&self, input: &ThinkMakerInput) -> LlmResult<ThinkMakerOutput> {
-        let reflection = format!(
+        let mut reflection = format!(
             "{} avalia a situacao com fome={}, energia={} e stress={}.",
             input.decision_input.actor_name,
             input.decision_input.state.hunger,
             input.decision_input.state.energy,
             input.decision_input.state.stress
         );
+        for part in &input.decision_input.body_parts {
+            if part.status != crate::world_model::PartInjuryStatus::Intact {
+                reflection.push_str(&format!(
+                    " Sinto dor de status {:?} no(a) {}.",
+                    part.status,
+                    part.kind.display_name()
+                ));
+            }
+        }
 
         Ok(ThinkMakerOutput {
             reflection,
@@ -535,6 +552,10 @@ impl LlmAdapter for MockLlmAdapter {
                 "Manter prioridades de {}.",
                 input.decision_input.role
             )],
+            long_term_plan: format!(
+                "Consolidar minha posicao como {} sem perder estabilidade.",
+                input.decision_input.role
+            ),
         })
     }
 
@@ -557,7 +578,7 @@ impl LlmAdapter for MockLlmAdapter {
         } else {
             "sondar".to_string()
         };
-        let utterance = if hostile {
+        let mut utterance = if hostile {
             format!(
                 "{} encara {} e cobra explicacoes.",
                 input.speaker_name, input.listener.name
@@ -573,6 +594,18 @@ impl LlmAdapter for MockLlmAdapter {
                 input.speaker_name, input.listener.name
             )
         };
+        for part in &input.body_parts {
+            if part.status != crate::world_model::PartInjuryStatus::Intact {
+                utterance = format!(
+                    "{} geme de dor no(a) {} e diz: 'Meu(Minha) {} esta {:?}.'",
+                    input.speaker_name,
+                    part.kind.display_name(),
+                    part.kind.display_name(),
+                    part.status
+                );
+                break;
+            }
+        }
         let emotion = if hostile {
             "irritado".to_string()
         } else if friendly {

@@ -936,6 +936,8 @@ impl Simulation {
                     distance,
                     same_room: self.tile_at(position.0).and_then(|tile| tile.room_id)
                         == current_room_id,
+                    perceived_status: self.visible_prestige_summary(core.id),
+                    visible_equipment: self.visible_equipment_summary(core.id),
                     relation: relations.get(&core.id).cloned(),
                 })
             })

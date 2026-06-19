@@ -14,27 +14,29 @@ use crate::world_model::{
     AgentSnapshot, AgentState, AuthorityOffice, AuthorityOfficeId, BuildingId, BuildingSpec,
     CaravanState, CombatId, CombatOutcome, CombatState, CombatStatus, ConstructionProject,
     ConstructionStatus, ConversationId, ConversationOutcome, ConversationParticipantState,
-    ConversationState, ConversationStatus, ConversationTurn, CrimeCase, CrimeCaseId,
-    CrimeCaseStatus, CrimeType, CropStage, CropState, CulturalStory, CulturalStoryId,
-    CulturalStoryKind, CulturalTradition, EconomicNode, EconomicTask, EconomicTaskClass,
-    EconomicTaskId, EconomicTaskKind, EconomicTaskPhase, EconomyCatalog, EscrowAccount,
-    EstablishmentEconomy, EstablishmentId, EstateHolding, EstateHoldingId, EventKind,
-    FactionObjective, FeudalContract, FeudalContractId, FeudalContractStatus, FeudalRank,
-    FeudalTitle, FeudalTitleId, FixtureId, FixtureKind, FixtureSpec, ForeignRelation,
-    ForeignRelationId, HouseholdEconomy, InjuryState, InstitutionalPerception, InsurrectionId,
-    InsurrectionStage, InsurrectionState, InsurrectionStatus, IntentKind, ItemAffordanceKind,
-    JusticeSeverity, LocalNorms, LocationKind, MemoryKind, MilitaryDemand, MilitaryDemandId,
-    MilitaryDemandStatus, PendingPaymentClaim, PolicyAct, PolicyActId, PolicyActStatus,
-    PolicyAuthority, PolicyDomain, PolicyEffect, PolicyFavor, PolicyScope, PolicyTarget,
-    PoliticalFaction, PoliticalFactionId, PoliticalIssue, PoliticalIssueId, PoliticalIssueStatus,
-    PoliticalPressure, Polity, PolityId, PostedPrice, PowerCenter, PowerCenterId, PromiseCondition,
-    PsychologicalState, RationingPolicy, RelationDelta, ResourceKind, ResourceStack, Role, RoomId,
-    RoomSpec, Rumor, RumorBelief, ScarcityMetric, ScheduledMeeting, ScheduledMeetingId,
-    ScheduledMeetingStatus, Secret, SecretKind, SentenceKind, SimplifiedTask, SimulationSnapshot,
-    SocialMove, SpatialSnapshot, StoryBelief, StoryStatus, StoryVersion, SuccessionCrisis,
-    SuccessionCrisisId, SuccessionCrisisStatus, Territory, TerritoryId, TileCoord, TileKind,
-    TileSpec, TraumaTracker, VillageEconomy, WarId, WarStage, WarState, WarStatus, WorldEvent,
-    WorldPlaceKind, WorldPlaceRef,
+    ConversationState, ConversationStatus, ConversationTurn, CraftProficiencyState, Creature,
+    CrimeCase, CrimeCaseId, CrimeCaseStatus, CrimeType, CropStage, CropState, CulturalStory,
+    CulturalStoryId, CulturalStoryKind, CulturalTradition, EconomicNode, EconomicTask,
+    EconomicTaskClass, EconomicTaskId, EconomicTaskKind, EconomicTaskPhase, EconomyCatalog,
+    EquipmentSlot, EscrowAccount, EstablishmentEconomy, EstablishmentId, EstateHolding,
+    EstateHoldingId, EventKind, FactionObjective, FeudalContract, FeudalContractId,
+    FeudalContractStatus, FeudalRank, FeudalTitle, FeudalTitleId, FixtureId, FixtureKind,
+    FixtureSpec, ForeignRelation, ForeignRelationId, HistoricalBootstrapSummary, HouseholdEconomy,
+    HuntingQuest, InjuryState, InstitutionalPerception, InsurrectionId, InsurrectionStage,
+    InsurrectionState, InsurrectionStatus, IntentKind, ItemAffordanceKind, ItemClass, ItemInstance,
+    ItemInstanceId, JusticeSeverity, LocalNorms, LocationKind, MemoryKind, MilitaryDemand,
+    MilitaryDemandId, MilitaryDemandStatus, PendingPaymentClaim, PolicyAct, PolicyActId,
+    PolicyActStatus, PolicyAuthority, PolicyDomain, PolicyEffect, PolicyFavor, PolicyScope,
+    PolicyTarget, PoliticalFaction, PoliticalFactionId, PoliticalIssue, PoliticalIssueId,
+    PoliticalIssueStatus, PoliticalPressure, Polity, PolityId, PostedPrice, PowerCenter,
+    PowerCenterId, PromiseCondition, PsychologicalState, RationingPolicy, RefinementLevel,
+    RelationDelta, ResourceKind, ResourceStack, Role, RoomId, RoomSpec, Rumor, RumorBelief,
+    ScarcityMetric, ScheduledMeeting, ScheduledMeetingId, ScheduledMeetingStatus, Secret,
+    SecretKind, SentenceKind, SimplifiedTask, SimulationSnapshot, SocialMove, SpatialSnapshot,
+    StoryBelief, StoryStatus, StoryVersion, SuccessionCrisis, SuccessionCrisisId,
+    SuccessionCrisisStatus, Territory, TerritoryId, TileCoord, TileKind, TileSpec, TraumaTracker,
+    VillageEconomy, WarId, WarStage, WarState, WarStatus, WorldEvent, WorldPlaceKind,
+    WorldPlaceRef,
 };
 use anyhow::{Result, anyhow};
 use bevy_ecs::prelude::*;
@@ -44,6 +46,7 @@ mod cognition;
 mod conflict;
 mod debug;
 mod economy;
+mod fauna;
 mod helpers;
 mod navigation;
 mod politics;
@@ -58,7 +61,7 @@ use helpers::{
 };
 pub use tick::tick_interval_ms;
 
-const SNAPSHOT_SCHEMA_VERSION: u32 = 20;
+const SNAPSHOT_SCHEMA_VERSION: u32 = 23;
 pub const SIMULATED_MINUTES_PER_TICK: u32 = 1;
 pub const DEFAULT_TICKS_PER_DAY: u32 = 24 * 60 / SIMULATED_MINUTES_PER_TICK;
 pub const DEFAULT_TICKS_PER_SECOND: u32 = 1;
@@ -112,6 +115,15 @@ pub struct MemoryComponent(pub Vec<AgentMemory>);
 
 #[derive(Component, Clone, Default)]
 pub struct InventoryComponent(pub Vec<ResourceStack>);
+
+#[derive(Component, Clone, Default)]
+pub struct ItemInventoryComponent(pub Vec<ItemInstanceId>);
+
+#[derive(Component, Clone, Default)]
+pub struct EquipmentComponent(pub HashMap<EquipmentSlot, ItemInstanceId>);
+
+#[derive(Component, Clone, Default)]
+pub struct CraftProficiencyComponent(pub CraftProficiencyState);
 
 #[derive(Component, Clone)]
 pub struct PositionComponent(pub TileCoord);
@@ -180,6 +192,22 @@ pub struct EconomicActivityComponent {
 #[derive(Component, Clone, Default)]
 pub struct TraumaTrackerComponent(pub TraumaTracker);
 
+#[derive(Component, Clone)]
+pub struct CreatureCore {
+    pub id: u64,
+    pub name: String,
+    pub species: String,
+    pub is_legendary: bool,
+    pub habitat_territory_id: u64,
+}
+
+#[derive(Component, Clone)]
+pub struct CreatureStateComponent {
+    pub health: i32,
+    pub max_health: i32,
+    pub attack_power: i32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimulationConfig {
     pub village_name: String,
@@ -191,6 +219,9 @@ pub struct SimulationConfig {
     pub grid_height: i32,
     pub world_seed: u64,
     pub num_villages: usize,
+    pub history_years: u32,
+    pub history_founding_households: usize,
+    pub history_seed: Option<u64>,
 }
 
 impl Default for SimulationConfig {
@@ -205,6 +236,9 @@ impl Default for SimulationConfig {
             grid_height: 100,
             world_seed: 1,
             num_villages: 3,
+            history_years: 100,
+            history_founding_households: 3,
+            history_seed: None,
         }
     }
 }
@@ -229,6 +263,11 @@ pub struct AgentView {
     pub injury: InjuryState,
     pub institutional_perception: InstitutionalPerception,
     pub psychological_state: PsychologicalState,
+    pub craft_proficiencies: CraftProficiencyState,
+    pub perceived_status_score: i32,
+    pub visible_prestige_summary: String,
+    pub equipped_items: Vec<String>,
+    pub inventory_items: Vec<String>,
     pub rumor_beliefs: Vec<RumorBelief>,
     pub known_stories: Vec<String>,
     pub known_rumors: Vec<String>,
@@ -251,6 +290,7 @@ pub struct AgentView {
     pub work_establishment_name: Option<String>,
     pub work_establishment_cash: Option<i32>,
     pub work_establishment_stock: Vec<ResourceStack>,
+    pub work_establishment_items: Vec<String>,
     pub local_prices: Vec<PostedPrice>,
     pub public_treasury: i32,
     pub political_position: String,
@@ -297,6 +337,9 @@ pub struct Simulation {
     world: World,
     spatial: SpatialSnapshot,
     village_name: String,
+    world_history_years_simulated: u32,
+    world_foundation_year: i32,
+    historical_summary: Option<HistoricalBootstrapSummary>,
     day: u32,
     tick_of_day: u32,
     total_ticks: u64,
@@ -328,6 +371,7 @@ pub struct Simulation {
     next_succession_crisis_id: SuccessionCrisisId,
     next_power_center_id: PowerCenterId,
     next_authority_office_id: AuthorityOfficeId,
+    next_item_instance_id: ItemInstanceId,
     political_factions: Vec<PoliticalFaction>,
     political_issues: Vec<PoliticalIssue>,
     policy_acts: Vec<PolicyAct>,
@@ -347,6 +391,7 @@ pub struct Simulation {
     local_norms: LocalNorms,
     next_economic_task_id: EconomicTaskId,
     next_construction_project_id: u64,
+    item_instances: Vec<ItemInstance>,
     households: Vec<HouseholdEconomy>,
     establishments: Vec<EstablishmentEconomy>,
     village_economy: VillageEconomy,
@@ -358,6 +403,10 @@ pub struct Simulation {
     pub caravans: Vec<CaravanState>,
     next_secret_id: u64,
     next_caravan_id: u64,
+    next_creature_id: u64,
+    next_hunting_quest_id: u64,
+    pub hunting_quests: Vec<HuntingQuest>,
+
     pub promises: Vec<ActivePromise>,
     pub policy_favors: Vec<PolicyFavor>,
     pub rumors: Vec<Rumor>,
@@ -443,6 +492,9 @@ impl Simulation {
                     },
                     MemoryComponent(agent.memories),
                     InventoryComponent(agent.inventory),
+                    ItemInventoryComponent(agent.inventory_item_ids),
+                    EquipmentComponent(agent.equipped_items),
+                    CraftProficiencyComponent(agent.craft_proficiencies),
                     PositionComponent(agent.position),
                 ),
                 (
@@ -484,11 +536,40 @@ impl Simulation {
             ));
         }
 
+        for creature in snapshot.creatures {
+            world.spawn((
+                CreatureCore {
+                    id: creature.id,
+                    name: creature.name.clone(),
+                    species: creature.species.clone(),
+                    is_legendary: creature.is_legendary,
+                    habitat_territory_id: creature.habitat_territory_id,
+                },
+                CreatureStateComponent {
+                    health: creature.health,
+                    max_health: creature.max_health,
+                    attack_power: creature.attack_power,
+                },
+                InjuryComponent(creature.injury),
+                PositionComponent(creature.position),
+                LifeStatusComponent(if creature.active {
+                    AgentLifeStatus::Vivo
+                } else {
+                    AgentLifeStatus::Morto
+                }),
+                DestinationComponent(None),
+                PathComponent(Vec::new()),
+            ));
+        }
+
         Self {
             catalog,
             world,
             spatial: snapshot.spatial,
             village_name: snapshot.village_name,
+            world_history_years_simulated: snapshot.world_history_years_simulated,
+            world_foundation_year: snapshot.world_foundation_year,
+            historical_summary: snapshot.historical_summary.clone(),
             day: snapshot.day,
             tick_of_day: snapshot.tick_of_day,
             total_ticks: snapshot.total_ticks,
@@ -568,6 +649,15 @@ impl Simulation {
                     .unwrap_or(0)
                     + 1,
             ),
+            next_item_instance_id: snapshot.next_item_instance_id.max(
+                snapshot
+                    .item_instances
+                    .iter()
+                    .map(|item| item.id)
+                    .max()
+                    .unwrap_or(0)
+                    + 1,
+            ),
             political_factions,
             political_issues,
             policy_acts,
@@ -587,6 +677,7 @@ impl Simulation {
             local_norms,
             next_economic_task_id: snapshot.next_economic_task_id,
             next_construction_project_id: snapshot.next_construction_project_id.max(1),
+            item_instances: snapshot.item_instances,
             households: snapshot.households,
             establishments: snapshot.establishments,
             village_economy: snapshot.village_economy,
@@ -624,6 +715,9 @@ impl Simulation {
                 .max()
                 .unwrap_or(0)
                 + 1,
+            next_creature_id: snapshot.next_creature_id.max(1),
+            next_hunting_quest_id: snapshot.next_hunting_quest_id.max(1),
+            hunting_quests: snapshot.hunting_quests.clone(),
         }
     }
 
@@ -672,6 +766,15 @@ impl Simulation {
             let inventory = entry
                 .get::<InventoryComponent>()
                 .expect("missing inventory component");
+            let item_inventory = entry
+                .get::<ItemInventoryComponent>()
+                .expect("missing item inventory component");
+            let equipment = entry
+                .get::<EquipmentComponent>()
+                .expect("missing equipment component");
+            let craft_proficiencies = entry
+                .get::<CraftProficiencyComponent>()
+                .expect("missing craft proficiency component");
             let position = entry
                 .get::<PositionComponent>()
                 .expect("missing position component");
@@ -723,6 +826,9 @@ impl Simulation {
                 relations: relations.0.clone(),
                 memories: memories.0.clone(),
                 inventory: inventory.0.clone(),
+                inventory_item_ids: item_inventory.0.clone(),
+                equipped_items: equipment.0.clone(),
+                craft_proficiencies: craft_proficiencies.0.clone(),
                 position: position.0,
                 destination: destination.0,
                 destination_label: destination_label.0.clone(),
@@ -767,6 +873,9 @@ impl Simulation {
             schema_version: SNAPSHOT_SCHEMA_VERSION,
             catalog_version: self.catalog.version,
             village_name: self.village_name.clone(),
+            world_history_years_simulated: self.world_history_years_simulated,
+            world_foundation_year: self.world_foundation_year,
+            historical_summary: self.historical_summary.clone(),
             day: self.day,
             tick_of_day: self.tick_of_day,
             total_ticks: self.total_ticks,
@@ -794,7 +903,9 @@ impl Simulation {
             next_succession_crisis_id: self.next_succession_crisis_id,
             next_power_center_id: self.next_power_center_id,
             next_authority_office_id: self.next_authority_office_id,
+            next_item_instance_id: self.next_item_instance_id,
             agents,
+            item_instances: self.item_instances.clone(),
             conversations: self.conversations.clone(),
             scheduled_meetings: self.scheduled_meetings.clone(),
             combats: self.combats.clone(),
@@ -833,6 +944,35 @@ impl Simulation {
             story_versions: self.story_versions.clone(),
             cultural_traditions: self.cultural_traditions.clone(),
             active_escrows: self.active_escrows.clone(),
+            next_creature_id: self.next_creature_id,
+            creatures: {
+                let mut list = Vec::new();
+                let mut creature_query = self.world.query::<(
+                    &CreatureCore,
+                    &CreatureStateComponent,
+                    &InjuryComponent,
+                    &PositionComponent,
+                    &LifeStatusComponent,
+                )>();
+                for (core, state, injury, position, life) in creature_query.iter(&self.world) {
+                    list.push(Creature {
+                        id: core.id,
+                        name: core.name.clone(),
+                        species: core.species.clone(),
+                        is_legendary: core.is_legendary,
+                        health: state.health,
+                        max_health: state.max_health,
+                        attack_power: state.attack_power,
+                        position: position.0,
+                        habitat_territory_id: core.habitat_territory_id,
+                        active: life.0 == AgentLifeStatus::Vivo,
+                        injury: injury.0.clone(),
+                    });
+                }
+                list
+            },
+            next_hunting_quest_id: self.next_hunting_quest_id,
+            hunting_quests: self.hunting_quests.clone(),
         }
     }
 }

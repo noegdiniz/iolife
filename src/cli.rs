@@ -89,6 +89,16 @@ where
             "--num-villages" => {
                 simulation.num_villages = next_parsed(&mut args, "--num-villages")?;
             }
+            "--history-years" => {
+                simulation.history_years = next_parsed(&mut args, "--history-years")?;
+            }
+            "--history-founding-households" => {
+                simulation.history_founding_households =
+                    next_parsed(&mut args, "--history-founding-households")?;
+            }
+            "--history-seed" => {
+                simulation.history_seed = Some(next_parsed(&mut args, "--history-seed")?);
+            }
             "--village-name" => {
                 simulation.village_name = next_string(&mut args, "--village-name")?;
             }
@@ -110,6 +120,12 @@ where
     }
     if simulation.num_villages == 0 {
         bail!("--num-villages deve ser maior que zero");
+    }
+    if simulation.history_years == 0 {
+        bail!("--history-years deve ser maior que zero");
+    }
+    if simulation.history_founding_households == 0 {
+        bail!("--history-founding-households deve ser maior que zero");
     }
     if simulation.ticks_per_day == 0 {
         bail!("ticks_per_day interno deve ser maior que zero");
@@ -148,6 +164,9 @@ pub fn usage() -> &'static str {
         "  --grid-width, --width N  largura do grid\n",
         "  --grid-height, --height N altura do grid\n",
         "  --num-villages N        quantidade de vilas a gerar\n\n",
+        "  --history-years N       anos da pre-historia deterministica\n",
+        "  --history-founding-households N casas fundadoras iniciais\n",
+        "  --history-seed N        seed dedicada da pre-historia (padrao: --seed)\n\n",
         "Headless:\n",
         "  --ticks N               encerra apos N ticks executados neste processo\n",
         "  --days N                encerra apos N dias simulados neste processo\n",
@@ -210,6 +229,12 @@ mod tests {
             "150".to_string(),
             "--grid-height".to_string(),
             "100".to_string(),
+            "--history-years".to_string(),
+            "80".to_string(),
+            "--history-founding-households".to_string(),
+            "4".to_string(),
+            "--history-seed".to_string(),
+            "991".to_string(),
             "--village-name".to_string(),
             "Pedra Clara".to_string(),
         ])
@@ -224,6 +249,9 @@ mod tests {
         assert_eq!(options.simulation.ticks_per_day, DEFAULT_TICKS_PER_DAY);
         assert_eq!(options.simulation.grid_width, 150);
         assert_eq!(options.simulation.grid_height, 100);
+        assert_eq!(options.simulation.history_years, 80);
+        assert_eq!(options.simulation.history_founding_households, 4);
+        assert_eq!(options.simulation.history_seed, Some(991));
         assert_eq!(options.simulation.village_name, "Pedra Clara");
         match options.mode {
             RunMode::Headless(headless) => {

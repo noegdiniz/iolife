@@ -14,6 +14,8 @@ pub struct NearbyAgentInput {
     pub role: String,
     pub distance: i32,
     pub same_room: bool,
+    pub perceived_status: String,
+    pub visible_equipment: String,
     pub relation: Option<AgentRelation>,
 }
 
@@ -205,6 +207,9 @@ pub struct DecisionInput {
     pub known_destination: Option<String>,
     pub blockers: Vec<String>,
     pub state: AgentState,
+    pub self_equipment_summary: String,
+    pub self_prestige_summary: String,
+    pub self_prestige_score: i32,
     pub cognition_trigger: String,
     pub context_depth: String,
     pub psychological_context: PsychologicalContextInput,
@@ -220,6 +225,8 @@ pub struct DecisionInput {
     pub chaos_pressure: u32,
     pub personality_traits: Vec<String>,
     pub trauma_traits: Vec<String>,
+    #[serde(default)]
+    pub body_parts: Vec<crate::world_model::BodyPartState>,
 }
 
 pub type ActionPlannerInput = DecisionInput;
@@ -235,6 +242,7 @@ pub struct ThinkMakerOutput {
     pub reflection: String,
     pub dominant_emotion: String,
     pub belief_updates: Vec<String>,
+    pub long_term_plan: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -265,6 +273,8 @@ pub struct ConversationObservedAgentInput {
     pub role: String,
     pub state: AgentState,
     pub relation: AgentRelation,
+    pub perceived_status: String,
+    pub visible_equipment_summary: String,
     pub psychological_summary: PsychologicalContextInput,
 }
 
@@ -290,6 +300,9 @@ pub struct ConversationTurnInput {
     pub world_places: Vec<WorldPlaceInput>,
     pub speaker_profile_summary: Vec<String>,
     pub speaker_psychology: PsychologicalContextInput,
+    pub speaker_equipment_summary: String,
+    pub speaker_prestige_summary: String,
+    pub speaker_prestige_score: i32,
     pub listener: ConversationObservedAgentInput,
     pub context: ConversationContextInput,
     pub turn_trigger: String,
@@ -305,6 +318,8 @@ pub struct ConversationTurnInput {
     pub information_context: InformationContextInput,
     #[serde(default)]
     pub cultural_context: CulturalContextInput,
+    #[serde(default)]
+    pub body_parts: Vec<crate::world_model::BodyPartState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -654,11 +669,13 @@ pub fn parse_think_maker_json(payload: &str) -> Result<ThinkMakerOutput> {
     let dominant_emotion =
         required_string_field(object, "dominant_emotion").unwrap_or_else(|_| "contido".to_string());
     let belief_updates = parse_belief_updates(object.get("belief_updates"), &mut notes);
+    let long_term_plan = required_string_field(object, "long_term_plan")?;
 
     Ok(ThinkMakerOutput {
         reflection,
         dominant_emotion,
         belief_updates,
+        long_term_plan,
     })
 }
 

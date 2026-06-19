@@ -1,4 +1,5 @@
 use super::*;
+use crate::world_model::{BodyPartKind, PartInjuryStatus};
 // Violence, theft, crime case and justice systems.
 
 impl Simulation {
@@ -24,12 +25,35 @@ impl Simulation {
         self.apply_attack(actor_id, target_id, true)
     }
 
-    pub(super) fn apply_attack(
+    pub fn apply_attack(
         &mut self,
         actor_id: u64,
         target_id: u64,
         continuing_combat: bool,
     ) -> Result<()> {
+        if self.is_creature(target_id) {
+            let actor_pos = self.agent_position(actor_id)?;
+            let creature_pos = self.creature_position(target_id)?;
+            if actor_pos.manhattan(creature_pos) <= 1 {
+                return self.apply_attack_on_creature(actor_id, target_id, continuing_combat);
+            } else {
+                let actor_name = self.agent_name(actor_id)?;
+                let target_name = self.creature_name(target_id)?;
+                self.push_event(WorldEvent {
+                    day: self.day,
+                    tick: self.tick_of_day,
+                    actor: actor_id,
+                    target: Some(target_id),
+                    kind: EventKind::Blocking,
+                    summary: format!(
+                        "{actor_name} tenta agredir a criatura {target_name}, mas nao esta adjacente."
+                    ),
+                    impact_tags: vec!["violencia".to_string(), "distancia".to_string()],
+                });
+                return Ok(());
+            }
+        }
+
         if !self.can_agent_act(actor_id)? || !self.can_receive_violence(target_id)? {
             return Ok(());
         }
@@ -57,16 +81,49 @@ impl Simulation {
 
         let actor_state = self.agent_state(actor_id)?;
         let target_life_before = self.life_status(target_id)?;
-        let base_damage = if continuing_combat { 9 } else { 12 };
-        let energy_bonus = if actor_state.energy >= 50 { 4 } else { 0 };
+        let weapon_profile = self.equipped_weapon_profile(actor_id);
+        let weapon_item_id = weapon_profile.as_ref().map(|(item, _)| item.id);
+        let weapon_damage = weapon_profile
+            .as_ref()
+            .map(|(_, profile)| profile.damage)
+            .unwrap_or(0);
+        let weapon_precision = weapon_profile
+            .as_ref()
+            .map(|(_, profile)| profile.precision)
+            .unwrap_or(0);
+        let weapon_severity = weapon_profile
+            .as_ref()
+            .map(|(_, profile)| profile.injury_severity)
+            .unwrap_or(0);
+        let armor_protection = self.total_armor_protection(target_id);
+        let body_armor_item_id = self
+            .equipped_item_in_slot(target_id, EquipmentSlot::Body)
+            .map(|item| item.id);
+        let shield_item_id = self
+            .equipped_item_in_slot(target_id, EquipmentSlot::OffHand)
+            .map(|item| item.id);
+        let base_damage = if continuing_combat { 7 } else { 10 };
+        let energy_bonus = if actor_state.energy >= 50 { 3 } else { 0 };
         let vulnerability_bonus = if target_life_before == AgentLifeStatus::Incapacitado {
             8
         } else {
             0
         };
-        let damage = base_damage + energy_bonus + vulnerability_bonus;
+        let damage = (base_damage + weapon_damage + energy_bonus + vulnerability_bonus
+            - armor_protection)
+            .max(1);
+        let severity_bias = weapon_severity + weapon_precision / 2;
         let mut target_died = false;
         let mut target_incapacitated = false;
+
+        let actor_name = self.agent_name(actor_id)?;
+        let target_name = self.agent_name(target_id)?;
+        let weapon_name = weapon_profile
+            .as_ref()
+            .map(|(item, _)| item.display_name.clone())
+            .unwrap_or_else(|| "mãos nuas".to_string());
+        drop(weapon_profile);
+        let mut visceral_desc = String::new();
 
         {
             let target_entity = self.find_agent_entity(target_id)?;
@@ -79,21 +136,205 @@ impl Simulation {
             state.0.mood = (state.0.mood - 14).clamp(0, 100);
             let remaining_health = state.0.health;
             drop(state);
+
             let mut injury = entity_mut
                 .get_mut::<InjuryComponent>()
                 .ok_or_else(|| anyhow!("missing injury component"))?;
-            injury.0.pain = (injury.0.pain + damage).clamp(0, 100);
+
+            // --- Seleção de Parte do Corpo Alvo ---
+            let hash = (actor_id ^ target_id ^ self.total_ticks) as usize;
+            let roll = hash % 100;
+            let (target_part_kind, part_label) = if roll < 30 {
+                (BodyPartKind::Chest, "Peito")
+            } else if roll < 55 {
+                if roll % 2 == 0 {
+                    (BodyPartKind::LeftArm, "Braço Esquerdo")
+                } else {
+                    (BodyPartKind::RightArm, "Braço Direito")
+                }
+            } else if roll < 80 {
+                if roll % 2 == 0 {
+                    (BodyPartKind::LeftLeg, "Perna Esquerda")
+                } else {
+                    (BodyPartKind::RightLeg, "Perna Direita")
+                }
+            } else if roll < 90 {
+                (BodyPartKind::Abdomen, "Abdômen")
+            } else if roll < 95 {
+                (BodyPartKind::Neck, "Pescoço")
+            } else if roll < 97 {
+                if roll % 2 == 0 {
+                    (BodyPartKind::LeftEye, "Olho Esquerdo")
+                } else {
+                    (BodyPartKind::RightEye, "Olho Direito")
+                }
+            } else if roll < 99 {
+                (BodyPartKind::Head, "Cabeça")
+            } else {
+                (BodyPartKind::Heart, "Coração")
+            };
+
+            if let Some(part) = injury
+                .0
+                .body_parts
+                .iter_mut()
+                .find(|p| p.kind == target_part_kind)
+            {
+                part.health = (part.health - damage).clamp(0, 100);
+                if part.health <= 0 {
+                    let sever_roll = ((hash >> 3) % 10) as i32 - severity_bias / 4;
+                    if matches!(
+                        target_part_kind,
+                        BodyPartKind::LeftArm
+                            | BodyPartKind::RightArm
+                            | BodyPartKind::LeftHand
+                            | BodyPartKind::RightHand
+                            | BodyPartKind::LeftLeg
+                            | BodyPartKind::RightLeg
+                            | BodyPartKind::LeftFoot
+                            | BodyPartKind::RightFoot
+                            | BodyPartKind::LeftEye
+                            | BodyPartKind::RightEye
+                            | BodyPartKind::Neck
+                    ) && sever_roll < 4
+                    {
+                        part.status = PartInjuryStatus::Severed;
+                    } else {
+                        part.status = PartInjuryStatus::Destroyed;
+                    }
+                    part.pain = 100;
+                    part.bleeding = (6 + weapon_severity / 3).clamp(1, 10);
+                } else if damage >= 13 {
+                    let fracture_roll = ((hash >> 4) % 10) as i32 - severity_bias / 5;
+                    if matches!(
+                        target_part_kind,
+                        BodyPartKind::LeftArm
+                            | BodyPartKind::RightArm
+                            | BodyPartKind::LeftLeg
+                            | BodyPartKind::RightLeg
+                            | BodyPartKind::Chest
+                    ) && fracture_roll < 5
+                    {
+                        part.status = PartInjuryStatus::Fractured;
+                        part.pain += damage * 2;
+                        part.bleeding += 1;
+                    } else {
+                        part.status = PartInjuryStatus::Lacerated;
+                        part.pain += damage / 2;
+                        part.bleeding += (2 + weapon_severity / 4).clamp(1, 4);
+                    }
+                } else {
+                    let bruise_roll = ((hash >> 5) % 10) as i32 + armor_protection / 4;
+                    if bruise_roll < 7 && weapon_severity < 6 {
+                        part.status = PartInjuryStatus::Bruised;
+                        part.pain += damage;
+                    } else {
+                        part.status = PartInjuryStatus::Lacerated;
+                        part.pain += damage / 2;
+                        part.bleeding += 1;
+                    }
+                }
+
+                // Descrição visceral correspondente
+                match part.status {
+                    PartInjuryStatus::Severed => {
+                        if target_part_kind == BodyPartKind::Neck {
+                            visceral_desc = format!(
+                                "{} desferiu um golpe violento decepando o pescoço de {}, cuja cabeça rolou em meio a jorros de sangue quente.",
+                                actor_name, target_name
+                            );
+                        } else {
+                            visceral_desc = format!(
+                                "{} acertou um golpe brutal que decepou o(a) {} de {}, deixando-o mutilado e urrando sob uma poça de sangue.",
+                                actor_name, part_label, target_name
+                            );
+                        }
+                    }
+                    PartInjuryStatus::Destroyed => {
+                        if target_part_kind == BodyPartKind::Heart
+                            || target_part_kind == BodyPartKind::Chest
+                        {
+                            visceral_desc = format!(
+                                "{} perfurou o peito de {}, dilacerando seu coração em um golpe letal que fez o sangue borbulhar por sua boca.",
+                                actor_name, target_name
+                            );
+                        } else if target_part_kind == BodyPartKind::Head {
+                            visceral_desc = format!(
+                                "{} esmagou o crânio de {} com um impacto avassalador, espalhando massa encefálica e sangue pelo chão.",
+                                actor_name, target_name
+                            );
+                        } else if target_part_kind == BodyPartKind::LeftEye
+                            || target_part_kind == BodyPartKind::RightEye
+                        {
+                            visceral_desc = format!(
+                                "{} cravou sua arma diretamente no(a) {} de {}, estourando o globo ocular sob gritos de agonia terríveis.",
+                                actor_name, part_label, target_name
+                            );
+                        } else {
+                            visceral_desc = format!(
+                                "{} dilacerou o(a) {} de {} completamente, destruindo a musculatura sob dor excruciante.",
+                                actor_name, part_label, target_name
+                            );
+                        }
+                    }
+                    PartInjuryStatus::Fractured => {
+                        visceral_desc = format!(
+                            "{} desferiu um impacto esmagador no(a) {} de {}, quebrando o osso com um estalo horrendo e audível de fratura.",
+                            actor_name, part_label, target_name
+                        );
+                    }
+                    PartInjuryStatus::Lacerated => {
+                        visceral_desc = format!(
+                            "{} cortou profundamente o(a) {} de {} com uma lâmina afiada, rasgando a carne com sangramento abundante.",
+                            actor_name, part_label, target_name
+                        );
+                    }
+                    PartInjuryStatus::Bruised => {
+                        visceral_desc = format!(
+                            "{} desferiu um soco pesado no(a) {} de {}, deixando uma contusão arroxeada e extremamente dolorida.",
+                            actor_name, part_label, target_name
+                        );
+                    }
+                    PartInjuryStatus::Intact => {
+                        visceral_desc = format!(
+                            "{} agrediu {} no(a) {}, mas não causou lesões visíveis.",
+                            actor_name, target_name, part_label
+                        );
+                    }
+                }
+
+                if matches!(
+                    target_part_kind,
+                    BodyPartKind::Head | BodyPartKind::Heart | BodyPartKind::Neck
+                ) && (part.status == PartInjuryStatus::Destroyed
+                    || part.status == PartInjuryStatus::Severed)
+                {
+                    target_died = true;
+                }
+            }
+
             if damage >= 16 {
                 injury.0.severe_wounds = injury.0.severe_wounds.saturating_add(1);
-                injury.0.bleeding = (injury.0.bleeding + 2).clamp(0, 10);
             } else {
                 injury.0.light_wounds = injury.0.light_wounds.saturating_add(1);
-                injury.0.bleeding = (injury.0.bleeding + 1).clamp(0, 10);
             }
+
+            let total_pain: i32 = injury.0.body_parts.iter().map(|p| p.pain).sum();
+            let total_bleeding: i32 = injury.0.body_parts.iter().map(|p| p.bleeding).sum();
+            injury.0.pain = total_pain.clamp(0, 100);
+            injury.0.bleeding = total_bleeding.clamp(0, 10);
             injury.0.recovery_ticks = injury.0.recovery_ticks.max(30);
             drop(injury);
+
             if remaining_health <= 0 {
                 target_died = true;
+            }
+
+            if target_died {
+                entity_mut
+                    .get_mut::<LifeStatusComponent>()
+                    .ok_or_else(|| anyhow!("missing life status component"))?
+                    .0 = AgentLifeStatus::Morto;
             } else if remaining_health <= 15 {
                 target_incapacitated = true;
                 entity_mut
@@ -112,9 +353,16 @@ impl Simulation {
             state.0.energy = (state.0.energy - 10).clamp(0, 100);
             state.0.stress = (state.0.stress + 12).clamp(0, 100);
         }
+        if let Some(item_id) = weapon_item_id {
+            let _ = self.degrade_item_instance(item_id, 1);
+        }
+        if let Some(item_id) = body_armor_item_id {
+            let _ = self.degrade_item_instance(item_id, 1);
+        }
+        if let Some(item_id) = shield_item_id {
+            let _ = self.degrade_item_instance(item_id, 1);
+        }
 
-        let actor_name = self.agent_name(actor_id)?;
-        let target_name = self.agent_name(target_id)?;
         self.push_event(WorldEvent {
             day: self.day,
             tick: self.tick_of_day,
@@ -125,14 +373,12 @@ impl Simulation {
             } else {
                 EventKind::Violence
             },
-            summary: if target_died {
-                format!("{actor_name} fere mortalmente {target_name}.")
-            } else if target_incapacitated {
-                format!("{actor_name} agride {target_name} e o deixa incapacitado.")
-            } else {
-                format!("{actor_name} agride {target_name}, causando {damage} de dano.")
-            },
-            impact_tags: vec!["violencia".to_string(), "crime".to_string()],
+            summary: format!("{visceral_desc} [arma={weapon_name} dano={damage} armadura_alvo={armor_protection}]"),
+            impact_tags: vec![
+                "violencia".to_string(),
+                "crime".to_string(),
+                weapon_name.clone(),
+            ],
         });
         self.apply_relation_delta(
             target_id,
@@ -161,7 +407,7 @@ impl Simulation {
         self.add_memory(
             target_id,
             MemoryKind::Offense,
-            format!("{actor_name} me atacou fisicamente."),
+            format!("{} me atacou fisicamente. {}", actor_name, visceral_desc),
             vec!["violencia".to_string(), "ofensa".to_string()],
             35,
             vec![actor_id],
@@ -169,7 +415,7 @@ impl Simulation {
         self.add_memory(
             actor_id,
             MemoryKind::Offense,
-            format!("Eu ataquei {target_name}."),
+            format!("Eu ataquei {} fisicamente. {}", target_name, visceral_desc),
             vec!["violencia".to_string(), "culpa".to_string()],
             24,
             vec![target_id],
@@ -1176,6 +1422,37 @@ impl Simulation {
             .sum();
         let capacity_left = (actor_capacity - actor_load).max(0);
         if capacity_left > 0 {
+            let stolen_item_id = {
+                let mut target_mut = self.world.entity_mut(target_entity);
+                target_mut
+                    .get_mut::<ItemInventoryComponent>()
+                    .and_then(|mut items| {
+                        if items.0.is_empty() {
+                            None
+                        } else {
+                            Some(items.0.remove(0))
+                        }
+                    })
+            };
+            if let Some(item_id) = stolen_item_id {
+                let item_name = self.item_display_name_for_id(item_id);
+                let actor_household_id = self.household_id_for_agent(actor_id);
+                {
+                    let mut actor_mut = self.world.entity_mut(actor_entity);
+                    actor_mut
+                        .get_mut::<ItemInventoryComponent>()
+                        .ok_or_else(|| anyhow!("missing item inventory component"))?
+                        .0
+                        .push(item_id);
+                }
+                if let Some(item) = self.item_instance_mut(item_id) {
+                    item.owner_agent_id = Some(actor_id);
+                    item.owner_household_id = actor_household_id;
+                }
+                let _ = self.maybe_auto_equip_best_items(actor_id);
+                stolen.push(item_name);
+                return Ok(stolen);
+            }
             let taken_stack = {
                 let mut target_mut = self.world.entity_mut(target_entity);
                 let mut target_economy = target_mut
@@ -1274,12 +1551,29 @@ impl Simulation {
             .iter(&self.world)
             .find_map(|(core, injury)| {
                 (core.id == agent_id).then(|| {
+                    let mut parts_desc = Vec::new();
+                    for part in &injury.0.body_parts {
+                        if part.status != PartInjuryStatus::Intact {
+                            parts_desc.push(format!(
+                                "{}:{:?}({}%)",
+                                part.kind.display_name(),
+                                part.status,
+                                part.health
+                            ));
+                        }
+                    }
+                    let parts_str = if parts_desc.is_empty() {
+                        "Intacto".to_string()
+                    } else {
+                        parts_desc.join(",")
+                    };
                     format!(
-                        "leves={} graves={} dor={} sangramento={}",
+                        "leves={} graves={} dor={} sangramento={} partes=[{}]",
                         injury.0.light_wounds,
                         injury.0.severe_wounds,
                         injury.0.pain,
-                        injury.0.bleeding
+                        injury.0.bleeding,
+                        parts_str
                     )
                 })
             })

@@ -144,6 +144,9 @@ fn print_report(sim: &mut Simulation, config: &HeadlessConfig, label: &str) {
     for line in sim.economy_overview() {
         println!("[headless] economia | {}", line);
     }
+    for line in sim.history_overview() {
+        println!("[headless] historia | {}", line);
+    }
     for line in sim.legal_overview() {
         println!("[headless] justica | {}", line);
     }
@@ -177,8 +180,23 @@ fn print_report(sim: &mut Simulation, config: &HeadlessConfig, label: &str) {
         } else {
             view.known_stories.join("; ")
         };
+        let equipped = if view.equipped_items.is_empty() {
+            "-".to_string()
+        } else {
+            view.equipped_items.join("; ")
+        };
+        let inventory_items = if view.inventory_items.is_empty() {
+            "-".to_string()
+        } else {
+            view.inventory_items.join("; ")
+        };
+        let work_items = if view.work_establishment_items.is_empty() {
+            "-".to_string()
+        } else {
+            view.work_establishment_items.join("; ")
+        };
         println!(
-            "[headless] agente | {} | papel={} | vida={:?} | ferimentos=leves:{} graves:{} dor:{} sangramento:{} | pos=({}, {}) | area={} | destino={} | intencao={} | politica={} | queixas={} | instituicoes=lider:{} justica:{} imposto:{} rac:{} guardas:{} guerra:{} medo:{} corrupcao:{} equidade:{} | feudal=titulo:{} senhor:{} poder:{} obrigacoes:{} sucessao:{} | psicologia={} | rumores={} | historias={} | caixa_lar={} | imposto_devendo={} | caixa_publico={} | pantry={} | salario_pendente={} | tarefa={} | pensamento={} ",
+            "[headless] agente | {} | papel={} | vida={:?} | ferimentos=leves:{} graves:{} dor:{} sangramento:{} | pos=({}, {}) | area={} | destino={} | intencao={} | politica={} | queixas={} | instituicoes=lider:{} justica:{} imposto:{} rac:{} guardas:{} guerra:{} medo:{} corrupcao:{} equidade:{} | feudal=titulo:{} senhor:{} poder:{} obrigacoes:{} sucessao:{} | psicologia={} | plano_longo={} | prestigio={}({}) | equipamento={} | inventario={} | oficio=fer:{} alf:{} our:{} couro:{} | rumores={} | historias={} | caixa_lar={} | imposto_devendo={} | caixa_publico={} | pantry={} | salario_pendente={} | tarefa={} | estoque_inst_trabalho={} | pensamento={} ",
             view.name,
             view.role_name,
             view.life_status,
@@ -232,6 +250,19 @@ fn print_report(sim: &mut Simulation, config: &HeadlessConfig, label: &str) {
                 view.succession_status.join("; ")
             },
             view.psychological_state.summary(),
+            if view.psychological_state.long_term_plan.is_empty() {
+                "-".to_string()
+            } else {
+                view.psychological_state.long_term_plan.clone()
+            },
+            view.visible_prestige_summary,
+            view.perceived_status_score,
+            equipped,
+            inventory_items,
+            view.craft_proficiencies.smithing,
+            view.craft_proficiencies.tailoring,
+            view.craft_proficiencies.jewelry,
+            view.craft_proficiencies.leatherwork,
             rumors,
             stories,
             view.household_treasury,
@@ -242,6 +273,7 @@ fn print_report(sim: &mut Simulation, config: &HeadlessConfig, label: &str) {
             view.active_task_summary
                 .clone()
                 .unwrap_or_else(|| "-".to_string()),
+            work_items,
             truncate_for_log(&view.last_thought, 300)
         );
     }

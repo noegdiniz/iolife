@@ -10,12 +10,13 @@ use medieval_village_llm::persistence::Persistence;
 use medieval_village_llm::sim_core::{Simulation, SimulationConfig};
 use medieval_village_llm::world_model::{
     AgentIntent, AgentMemory, AgentState, BuildingSpec, ConstructionStatus, CrimeCaseStatus,
-    CrimeType, CropStage, EconomicNode, EconomicTaskKind, EventKind, FactionObjective, FixtureKind,
-    InstitutionalPerception, InsurrectionStage, InsurrectionStatus, IntentKind, ItemAffordanceKind,
-    LocationKind, MemoryKind, MilitaryDemand, MilitaryDemandStatus, PolicyActStatus, PolicyDomain,
-    PolicyEffect, PoliticalFaction, Polity, PromiseCondition, PsychologicalState, RelationDelta,
-    ResourceKind, ResourceStack, ScheduledMeetingStatus, SimplifiedTask, SocialMove, TileCoord,
-    TileKind, WarStage, WarState, WarStatus, WorldEvent,
+    CrimeType, CropStage, EconomicNode, EconomicTaskKind, EventKind, FactionObjective,
+    FeudalContractStatus, FixtureKind, InstitutionalPerception, InsurrectionStage,
+    InsurrectionStatus, IntentKind, ItemAffordanceKind, LocationKind, MemoryKind, MilitaryDemand,
+    MilitaryDemandStatus, PartInjuryStatus, PolicyActStatus, PolicyDomain, PolicyEffect,
+    PoliticalFaction, Polity, PromiseCondition, PsychologicalState, RelationDelta, ResourceKind,
+    ResourceStack, ScheduledMeetingStatus, SimplifiedTask, SocialMove, TileCoord, TileKind,
+    WarStage, WarState, WarStatus, WorldEvent,
 };
 use rusqlite::{Connection, params};
 use std::collections::HashMap;
@@ -300,6 +301,10 @@ impl LlmAdapter for InstrumentedAdapter {
             reflection: envelope.reflection,
             dominant_emotion: envelope.dominant_emotion,
             belief_updates: envelope.belief_updates,
+            long_term_plan: format!(
+                "Consolidar minha posicao como {} sem perder estabilidade.",
+                input.decision_input.role
+            ),
         })
     }
 
@@ -418,6 +423,58 @@ fn world_places_are_canonical_and_unique() {
 }
 
 #[test]
+fn historical_bootstrap_emits_only_macro_events() {
+    let snapshot = Simulation::seeded(SimulationConfig::default()).snapshot();
+    assert!(
+        !snapshot.events.is_empty(),
+        "historical bootstrap should emit events"
+    );
+    assert!(snapshot.events.iter().all(|event| {
+        !matches!(
+            event.kind,
+            EventKind::ConversationStarted
+                | EventKind::ConversationTurn
+                | EventKind::ConversationEnded
+                | EventKind::Meeting
+                | EventKind::Travel
+                | EventKind::Arrival
+                | EventKind::Blocking
+                | EventKind::CognitionFailure
+        )
+    }));
+    assert!(snapshot.events.iter().any(|event| {
+        matches!(
+            event.kind,
+            EventKind::Construction
+                | EventKind::Scarcity
+                | EventKind::Commerce
+                | EventKind::Punishment
+                | EventKind::PoliticalPressure
+                | EventKind::InstitutionalDispute
+                | EventKind::MilitarySupply
+                | EventKind::TributePaid
+                | EventKind::TributeRefused
+                | EventKind::LevyCalled
+                | EventKind::LevyRefused
+                | EventKind::FeudalSanction
+                | EventKind::SuccessionOpened
+                | EventKind::FactionShift
+        )
+    }));
+}
+
+#[test]
+fn historical_bootstrap_materializes_macro_state() {
+    let snapshot = Simulation::seeded(SimulationConfig::default()).snapshot();
+    assert!(snapshot.historical_summary.is_some());
+    assert!(snapshot.world_history_years_simulated >= 1);
+    assert!(!snapshot.feudal_titles.is_empty());
+    assert!(!snapshot.feudal_contracts.is_empty());
+    assert!(!snapshot.policy_acts.is_empty());
+    assert!(!snapshot.events.is_empty());
+}
+
+#[test]
 fn parses_conversation_meeting_fields() {
     let payload = r#"{
       "utterance": "Encontre-me na taverna ao anoitecer.",
@@ -458,7 +515,7 @@ fn snapshot_persists_scheduled_meetings() {
             response_tick: Some(0),
         });
     let snapshot = sim.snapshot();
-    assert_eq!(snapshot.schema_version, 20);
+    assert_eq!(snapshot.schema_version, 22);
     assert_eq!(snapshot.scheduled_meetings.len(), 1);
     let mut restored = Simulation::from_snapshot(snapshot);
     assert_eq!(restored.meetings_overview().len(), 1);
@@ -504,7 +561,8 @@ fn parses_think_maker_json_valid() {
     let payload = r#"{
         "reflection": "Alda mede o acesso a comida.",
         "dominant_emotion": "apreensao",
-        "belief_updates": ["Comer agora evita fraqueza."]
+        "belief_updates": ["Comer agora evita fraqueza."],
+        "long_term_plan": "Juntar reservas sem alarmar vizinhos."
     }"#;
     let parsed = parse_think_maker_json(payload).expect("think maker should parse");
     assert_eq!(parsed.reflection, "Alda mede o acesso a comida.");
@@ -513,6 +571,21 @@ fn parses_think_maker_json_valid() {
         parsed.belief_updates,
         vec!["Comer agora evita fraqueza.".to_string()]
     );
+    assert_eq!(
+        parsed.long_term_plan,
+        "Juntar reservas sem alarmar vizinhos."
+    );
+}
+
+#[test]
+fn parse_think_maker_json_requires_long_term_plan() {
+    let payload = r#"{
+        "reflection": "Alda mede o acesso a comida.",
+        "dominant_emotion": "apreensao",
+        "belief_updates": ["Comer agora evita fraqueza."]
+    }"#;
+    let error = parse_think_maker_json(payload).expect_err("missing plan should fail");
+    assert!(error.to_string().contains("long_term_plan"));
 }
 
 #[test]
@@ -1215,7 +1288,7 @@ fn persists_and_restores_spatial_snapshot() {
         .expect("advance one social turn");
     persistence.save(&mut simulation, "manual").expect("save");
     let snapshot = persistence.load_latest().expect("load").expect("snapshot");
-    assert_eq!(snapshot.schema_version, 20);
+    assert_eq!(snapshot.schema_version, 22);
     assert!(!snapshot.spatial.buildings.is_empty());
     assert!(!snapshot.spatial.fixtures.is_empty());
     assert!(snapshot.agents.iter().all(|agent| agent.position.x >= 0));
@@ -1854,6 +1927,7 @@ fn psychological_state_persists_and_is_visible_in_agent_view() {
         anger: 22,
         hope: 11,
         guilt: 9,
+        long_term_plan: "Acumular margem para atravessar a proxima escassez.".to_string(),
         last_updated_day: snapshot.day,
         notes: vec!["teste psicologico".to_string()],
     };
@@ -1863,6 +1937,10 @@ fn psychological_state_persists_and_is_visible_in_agent_view() {
     let restored_agent = &restored.agents[0];
     assert_eq!(restored_agent.psychological_state.grief, 42);
     assert_eq!(restored_agent.psychological_state.trauma, 36);
+    assert_eq!(
+        restored_agent.psychological_state.long_term_plan,
+        "Acumular margem para atravessar a proxima escassez."
+    );
     assert!(
         restored_agent
             .psychological_state
@@ -1878,6 +1956,50 @@ fn psychological_state_persists_and_is_visible_in_agent_view() {
         .expect("agent view");
     assert_eq!(view.psychological_state.humiliation, 31);
     assert!(view.psychological_state.summary().contains("luto=42"));
+    assert_eq!(
+        view.psychological_state.long_term_plan,
+        "Acumular margem para atravessar a proxima escassez."
+    );
+}
+
+#[test]
+fn think_maker_updates_persistent_long_term_plan() {
+    let mut simulation = Simulation::seeded(SimulationConfig::default());
+    let actor_snapshot = simulation
+        .snapshot()
+        .agents
+        .iter()
+        .find(|agent| agent.role_id == "campones")
+        .cloned()
+        .expect("farmer agent for think maker test");
+    let output = ThinkMakerOutput {
+        reflection: "Quero agir com discricao enquanto fortaleco minha base.".to_string(),
+        dominant_emotion: "calculista".to_string(),
+        belief_updates: vec!["Observar antes de arriscar recursos.".to_string()],
+        long_term_plan: "Consolidar minha posicao como campones sem perder estabilidade."
+            .to_string(),
+    };
+    let actor_id = actor_snapshot.id;
+    simulation
+        .debug_apply_think_maker_output(actor_id, output)
+        .expect("apply think maker output");
+
+    let restored = simulation.snapshot();
+    let actor = restored
+        .agents
+        .iter()
+        .find(|agent| agent.id == actor_id)
+        .expect("actor after think maker");
+    assert_eq!(
+        actor.psychological_state.long_term_plan,
+        "Consolidar minha posicao como campones sem perder estabilidade."
+    );
+    assert!(
+        actor
+            .memories
+            .iter()
+            .any(|memory| { memory.summary.contains("Plano de longo prazo atualizado:") })
+    );
 }
 
 #[test]
@@ -2981,4 +3103,819 @@ fn agricultural_crop_growth_and_harvesting_cycle() {
         snapshot.crops.is_empty(),
         "Crops list should be empty after harvesting"
     );
+}
+
+#[test]
+fn test_body_graph_damage_and_visceral_combat() {
+    let mut config = SimulationConfig::default();
+    config.max_agents = 2; // Let's seed at least 2 agents
+    let mut simulation = Simulation::seeded(config);
+
+    let snapshot = simulation.snapshot();
+    assert!(snapshot.agents.len() >= 2);
+    let a1 = snapshot.agents[0].id;
+    let a2 = snapshot.agents[1].id;
+
+    // Force position of both agents to be adjacent
+    let p1 = TileCoord { x: 5, y: 5 };
+    let p2 = TileCoord { x: 5, y: 6 };
+    simulation.debug_force_agent_position(a1, p1).unwrap();
+    simulation.debug_force_agent_position(a2, p2).unwrap();
+
+    // Verify initial body graph of target is fully intact
+    let target_injury_before = simulation.agent_injury(a2).unwrap();
+    assert_eq!(target_injury_before.body_parts.len(), 15);
+    for part in &target_injury_before.body_parts {
+        assert_eq!(part.status, PartInjuryStatus::Intact);
+        assert_eq!(part.health, 100);
+        assert_eq!(part.pain, 0);
+        assert_eq!(part.bleeding, 0);
+    }
+
+    // Trigger physical attack from agent 1 to agent 2
+    simulation.apply_attack(a1, a2, false).unwrap();
+
+    // Verify target body parts are damaged
+    let target_injury_after = simulation.agent_injury(a2).unwrap();
+    let damaged_parts: Vec<_> = target_injury_after
+        .body_parts
+        .iter()
+        .filter(|p| p.status != PartInjuryStatus::Intact)
+        .collect();
+
+    assert!(
+        !damaged_parts.is_empty(),
+        "Pelo menos uma parte do corpo deve ter sido atingida e danificada"
+    );
+    let hit_part = damaged_parts[0];
+    assert!(hit_part.health < 100);
+    assert!(hit_part.pain > 0 || hit_part.bleeding > 0);
+
+    // Verify global pain and bleeding are aggregated correctly
+    assert_eq!(
+        target_injury_after.pain,
+        target_injury_after
+            .body_parts
+            .iter()
+            .map(|p| p.pain)
+            .sum::<i32>()
+            .clamp(0, 100)
+    );
+    assert_eq!(
+        target_injury_after.bleeding,
+        target_injury_after
+            .body_parts
+            .iter()
+            .map(|p| p.bleeding)
+            .sum::<i32>()
+            .clamp(0, 10)
+    );
+
+    // Verify visceral description is generated in world events
+    let snapshot_after = simulation.snapshot();
+    let combat_events: Vec<_> = snapshot_after
+        .events
+        .iter()
+        .filter(|e| e.actor == a1 && e.target == Some(a2))
+        .collect();
+
+    assert!(!combat_events.is_empty());
+    let visceral_summary = &combat_events[0].summary;
+    println!("VISCERAL SUMMARY LOGGED: {}", visceral_summary);
+
+    // Check if the summary is visceral and contains details about the hit body part
+    assert!(
+        visceral_summary.contains("golpe")
+            || visceral_summary.contains("perfurou")
+            || visceral_summary.contains("esmagou")
+            || visceral_summary.contains("cravou")
+            || visceral_summary.contains("dilacerou")
+            || visceral_summary.contains("quebrando")
+            || visceral_summary.contains("cortou")
+            || visceral_summary.contains("soco"),
+        "Deve conter descrição visceral do ataque"
+    );
+
+    // Verify persistence serialization/deserialization by performing a save/load cycle
+    let db_dir = tempdir().unwrap();
+    let db_path = db_dir.path().join("test_body_graph.db");
+    let mut persistence = Persistence::open(&db_path).unwrap();
+    persistence.save(&mut simulation, "combat_test").unwrap();
+
+    let restored_snapshot = persistence
+        .load_latest()
+        .unwrap()
+        .expect("should restore snapshot");
+    let restored_agent2 = restored_snapshot
+        .agents
+        .iter()
+        .find(|a| a.id == a2)
+        .unwrap();
+
+    // Ensure body graph state is recovered correctly
+    let restored_hit_part = restored_agent2
+        .injury
+        .body_parts
+        .iter()
+        .find(|p| p.kind == hit_part.kind)
+        .unwrap();
+    assert_eq!(restored_hit_part.status, hit_part.status);
+    assert_eq!(restored_hit_part.health, hit_part.health);
+    assert_eq!(restored_hit_part.pain, hit_part.pain);
+    assert_eq!(restored_hit_part.bleeding, hit_part.bleeding);
+}
+
+#[test]
+fn test_recursive_tribute_and_dynamic_levy_call() {
+    let mut config = SimulationConfig::default();
+    config.max_agents = 6;
+    let mut simulation = Simulation::seeded(config);
+
+    // Locate vassal contract
+    let snapshot = simulation.snapshot();
+    let contract = snapshot
+        .feudal_contracts
+        .iter()
+        .find(|c| c.status == FeudalContractStatus::Active)
+        .cloned()
+        .expect("should have seeded active feudal contract");
+
+    let suzerain_id = contract.suzerain_agent_id;
+    let vassal_id = contract.vassal_agent_id;
+
+    let vassal_house_id = snapshot
+        .agents
+        .iter()
+        .find(|a| a.id == vassal_id)
+        .and_then(|a| a.home_building_id)
+        .expect("vassal household");
+
+    let suzerain_house_id = snapshot
+        .agents
+        .iter()
+        .find(|a| a.id == suzerain_id)
+        .and_then(|a| a.home_building_id)
+        .expect("suzerain household");
+
+    // Set initial treasuries: vassal has 10, suzerain has 0
+    simulation
+        .debug_set_household_treasury(vassal_house_id, 10)
+        .unwrap();
+    simulation
+        .debug_set_household_treasury(suzerain_house_id, 0)
+        .unwrap();
+
+    // Verify initial contract stats
+    let contract_tribute = contract.tribute_due_per_day;
+    assert!(contract_tribute > 0);
+
+    // 1. Manually trigger apply_daily_feudal_obligations with force = true
+    simulation.apply_daily_feudal_obligations(true).unwrap();
+
+    // After next day, check vassal paid tribute to suzerain
+    let snapshot_day2 = simulation.snapshot();
+    let _vassal_treasury_day2 = snapshot_day2
+        .households
+        .iter()
+        .find(|h| h.id == vassal_house_id)
+        .unwrap()
+        .treasury;
+
+    let suzerain_treasury_day2 = snapshot_day2
+        .households
+        .iter()
+        .find(|h| h.id == suzerain_house_id)
+        .unwrap()
+        .treasury;
+
+    // Assert payments happened (suzerain treasury should receive at least the contract_tribute)
+    assert!(suzerain_treasury_day2 >= contract_tribute);
+
+    // 2. Test apply_levy_call_intent
+    // Make sure we have enough food in vassal's pantry
+    if let Some(household) = simulation.household_by_id_mut(vassal_house_id) {
+        household.pantry.push(ResourceStack {
+            resource_id: "graos".to_string(),
+            amount: 50,
+        });
+    }
+
+    // Force contract parameters to have 100% acceptance chance by setting loyalty high
+    simulation
+        .apply_feudal_oath_intent(vassal_id, Some(suzerain_id))
+        .unwrap();
+
+    let initial_readiness = simulation
+        .snapshot()
+        .polities
+        .first()
+        .map(|p| p.military_readiness)
+        .unwrap_or(0);
+
+    // Call levy
+    simulation
+        .apply_levy_call_intent(suzerain_id, Some(vassal_id))
+        .unwrap();
+
+    // Verify polity military readiness increased
+    let final_snapshot = simulation.snapshot();
+    let final_readiness = final_snapshot
+        .polities
+        .first()
+        .map(|p| p.military_readiness)
+        .unwrap_or(0);
+
+    assert!(
+        final_readiness > initial_readiness,
+        "Military readiness should increase after successful levy call"
+    );
+
+    // Verify stress increased on the vassal agent
+    let vassal_agent = final_snapshot
+        .agents
+        .iter()
+        .find(|a| a.id == vassal_id)
+        .unwrap();
+    assert!(
+        vassal_agent.state.stress > 0,
+        "Vassal stress should increase after sending levy"
+    );
+
+    // Verify a LevyCalled event is logged
+    let has_levy_event = final_snapshot
+        .events
+        .iter()
+        .any(|e| e.kind == EventKind::LevyCalled);
+    assert!(has_levy_event, "LevyCalled event should be recorded");
+}
+
+#[test]
+fn test_feudal_corvee_labor_execution() {
+    let mut config = SimulationConfig::default();
+    config.max_agents = 6;
+    let mut simulation = Simulation::seeded(config);
+
+    let snapshot = simulation.snapshot();
+    let contract = snapshot
+        .feudal_contracts
+        .iter()
+        .find(|c| c.status == FeudalContractStatus::Active)
+        .cloned()
+        .expect("should have seeded active feudal contract");
+
+    let suzerain_id = contract.suzerain_agent_id;
+    let vassal_id = contract.vassal_agent_id;
+
+    let vassal_house_id = snapshot
+        .agents
+        .iter()
+        .find(|a| a.id == vassal_id)
+        .and_then(|a| a.home_building_id)
+        .expect("vassal household");
+
+    let suzerain_house_id = snapshot
+        .agents
+        .iter()
+        .find(|a| a.id == suzerain_id)
+        .and_then(|a| a.home_building_id)
+        .expect("suzerain household");
+
+    // Find a lenhal or pedreira establishment
+    let est = snapshot
+        .establishments
+        .iter()
+        .find(|e| e.establishment_type_id == "lenhal" || e.establishment_type_id == "pedreira")
+        .cloned()
+        .expect("should find a lenhal or pedreira establishment");
+
+    let est_id = est.id;
+
+    // Set vassal to work at this establishment
+    simulation
+        .debug_set_agent_work_building(vassal_id, est.building_id)
+        .unwrap();
+
+    // Associate establishment with suzerain: set owner_household_ids to suzerain's household
+    simulation
+        .debug_set_establishment_owner_household(est_id, suzerain_house_id)
+        .unwrap();
+
+    // Add establishment to suzerain's EstateHolding if it exists
+    let _ = simulation.debug_add_establishment_to_estate_holding(suzerain_id, est_id);
+
+    // Configure vassal household corvee_days_due
+    if let Some(h) = simulation.household_by_id_mut(vassal_house_id) {
+        h.corvee_days_due = 1;
+        h.direct_lord_agent_id = Some(suzerain_id);
+        h.pending_payments.clear();
+    }
+
+    // Clear suzerain's pantry
+    if let Some(h) = simulation.household_by_id_mut(suzerain_house_id) {
+        h.pantry.clear();
+    }
+
+    // Keep track of initial agent state
+    let initial_state = simulation.agent_state(vassal_id).unwrap();
+
+    // Trigger apply_work
+    simulation.apply_work(vassal_id).unwrap();
+
+    // Verify corvee day was decremented
+    let final_snapshot = simulation.snapshot();
+    let vassal_house = final_snapshot
+        .households
+        .iter()
+        .find(|h| h.id == vassal_house_id)
+        .unwrap();
+    assert_eq!(
+        vassal_house.corvee_days_due, 0,
+        "Corvee days due should decrement to 0"
+    );
+
+    // Verify vassal did NOT receive any salary claim
+    assert!(
+        vassal_house.pending_payments.is_empty(),
+        "Peasant should not receive wages for corvee labor"
+    );
+
+    // Verify suzerain received the produced resource in their pantry
+    let suzerain_house = final_snapshot
+        .households
+        .iter()
+        .find(|h| h.id == suzerain_house_id)
+        .unwrap();
+
+    let produced_in_pantry = suzerain_house.pantry.iter().any(|stack| stack.amount > 0);
+    assert!(
+        produced_in_pantry,
+        "Suzerain's pantry should receive the resources produced by corvee labor"
+    );
+
+    // Verify physical/emotional penalties: stress increased by +5, mood decreased by -3
+    let final_state = final_snapshot
+        .agents
+        .iter()
+        .find(|a| a.id == vassal_id)
+        .unwrap()
+        .state
+        .clone();
+    let expected_stress = (initial_state.stress + 5).clamp(0, 100);
+    let expected_mood = (initial_state.mood - 3).clamp(0, 100);
+
+    assert_eq!(
+        final_state.stress, expected_stress,
+        "Stress should increase by 5 (2 normal + 3 penalty)"
+    );
+    assert_eq!(
+        final_state.mood, expected_mood,
+        "Mood should decrease by 3 (-3 net change)"
+    );
+
+    // Verify event was logged
+    let has_corvee_event = final_snapshot.events.iter().any(|e| {
+        e.kind == EventKind::FeudalSanction && e.impact_tags.contains(&"corveia".to_string())
+    });
+    assert!(
+        has_corvee_event,
+        "Should log a FeudalSanction event with 'corveia' tag"
+    );
+}
+
+#[test]
+fn test_chunk_dynamic_value_and_organic_expansion() {
+    use medieval_village_llm::sim_core::LifeStatusComponent;
+    use medieval_village_llm::world_model::{
+        AgentLifeStatus, ConstructionProject, EconomicTask, EconomicTaskClass, EconomicTaskPhase,
+    };
+
+    let mut config = SimulationConfig::default();
+    config.max_agents = 6;
+    let mut simulation = Simulation::seeded(config);
+
+    // 1. Valor dinâmico
+    simulation.debug_recalculate_territory_values();
+    let snapshot = simulation.snapshot();
+    for t in &snapshot.territories {
+        assert!(t.strategic_value >= 0 && t.strategic_value <= 200);
+    }
+
+    // Prepare clean state for tests
+    let ruler_id = {
+        let p1 = &mut simulation.debug_polities_mut()[0];
+        p1.military_readiness = 100;
+        p1.treasury = 500;
+        p1.ruler_agent_id.unwrap()
+    };
+
+    // Make sure ruler is alive
+    let ruler_entity = simulation.find_agent_entity(ruler_id).unwrap();
+    if let Some(mut life) = simulation
+        .debug_world_mut()
+        .entity_mut(ruler_entity)
+        .get_mut::<LifeStatusComponent>()
+    {
+        life.0 = AgentLifeStatus::Vivo;
+    }
+
+    // Set territory 1 coordinates
+    let t1_id = simulation.debug_territories()[0].id;
+    {
+        let t1 = &mut simulation.debug_territories_mut()[0];
+        t1.controller_polity_id = 1;
+        t1.tile_coords = vec![TileCoord { x: 5, y: 5 }];
+    }
+
+    // 2. Território livre annexation
+    let t2_id = simulation.debug_territories()[1].id;
+    {
+        let t2 = &mut simulation.debug_territories_mut()[1];
+        t2.controller_polity_id = 999; // Free polity
+        t2.tile_coords = vec![TileCoord { x: 5, y: 6 }]; // Adjacent
+        t2.strategic_value = 50;
+    }
+
+    simulation.debug_apply_daily_organic_expansion();
+    assert_eq!(
+        simulation
+            .debug_territories()
+            .iter()
+            .find(|t| t.id == t2_id)
+            .unwrap()
+            .controller_polity_id,
+        1,
+        "Territory 2 should be claimed by Polity 1"
+    );
+
+    // 3. Guerra por território controlado
+    // Reset Territory 2 to another active polity (id 2)
+    let p2_id = 2;
+    {
+        let t2 = &mut simulation.debug_territories_mut()[1];
+        t2.controller_polity_id = p2_id;
+        t2.strategic_value = 50;
+    }
+    // Create polity 2
+    simulation.debug_polities_mut().push(Polity {
+        id: p2_id,
+        name: "Polity 2".to_string(),
+        ruler_agent_id: Some(2),
+        capital_territory_id: Some(t2_id),
+        treasury: 100,
+        military_readiness: 50,
+    });
+    // Make sure polity 2 ruler is alive
+    let p2_ruler_entity = simulation.find_agent_entity(2).unwrap();
+    if let Some(mut life) = simulation
+        .debug_world_mut()
+        .entity_mut(p2_ruler_entity)
+        .get_mut::<LifeStatusComponent>()
+    {
+        life.0 = AgentLifeStatus::Vivo;
+    }
+
+    simulation.debug_wars_mut().clear();
+    simulation.debug_apply_daily_organic_expansion();
+
+    assert_eq!(
+        simulation
+            .debug_territories()
+            .iter()
+            .find(|t| t.id == t2_id)
+            .unwrap()
+            .controller_polity_id,
+        2,
+        "Controller of Territory 2 should still be Polity 2"
+    );
+    assert!(
+        simulation
+            .debug_wars()
+            .iter()
+            .any(|w| w.attacker_polity_id == 1
+                && w.defender_polity_id == 2
+                && w.target_territory_ids.contains(&t2_id)),
+        "A WarState should be created for Territory 2"
+    );
+
+    // 4. Nome gerado
+    let name = simulation.debug_generate_emergent_polity_name(ruler_id);
+    assert!(!name.is_empty(), "Generated name should not be empty");
+
+    // 5. Construção financiada por polity
+    // Let's create a project
+    let project_id = simulation.debug_next_construction_project_id();
+    simulation.debug_set_next_construction_project_id(project_id + 1);
+    simulation
+        .debug_construction_projects_mut()
+        .push(ConstructionProject {
+            id: project_id,
+            establishment_type_id: "casa".to_string(),
+            building_name: "Casa Teste".to_string(),
+            planned_footprint: vec![TileCoord { x: 5, y: 5 }],
+            entrance: TileCoord { x: 5, y: 5 },
+            materials_required: vec![ResourceStack {
+                resource_id: "madeira".to_string(),
+                amount: 1,
+            }],
+            materials_delivered: Vec::new(),
+            labor_required: 10,
+            labor_done: 0,
+            status: ConstructionStatus::Planned,
+            priority: 50,
+            systemic_reason: "teste".to_string(),
+            resulting_building_id: None,
+            funding_polity_id: Some(1),
+        });
+
+    // Seed some madeira in establishment 1
+    if let Some(est) = simulation
+        .debug_establishments_mut()
+        .iter_mut()
+        .find(|e| e.id == 1)
+    {
+        est.stock = vec![ResourceStack {
+            resource_id: "madeira".to_string(),
+            amount: 10,
+        }];
+        est.cash = 100;
+    }
+
+    // Execute construction material task
+    let task = EconomicTask {
+        id: 9999,
+        kind: EconomicTaskKind::Construir,
+        class: EconomicTaskClass::GeneralCommerce,
+        priority: 50,
+        lock_until_complete: true,
+        creates_household_reserve: false,
+        actor_household_id: 1,
+        assigned_agent_id: None,
+        source: EconomicNode::Establishment(1),
+        destination: EconomicNode::ConstructionProject(project_id),
+        resource_id: Some("madeira".to_string()),
+        amount: 1,
+        unit_price: 50,
+        total_price: 50,
+        description: "Obter madeira".to_string(),
+        phase: EconomicTaskPhase::AwaitingPickup,
+        related_establishment_id: None,
+        related_construction_project_id: Some(project_id),
+    };
+
+    let initial_treasury = simulation
+        .debug_polities()
+        .iter()
+        .find(|p| p.id == 1)
+        .unwrap()
+        .treasury;
+    let initial_cash = simulation
+        .debug_establishments()
+        .iter()
+        .find(|e| e.id == 1)
+        .unwrap()
+        .cash;
+
+    simulation
+        .debug_execute_construction_material_task(ruler_id, task, project_id)
+        .unwrap();
+
+    let final_treasury = simulation
+        .debug_polities()
+        .iter()
+        .find(|p| p.id == 1)
+        .unwrap()
+        .treasury;
+    let final_cash = simulation
+        .debug_establishments()
+        .iter()
+        .find(|e| e.id == 1)
+        .unwrap()
+        .cash;
+
+    assert_eq!(
+        final_treasury,
+        initial_treasury - 50,
+        "Polity treasury should be debited by 50"
+    );
+    assert_eq!(
+        final_cash,
+        initial_cash + 50,
+        "Establishment cash should be credited by 50"
+    );
+
+    // 6. Indexação de building
+    // Let's materialize the project
+    let project = simulation
+        .debug_construction_projects_mut()
+        .iter()
+        .find(|p| p.id == project_id)
+        .unwrap()
+        .clone();
+    let building_id = simulation
+        .debug_materialize_construction_project(&project)
+        .unwrap();
+
+    // Check that building is in territory 1 building_ids
+    let t1 = simulation
+        .debug_territories()
+        .iter()
+        .find(|t| t.id == t1_id)
+        .unwrap();
+    assert!(
+        t1.building_ids.contains(&building_id),
+        "Territory 1 should index the materialized building"
+    );
+}
+
+#[test]
+fn test_magical_fauna_system() {
+    use medieval_village_llm::sim_core::{CreatureStateComponent, SimulationConfig};
+    use medieval_village_llm::world_model::{
+        AgentLifeStatus, BodyPartKind, HuntingQuest, PartInjuryStatus, ResourceKind, TileCoord,
+        TileKind,
+    };
+
+    let mut config = SimulationConfig::default();
+    config.max_agents = 4;
+    let mut sim = Simulation::seeded(config);
+
+    // ── 1. Naming Verification ──
+    let name_common = sim.generate_creature_name(10, false);
+    assert!(
+        !name_common.is_empty(),
+        "Common creature name should not be empty"
+    );
+    assert!(
+        name_common.len() > 5,
+        "Common creature name should be a compound word"
+    );
+
+    let name_legendary = sim.generate_creature_name(5, true);
+    assert!(
+        name_legendary.contains(", "),
+        "Legendary name should contain name + epithet separator"
+    );
+
+    // ── 2. Spawn Verification ──
+    let start_creatures_len = sim.debug_creatures().len();
+    // Spawning a test creature manually
+    let creature_id = 9991;
+    let habitat_tid = 1;
+    let start_pos = TileCoord { x: 5, y: 5 };
+    sim.debug_spawn_creature(
+        creature_id,
+        "Drakigniserpe".to_string(),
+        "Pedrapiro".to_string(),
+        false,
+        start_pos,
+        habitat_tid,
+        100, // hp
+        20,  // attack
+    );
+
+    let mut creatures = sim.debug_creatures();
+    assert_eq!(
+        creatures.len(),
+        start_creatures_len + 1,
+        "Should have spawned 1 creature"
+    );
+    let c = creatures.iter().find(|cr| cr.id == creature_id).unwrap();
+    assert_eq!(c.name, "Drakigniserpe");
+    assert_eq!(c.species, "Pedrapiro");
+    assert_eq!(c.health, 100);
+    assert_eq!(c.position, start_pos);
+
+    // ── 3. ECS Isolation Verification ──
+    // Get all agents, verify they have AgentCore, and do not contain our creature ID
+    let agent_ids: Vec<u64> = sim.snapshot().agents.iter().map(|a| a.id).collect();
+    assert!(
+        !agent_ids.contains(&creature_id),
+        "Creature should not be in agent_ids list"
+    );
+    assert!(
+        sim.debug_is_creature(creature_id),
+        "ID should be classified as creature"
+    );
+
+    // ── 4. Body Graph & Injury Verification ──
+    // Creature should have standard body parts intact
+    assert_eq!(
+        c.injury.body_parts.len(),
+        15,
+        "Creature should have standard human body graph parts (15)"
+    );
+    let head = c
+        .injury
+        .body_parts
+        .iter()
+        .find(|p| p.kind == BodyPartKind::Head)
+        .unwrap();
+    assert_eq!(head.status, PartInjuryStatus::Intact);
+
+    // Apply attack from a human agent on the creature
+    let hunter_id = agent_ids[0];
+    sim.debug_apply_attack_on_creature(hunter_id, creature_id, false)
+        .unwrap();
+
+    // Health should have decreased
+    let hp_after = sim.debug_creature_health(creature_id).unwrap();
+    assert!(
+        hp_after < 100,
+        "Creature health should have decreased after attack"
+    );
+
+    // Body part state should have changed to Bruised/Lacerated
+    let creatures_after = sim.debug_creatures();
+    let c_after = creatures_after
+        .iter()
+        .find(|cr| cr.id == creature_id)
+        .unwrap();
+    let injured_parts = c_after
+        .injury
+        .body_parts
+        .iter()
+        .filter(|p| p.status != PartInjuryStatus::Intact)
+        .count();
+    assert!(
+        injured_parts > 0,
+        "Creature body graph should have recorded an injury"
+    );
+
+    // ── 5. Combates, Quests, Drops & Gold Verification ──
+    // Create a hunting quest targeting this creature
+    let quest_id = 8801;
+    sim.hunting_quests.push(HuntingQuest {
+        id: quest_id,
+        target_creature_id: creature_id,
+        reward_gold: 150,
+        funding_polity_id: None,
+        funding_household_id: None,
+    });
+
+    let initial_gold = {
+        let snapshot = sim.snapshot();
+        let hunter_snap = snapshot.agents.iter().find(|a| a.id == hunter_id).unwrap();
+        hunter_snap
+            .inventory
+            .iter()
+            .find(|s| s.resource_id == ResourceKind::Moedas.id())
+            .map(|s| s.amount)
+            .unwrap_or(0)
+    };
+
+    // Kill the creature (reduce health to 0 manually, then run attack)
+    {
+        let ent = sim.find_creature_entity(creature_id).unwrap();
+        sim.debug_world_mut()
+            .entity_mut(ent)
+            .get_mut::<CreatureStateComponent>()
+            .unwrap()
+            .health = 1;
+    }
+    sim.debug_apply_attack_on_creature(hunter_id, creature_id, true)
+        .unwrap();
+
+    // Creature should be dead
+    let creatures_final = sim.debug_creatures();
+    let c_final = creatures_final
+        .iter()
+        .find(|cr| cr.id == creature_id)
+        .unwrap();
+    assert!(!c_final.active, "Creature should be dead/inactive");
+
+    // Drop ("nucleo_pedrapiro" for Pedrapiro) should be in hunter's inventory
+    let snapshot_final = sim.snapshot();
+    let hunter_final = snapshot_final
+        .agents
+        .iter()
+        .find(|a| a.id == hunter_id)
+        .unwrap();
+    let drop_stack = hunter_final
+        .inventory
+        .iter()
+        .find(|s| s.resource_id == "nucleo_pedrapiro");
+    assert!(
+        drop_stack.is_some(),
+        "Hunter should have received the drop: nucleo_pedrapiro"
+    );
+    assert_eq!(drop_stack.unwrap().amount, 1);
+
+    // Quest should be resolved and reward gold paid
+    let gold_final = hunter_final
+        .inventory
+        .iter()
+        .find(|s| s.resource_id == ResourceKind::Moedas.id())
+        .map(|s| s.amount)
+        .unwrap_or(0);
+    assert_eq!(
+        gold_final,
+        initial_gold + 150,
+        "Hunter should have received 150 gold reward"
+    );
+    assert!(
+        !sim.hunting_quests.iter().any(|q| q.id == quest_id),
+        "Hunting quest should have been resolved/removed"
+    );
+
+    println!("✅ All magical fauna integration tests passed!");
 }

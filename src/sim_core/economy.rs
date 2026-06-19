@@ -1,4 +1,5 @@
 use super::*;
+use crate::world_model::PartInjuryStatus;
 // Economic task, production, stock, price and logistics systems.
 
 #[derive(Clone)]
@@ -22,16 +23,70 @@ impl Simulation {
             if life_status.0 == AgentLifeStatus::Morto {
                 continue;
             }
+
+            // 1. Processar sangramento de partes do corpo feridas (coagulação natural)
+            if self.total_ticks % 8 == 0 {
+                for part in &mut injury.0.body_parts {
+                    if part.bleeding > 0 {
+                        part.bleeding = (part.bleeding - 1).max(0);
+                    }
+                }
+            }
+
+            // 2. Curar partes do corpo ao longo dos ticks
+            let is_heal_tick = (self.total_ticks.wrapping_add(core.id)) % 25 == 0;
+            if is_heal_tick {
+                for part in &mut injury.0.body_parts {
+                    match part.status {
+                        PartInjuryStatus::Bruised | PartInjuryStatus::Lacerated => {
+                            if part.health < 100 {
+                                part.health = (part.health + 4).clamp(0, 100);
+                                part.pain = (part.pain - 5).max(0);
+                                if part.health == 100 {
+                                    part.status = PartInjuryStatus::Intact;
+                                }
+                            }
+                        }
+                        PartInjuryStatus::Fractured => {
+                            if part.health < 100 {
+                                // Fratura cura 4x mais lento
+                                if self.total_ticks % 100 == 0 {
+                                    part.health = (part.health + 1).clamp(0, 100);
+                                    part.pain = (part.pain - 2).max(0);
+                                    if part.health == 100 {
+                                        part.status = PartInjuryStatus::Intact;
+                                    }
+                                }
+                            }
+                        }
+                        PartInjuryStatus::Severed | PartInjuryStatus::Destroyed => {
+                            // Danos permanentes, a dor residual diminui lentamente até um limite mínimo (phantom pain)
+                            if part.pain > 15 {
+                                part.pain = (part.pain - 1).max(15);
+                            }
+                        }
+                        PartInjuryStatus::Intact => {}
+                    }
+                }
+            }
+
+            // 3. Atualizar estatísticas de dor e sangramento globais com base nas partes
+            let total_pain: i32 = injury.0.body_parts.iter().map(|p| p.pain).sum();
+            let total_bleeding: i32 = injury.0.body_parts.iter().map(|p| p.bleeding).sum();
+            injury.0.pain = total_pain.clamp(0, 100);
+            injury.0.bleeding = total_bleeding.clamp(0, 10);
+
+            // Se o agente está sangrando, a saúde global cai
             if injury.0.bleeding > 0 {
                 state.0.health = (state.0.health - injury.0.bleeding).clamp(0, 100);
             }
-            if injury.0.recovery_ticks > 0 {
-                injury.0.recovery_ticks -= 1;
-                if injury.0.recovery_ticks == 0 {
-                    injury.0.pain = (injury.0.pain - 8).clamp(0, 100);
-                    injury.0.bleeding = (injury.0.bleeding - 1).clamp(0, 100);
-                }
+
+            // Atualizar estresse com base na dor geral
+            if injury.0.pain > 0 && self.total_ticks % 10 == 0 {
+                state.0.stress = (state.0.stress + (injury.0.pain / 15).max(1)).clamp(0, 100);
             }
+
+            // 4. Decaimento normal de necessidades
             if (self.total_ticks.wrapping_add(core.id)) % 10 == 0 {
                 state.0.hunger = (state.0.hunger + 1).clamp(0, 100);
             }
@@ -527,6 +582,28 @@ impl Simulation {
             {
                 task.assigned_agent_id = Some(agent_id);
             }
+            let entity = self.find_agent_entity(agent_id)?;
+            self.world
+                .entity_mut(entity)
+                .get_mut::<EconomicActivityComponent>()
+                .ok_or_else(|| anyhow!("missing economy component"))?
+                .active_task_id = Some(task_id);
+        } else if desired_kind == EconomicTaskKind::Comprar
+            && let Some(resource_id) = self.resolve_resource_id_from_hint(&target_hint)
+            && let Some(task_id) =
+                self.create_personal_item_purchase_task(agent_id, household_id, &resource_id)
+        {
+            let entity = self.find_agent_entity(agent_id)?;
+            self.world
+                .entity_mut(entity)
+                .get_mut::<EconomicActivityComponent>()
+                .ok_or_else(|| anyhow!("missing economy component"))?
+                .active_task_id = Some(task_id);
+        } else if desired_kind == EconomicTaskKind::Vender
+            && let Some(resource_id) = self.resolve_resource_id_from_hint(&target_hint)
+            && let Some(task_id) =
+                self.create_personal_item_sale_task(agent_id, household_id, &resource_id)
+        {
             let entity = self.find_agent_entity(agent_id)?;
             self.world
                 .entity_mut(entity)
@@ -1100,6 +1177,370 @@ impl Simulation {
         }
     }
 
+    pub(super) fn create_personal_item_purchase_task(
+        &mut self,
+        agent_id: u64,
+        household_id: BuildingId,
+        resource_id: &str,
+    ) -> Option<EconomicTaskId> {
+        if !self.is_equipment_resource(resource_id) {
+            return None;
+        }
+        let household = self.household_by_id(household_id)?;
+        let dest_village_idx = self.village_index_of_household(household_id)?;
+        let candidate = self
+            .establishments
+            .iter()
+            .filter(|establishment| {
+                establishment.item_stock_ids.iter().any(|item_id| {
+                    self.item_instance(*item_id)
+                        .map(|item| item.resource_id == resource_id)
+                        .unwrap_or(false)
+                })
+            })
+            .filter_map(|establishment| {
+                let item = establishment
+                    .item_stock_ids
+                    .iter()
+                    .filter_map(|item_id| self.item_instance(*item_id))
+                    .filter(|item| item.resource_id == resource_id)
+                    .max_by_key(|item| item.craft_quality_score)?;
+                let base_unit_price = establishment
+                    .posted_prices
+                    .iter()
+                    .find(|price| price.resource_id == resource_id)
+                    .map(|price| price.unit_price)
+                    .unwrap_or_else(|| self.base_price(resource_id));
+                let is_local = self.village_index_of_establishment(establishment.id)
+                    == Some(dest_village_idx);
+                let adjusted_floor = if is_local {
+                    base_unit_price
+                } else {
+                    (base_unit_price as f64 * 1.3) as i32
+                };
+                let unit_price = self.item_instance_unit_price(item, adjusted_floor);
+                Some((establishment.id, establishment.name.clone(), item.display_name.clone(), unit_price))
+            })
+            .filter(|(_, _, _, unit_price)| household.treasury >= *unit_price)
+            .min_by_key(|(_, _, _, unit_price)| *unit_price)?;
+
+        let task_id = self.next_task_id();
+        self.economic_tasks.push(EconomicTask {
+            id: task_id,
+            kind: EconomicTaskKind::Comprar,
+            class: EconomicTaskClass::GeneralCommerce,
+            priority: 7,
+            lock_until_complete: true,
+            creates_household_reserve: false,
+            actor_household_id: household_id,
+            assigned_agent_id: Some(agent_id),
+            source: EconomicNode::Establishment(candidate.0),
+            destination: EconomicNode::HouseholdPantry(household_id),
+            resource_id: Some(resource_id.to_string()),
+            amount: 1,
+            unit_price: candidate.3,
+            total_price: candidate.3,
+            description: format!("Comprar {} em {}", candidate.2, candidate.1),
+            phase: EconomicTaskPhase::AwaitingPickup,
+            related_establishment_id: Some(candidate.0),
+            related_construction_project_id: None,
+        });
+        Some(task_id)
+    }
+
+    pub(super) fn create_personal_item_sale_task(
+        &mut self,
+        agent_id: u64,
+        household_id: BuildingId,
+        resource_id: &str,
+    ) -> Option<EconomicTaskId> {
+        if !self.is_equipment_resource(resource_id) {
+            return None;
+        }
+        let entity = self.find_agent_entity(agent_id).ok()?;
+        let item_id = self
+            .world
+            .entity(entity)
+            .get::<ItemInventoryComponent>()?
+            .0
+            .iter()
+            .find(|candidate| {
+                self.item_instance(**candidate)
+                    .map(|item| item.resource_id == resource_id)
+                    .unwrap_or(false)
+            })
+            .copied()?;
+        let item_name = self.item_display_name_for_id(item_id);
+        let dest_village_idx = self.village_index_of_household(household_id)?;
+
+        let local_buyer = self
+            .establishments
+            .iter()
+            .filter(|establishment| {
+                self.village_index_of_establishment(establishment.id) == Some(dest_village_idx)
+                    && establishment.cash > 0
+                    && establishment
+                        .posted_prices
+                        .iter()
+                        .any(|price| price.resource_id == resource_id)
+            })
+            .filter_map(|establishment| {
+                let posted_price = establishment
+                    .posted_prices
+                    .iter()
+                    .find(|price| price.resource_id == resource_id)?
+                    .unit_price;
+                let sale_price = (posted_price * 8 / 10).max(1);
+                (establishment.cash >= sale_price)
+                    .then(|| (establishment.id, establishment.name.clone(), sale_price))
+            })
+            .max_by_key(|(_, _, sale_price)| *sale_price);
+
+        let (destination, related_establishment_id, sale_price, destination_label) =
+            if let Some((establishment_id, establishment_name, sale_price)) = local_buyer {
+                (
+                    EconomicNode::Establishment(establishment_id),
+                    Some(establishment_id),
+                    sale_price,
+                    establishment_name,
+                )
+            } else {
+                let resource = self.resource_def(resource_id)?;
+                if !resource.can_sell_external {
+                    return None;
+                }
+                let quote = self.market_quote(resource_id)?;
+                (
+                    EconomicNode::ExternalMarket,
+                    None,
+                    quote.sell_price.max(1),
+                    "mercado externo".to_string(),
+                )
+            };
+
+        let task_id = self.next_task_id();
+        self.economic_tasks.push(EconomicTask {
+            id: task_id,
+            kind: EconomicTaskKind::Vender,
+            class: EconomicTaskClass::GeneralCommerce,
+            priority: 6,
+            lock_until_complete: true,
+            creates_household_reserve: false,
+            actor_household_id: household_id,
+            assigned_agent_id: Some(agent_id),
+            source: destination.clone(),
+            destination,
+            resource_id: Some(resource_id.to_string()),
+            amount: 1,
+            unit_price: sale_price,
+            total_price: sale_price,
+            description: format!("Vender {item_name} em {destination_label}"),
+            phase: EconomicTaskPhase::AwaitingPickup,
+            related_establishment_id,
+            related_construction_project_id: None,
+        });
+        Some(task_id)
+    }
+
+    pub(super) fn execute_equipment_purchase_task(
+        &mut self,
+        agent_id: u64,
+        task: EconomicTask,
+        resource_id: String,
+    ) -> Result<bool> {
+        if task.kind != EconomicTaskKind::Comprar || !self.is_equipment_resource(&resource_id) {
+            return Ok(false);
+        }
+        if task.phase != EconomicTaskPhase::AwaitingPickup {
+            return Ok(false);
+        }
+        let agent_name = self.agent_name(agent_id)?;
+        if !self.withdraw_cash_for_purchase(&task) {
+            self.push_event(WorldEvent {
+                day: self.day,
+                tick: self.tick_of_day,
+                actor: agent_id,
+                target: None,
+                kind: EventKind::Scarcity,
+                summary: format!(
+                    "{agent_name} nao tem caixa suficiente para {}.",
+                    task.description
+                ),
+                impact_tags: vec![
+                    "escassez".to_string(),
+                    "caixa".to_string(),
+                    resource_id.clone(),
+                ],
+            });
+            self.fail_economic_task(agent_id, task.id)?;
+            return Ok(true);
+        }
+
+        let Some(source_id) = (match task.source {
+            EconomicNode::Establishment(establishment_id) => Some(establishment_id),
+            _ => None,
+        }) else {
+            self.fail_economic_task(agent_id, task.id)?;
+            return Ok(true);
+        };
+
+        let Some(item_id) = self.remove_item_from_establishment_stock(source_id, &resource_id) else {
+            self.fail_economic_task(agent_id, task.id)?;
+            return Ok(true);
+        };
+
+        self.add_item_to_agent_inventory(agent_id, item_id)?;
+        self.maybe_auto_equip_best_items(agent_id)?;
+        self.deposit_cash_to_sale_target(&task);
+        if let Some(task_state) = self
+            .economic_tasks
+            .iter_mut()
+            .find(|entry| entry.id == task.id)
+        {
+            task_state.phase = EconomicTaskPhase::Completed;
+        }
+        self.clear_active_economic_task(agent_id)?;
+
+        let item_name = self.item_display_name_for_id(item_id);
+        self.push_event(WorldEvent {
+            day: self.day,
+            tick: self.tick_of_day,
+            actor: agent_id,
+            target: None,
+            kind: EventKind::Commerce,
+            summary: format!("{agent_name} compra {item_name}."),
+            impact_tags: vec![
+                "comercio".to_string(),
+                "equipamento".to_string(),
+                resource_id,
+            ],
+        });
+        self.sync_establishment_stocks_to_fixtures();
+        Ok(true)
+    }
+
+    pub(super) fn execute_equipment_sale_task(
+        &mut self,
+        agent_id: u64,
+        task: EconomicTask,
+        resource_id: String,
+    ) -> Result<bool> {
+        if task.kind != EconomicTaskKind::Vender || !self.is_equipment_resource(&resource_id) {
+            return Ok(false);
+        }
+        let agent_name = self.agent_name(agent_id)?;
+        match task.phase {
+            EconomicTaskPhase::AwaitingPickup => {
+                let item_name = match task.source {
+                    EconomicNode::Establishment(establishment_id) => {
+                        let Some(item_id) =
+                            self.remove_item_from_establishment_stock(establishment_id, &resource_id)
+                        else {
+                            self.fail_economic_task(agent_id, task.id)?;
+                            return Ok(true);
+                        };
+                        self.add_item_to_agent_inventory(agent_id, item_id)?;
+                        self.item_display_name_for_id(item_id)
+                    }
+                    _ => {
+                        let Some(item_id) = self
+                            .world
+                            .entity(self.find_agent_entity(agent_id)?)
+                            .get::<ItemInventoryComponent>()
+                            .and_then(|inventory| {
+                                inventory.0.iter().find(|candidate| {
+                                    self.item_instance(**candidate)
+                                        .map(|item| item.resource_id == resource_id)
+                                        .unwrap_or(false)
+                                })
+                            })
+                            .copied()
+                        else {
+                            self.fail_economic_task(agent_id, task.id)?;
+                            return Ok(true);
+                        };
+                        self.item_display_name_for_id(item_id)
+                    }
+                };
+                if let Some(task_state) = self
+                    .economic_tasks
+                    .iter_mut()
+                    .find(|entry| entry.id == task.id)
+                {
+                    task_state.phase = EconomicTaskPhase::InTransit;
+                    task_state.amount = 1;
+                    task_state.total_price = task_state.unit_price;
+                }
+                self.deposit_cash_to_sale_target(&task);
+                self.push_event(WorldEvent {
+                    day: self.day,
+                    tick: self.tick_of_day,
+                    actor: agent_id,
+                    target: None,
+                    kind: EventKind::Logistics,
+                    summary: format!(
+                        "{agent_name} separa {} para venda.",
+                        item_name
+                    ),
+                    impact_tags: vec![
+                        "logistica".to_string(),
+                        "equipamento".to_string(),
+                        resource_id.clone(),
+                    ],
+                });
+                self.sync_establishment_stocks_to_fixtures();
+                Ok(true)
+            }
+            EconomicTaskPhase::InTransit => {
+                let Some(item_id) = self.remove_item_from_agent_inventory(agent_id, &resource_id)?
+                else {
+                    self.fail_economic_task(agent_id, task.id)?;
+                    return Ok(true);
+                };
+                self.maybe_auto_equip_best_items(agent_id)?;
+                let item_name = self.item_display_name_for_id(item_id);
+                match task.destination {
+                    EconomicNode::Establishment(establishment_id) => {
+                        let _ = self.add_item_to_establishment_stock(establishment_id, item_id);
+                    }
+                    EconomicNode::ExternalMarket => {
+                        if let Some(item) = self.item_instance_mut(item_id) {
+                            item.owner_agent_id = None;
+                            item.owner_household_id = None;
+                        }
+                    }
+                    _ => {}
+                }
+                if let Some(task_state) = self
+                    .economic_tasks
+                    .iter_mut()
+                    .find(|entry| entry.id == task.id)
+                {
+                    task_state.phase = EconomicTaskPhase::Completed;
+                }
+                self.clear_active_economic_task(agent_id)?;
+                self.push_event(WorldEvent {
+                    day: self.day,
+                    tick: self.tick_of_day,
+                    actor: agent_id,
+                    target: None,
+                    kind: EventKind::Commerce,
+                    summary: format!("{agent_name} vende {item_name}."),
+                    impact_tags: vec![
+                        "comercio".to_string(),
+                        "equipamento".to_string(),
+                        resource_id,
+                    ],
+                });
+                self.sync_establishment_stocks_to_fixtures();
+                Ok(true)
+            }
+            EconomicTaskPhase::AwaitingPayment
+            | EconomicTaskPhase::Completed
+            | EconomicTaskPhase::Failed => Ok(true),
+        }
+    }
+
     pub(super) fn apply_economic_intent(&mut self, agent_id: u64) -> Result<()> {
         let Some(task) = self.active_economic_task_for_agent(agent_id).cloned() else {
             self.clear_intent_navigation(agent_id)?;
@@ -1155,6 +1596,12 @@ impl Simulation {
             .resource_id
             .clone()
             .ok_or_else(|| anyhow!("economic task {} missing resource", task.id))?;
+        if self.execute_equipment_purchase_task(agent_id, task.clone(), resource_id.clone())? {
+            return Ok(());
+        }
+        if self.execute_equipment_sale_task(agent_id, task.clone(), resource_id.clone())? {
+            return Ok(());
+        }
         match task.phase {
             EconomicTaskPhase::AwaitingPickup => {
                 let agent_name = self.agent_name(agent_id)?;
@@ -1378,15 +1825,27 @@ impl Simulation {
             .resource_id
             .clone()
             .ok_or_else(|| anyhow!("construction task {} missing resource", task.id))?;
+        let project_funded_by_polity = self
+            .construction_projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .and_then(|p| p.funding_polity_id);
+
         match task.phase {
             EconomicTaskPhase::AwaitingPickup => {
                 let agent_name = self.agent_name(agent_id)?;
-                if task.total_price > 0
-                    && self
-                        .household_by_id(task.actor_household_id)
-                        .map(|household| household.treasury < task.total_price)
-                        .unwrap_or(true)
-                {
+                let has_funds = if let Some(polity_id) = project_funded_by_polity {
+                    self.polities
+                        .iter()
+                        .find(|polity| polity.id == polity_id)
+                        .map(|polity| polity.treasury >= task.total_price)
+                        .unwrap_or(false)
+                } else {
+                    self.household_by_id(task.actor_household_id)
+                        .map(|household| household.treasury >= task.total_price)
+                        .unwrap_or(false)
+                };
+                if task.total_price > 0 && !has_funds {
                     self.fail_economic_task(agent_id, task.id)?;
                     self.push_event(WorldEvent {
                         day: self.day,
@@ -1418,7 +1877,13 @@ impl Simulation {
                     return Ok(());
                 }
                 if task.total_price > 0 {
-                    if let Some(household) = self.household_by_id_mut(task.actor_household_id) {
+                    if let Some(polity_id) = project_funded_by_polity {
+                        if let Some(polity) = self.polities.iter_mut().find(|p| p.id == polity_id) {
+                            polity.treasury -= task.total_price.min(polity.treasury);
+                        }
+                    } else if let Some(household) =
+                        self.household_by_id_mut(task.actor_household_id)
+                    {
                         household.treasury -= task.total_price.min(household.treasury);
                     }
                     if let EconomicNode::Establishment(source_id) = task.source
@@ -1588,7 +2053,7 @@ impl Simulation {
         collected
     }
 
-    pub(super) fn apply_work(&mut self, actor_id: u64) -> Result<()> {
+    pub fn apply_work(&mut self, actor_id: u64) -> Result<()> {
         let entity = self.find_agent_entity(actor_id)?;
         let intent_opt = self
             .world
@@ -1637,9 +2102,7 @@ impl Simulation {
                     .iter()
                     .find(|building| building.entrance == current_pos)
                     .map(|building| building.id)
-                    .filter(|building_id| {
-                        self.establishment_by_building(*building_id).is_some()
-                    })
+                    .filter(|building_id| self.establishment_by_building(*building_id).is_some())
             });
         let work_building_id = active_production_task
             .as_ref()
@@ -1664,9 +2127,22 @@ impl Simulation {
             resource_id: ResourceKind::Moedas.id().to_string(),
             amount: 0,
         };
+        let mut produced_item_ids = Vec::new();
+        let mut crafted_discipline: Option<&'static str> = None;
         let mut work_failed_reason = None::<String>;
         let mut salary_claim = None::<PendingPaymentClaim>;
         let role_name = self.role_display_name(&role_id);
+        let craft_proficiencies = self
+            .world
+            .entity(entity)
+            .get::<CraftProficiencyComponent>()
+            .map(|component| component.0.clone())
+            .unwrap_or_default();
+
+        let mut is_corvee_labor = false;
+        let mut lord_agent_id_opt = None;
+        let mut lord_household_id_opt = None;
+
         if let Some(building_id) = work_building_id {
             let est_info = self.establishment_by_building(building_id).map(|est| {
                 (
@@ -1677,6 +2153,40 @@ impl Simulation {
                     est.stock.clone(),
                 )
             });
+
+            if let Some(household_id) = home_building_id {
+                if let Some(household) = self.household_by_id(household_id) {
+                    if household.corvee_days_due > 0 && household.direct_lord_agent_id.is_some() {
+                        let lord_id = household.direct_lord_agent_id.unwrap();
+                        if let Some((est_id, _, _, _, _)) = &est_info {
+                            let in_estate = self.estate_holdings.iter().any(|holding| {
+                                holding.holder_agent_id == Some(lord_id)
+                                    && holding.establishment_ids.contains(est_id)
+                            });
+                            let mut is_owned = in_estate;
+                            if !is_owned {
+                                if let Some(lord_home_id) = self
+                                    .agent_core_snapshot(lord_id)
+                                    .and_then(|core| core.home_building_id)
+                                {
+                                    if let Some(est) = self.establishment_by_id(*est_id) {
+                                        if est.owner_household_ids.contains(&lord_home_id) {
+                                            is_owned = true;
+                                        }
+                                    }
+                                }
+                            }
+                            if is_owned {
+                                is_corvee_labor = true;
+                                lord_agent_id_opt = Some(lord_id);
+                                lord_household_id_opt = self
+                                    .agent_core_snapshot(lord_id)
+                                    .and_then(|core| core.home_building_id);
+                            }
+                        }
+                    }
+                }
+            }
 
             if let Some((_est_id, est_name, est_type, est_public_service, est_stock)) = est_info {
                 let recipe = self.recipe_for_establishment_type(&est_type).cloned();
@@ -1833,11 +2343,18 @@ impl Simulation {
                             ));
                             can_work = false;
                         } else {
+                            let is_equipment_output =
+                                self.is_equipment_resource(&recipe.output_resource_id);
+                            let mut enough_inputs = false;
+                            let mut failure_establishment_name = est_name.clone();
+                            let mut produced_items = Vec::new();
+
                             if let Some(establishment) =
                                 self.establishment_by_building_mut(building_id)
                             {
                                 let mut consumed_inputs = Vec::new();
-                                let mut enough_inputs = true;
+                                enough_inputs = true;
+                                failure_establishment_name = establishment.name.clone();
                                 for input in &recipe.inputs {
                                     let taken = Self::take_resource(
                                         &mut establishment.stock,
@@ -1861,40 +2378,71 @@ impl Simulation {
                                             );
                                         }
                                     }
-                                    work_failed_reason = Some(format!(
-                                        "faltam insumos para {} em {}",
-                                        recipe.output_resource_id, establishment.name
-                                    ));
-                                    can_work = false;
-                                } else {
-                                    produced = ResourceStack {
-                                        resource_id: recipe.output_resource_id.clone(),
-                                        amount: recipe.output_amount,
-                                    };
-                                    if recipe.tool_wear > 0
-                                        && !recipe.capital_requirements.is_empty()
-                                    {
-                                        establishment.tool_wear += recipe.tool_wear;
-                                        while establishment.tool_wear >= 4 {
-                                            let mut degraded = false;
-                                            for capital in &recipe.capital_requirements {
-                                                let removed = Self::take_resource(
-                                                    &mut establishment.stock,
-                                                    &capital.resource_id,
-                                                    1,
-                                                );
-                                                if removed > 0 {
-                                                    degraded = true;
-                                                }
-                                            }
-                                            establishment.tool_wear -= 4;
-                                            if !degraded {
-                                                break;
+                                } else if recipe.tool_wear > 0
+                                    && !recipe.capital_requirements.is_empty()
+                                {
+                                    establishment.tool_wear += recipe.tool_wear;
+                                    while establishment.tool_wear >= 4 {
+                                        let mut degraded = false;
+                                        for capital in &recipe.capital_requirements {
+                                            let removed = Self::take_resource(
+                                                &mut establishment.stock,
+                                                &capital.resource_id,
+                                                1,
+                                            );
+                                            if removed > 0 {
+                                                degraded = true;
                                             }
                                         }
+                                        establishment.tool_wear -= 4;
+                                        if !degraded {
+                                            break;
+                                        }
                                     }
-                                    can_work = true;
                                 }
+                            }
+
+                            if !enough_inputs {
+                                work_failed_reason = Some(format!(
+                                    "faltam insumos para {} em {}",
+                                    recipe.output_resource_id, failure_establishment_name
+                                ));
+                                can_work = false;
+                            } else {
+                                produced = ResourceStack {
+                                    resource_id: recipe.output_resource_id.clone(),
+                                    amount: recipe.output_amount,
+                                };
+                                if is_equipment_output {
+                                    crafted_discipline =
+                                        Some(self.craft_discipline_for_recipe(recipe));
+                                    let material_signature = recipe
+                                        .inputs
+                                        .iter()
+                                        .map(|input| input.resource_id.clone())
+                                        .collect::<Vec<_>>()
+                                        .join("+");
+                                    let owner_household_id = home_building_id;
+                                    let item_count = recipe.output_amount.max(1);
+                                    for _ in 0..item_count {
+                                        if let Some(item) = self.build_item_instance(
+                                            &recipe.output_resource_id,
+                                            Some(actor_id),
+                                            None,
+                                            owner_household_id,
+                                            &craft_proficiencies,
+                                            Some(recipe),
+                                            material_signature.clone(),
+                                        ) {
+                                            produced_item_ids.push(item.id);
+                                            produced_items.push(item);
+                                        }
+                                    }
+                                }
+                                if !produced_items.is_empty() {
+                                    self.item_instances.extend(produced_items);
+                                }
+                                can_work = true;
                             }
                         }
                     } else {
@@ -1903,24 +2451,63 @@ impl Simulation {
                 }
 
                 if can_work {
-                    if let Some(establishment) = self.establishment_by_building_mut(building_id) {
-                        if produced.amount > 0 {
-                            Self::push_resource(
-                                &mut establishment.stock,
-                                &produced.resource_id,
-                                produced.amount,
-                            );
+                    if is_corvee_labor {
+                        if let Some(lord_household_id) = lord_household_id_opt {
+                            if let Some(lord_household) =
+                                self.household_by_id_mut(lord_household_id)
+                            {
+                                if produced.amount > 0 {
+                                    if produced.resource_id == ResourceKind::Moedas.id() {
+                                        lord_household.treasury += produced.amount;
+                                    } else {
+                                        Self::push_resource(
+                                            &mut lord_household.pantry,
+                                            &produced.resource_id,
+                                            produced.amount,
+                                        );
+                                    }
+                                }
+                            }
                         }
-                        if let Some(_household_id) = home_building_id {
-                            salary_claim = Some(PendingPaymentClaim {
-                                payer_establishment_id: if establishment.public_service {
-                                    None
-                                } else {
-                                    Some(establishment.id)
-                                },
-                                payer_label: establishment.name.clone(),
-                                amount: establishment.wage_per_shift,
-                            });
+                        // Decrement peasant corvee days due
+                        if let Some(household_id) = home_building_id {
+                            if let Some(household) = self.household_by_id_mut(household_id) {
+                                household.corvee_days_due = (household.corvee_days_due - 1).max(0);
+                            }
+                        }
+                        // Additional stress +3 and mood -4 penalty for forced labor
+                        {
+                            let mut entity_mut = self.world.entity_mut(entity);
+                            if let Some(mut state) = entity_mut.get_mut::<StateComponent>() {
+                                state.0.stress = (state.0.stress + 3).clamp(0, 100);
+                                state.0.mood = (state.0.mood - 4).clamp(0, 100);
+                            }
+                        }
+                    } else {
+                        if let Some(establishment) = self.establishment_by_building_mut(building_id)
+                        {
+                            if !produced_item_ids.is_empty() {
+                                establishment
+                                    .item_stock_ids
+                                    .extend(produced_item_ids.clone());
+                            } else if produced.amount > 0 {
+                                Self::push_resource(
+                                    &mut establishment.stock,
+                                    &produced.resource_id,
+                                    produced.amount,
+                                );
+                            }
+                            if let Some(_household_id) = home_building_id {
+                                salary_claim = Some(PendingPaymentClaim {
+                                    payer_establishment_id: if establishment.public_service {
+                                        None
+                                    } else {
+                                        Some(establishment.id)
+                                    },
+                                    payer_label: establishment.name.clone(),
+                                    amount: establishment.wage_per_shift,
+                                });
+                            }
                         }
                     }
                 }
@@ -1941,6 +2528,8 @@ impl Simulation {
             target: None,
             kind: if work_failed_reason.is_some() {
                 EventKind::Scarcity
+            } else if is_corvee_labor {
+                EventKind::FeudalSanction
             } else if had_salary_claim {
                 EventKind::Salary
             } else {
@@ -1948,10 +2537,26 @@ impl Simulation {
             },
             summary: if let Some(reason) = work_failed_reason.clone() {
                 format!("{name} tenta trabalhar como {}, mas {}.", role_name, reason)
+            } else if is_corvee_labor {
+                let lord_name = if let Some(lord_id) = lord_agent_id_opt {
+                    self.agent_name(lord_id)
+                        .unwrap_or_else(|_| "seu suserano".to_string())
+                } else {
+                    "seu suserano".to_string()
+                };
+                format!("{name} executa trabalho de corveia como {role_name} para {lord_name}.")
             } else {
                 format!("{name} trabalha como {}.", role_name)
             },
-            impact_tags: vec!["trabalho".to_string(), produced.resource_id.clone()],
+            impact_tags: if is_corvee_labor && work_failed_reason.is_none() {
+                vec![
+                    "corveia".to_string(),
+                    "trabalho".to_string(),
+                    produced.resource_id.clone(),
+                ]
+            } else {
+                vec!["trabalho".to_string(), produced.resource_id.clone()]
+            },
         });
         if work_failed_reason.is_none() {
             if let Some(task) = active_production_task
@@ -1963,10 +2568,36 @@ impl Simulation {
                 task_state.phase = EconomicTaskPhase::Completed;
             }
             self.clear_active_economic_task(actor_id)?;
+            if !produced_item_ids.is_empty() {
+                let entity = self.find_agent_entity(actor_id)?;
+                if let Some(mut prof) = self
+                    .world
+                    .entity_mut(entity)
+                    .get_mut::<CraftProficiencyComponent>()
+                {
+                    match crafted_discipline {
+                        Some("tailoring") => {
+                            prof.0.tailoring = (prof.0.tailoring + 1).clamp(0, 100)
+                        }
+                        Some("jewelry") => prof.0.jewelry = (prof.0.jewelry + 1).clamp(0, 100),
+                        Some("leatherwork") => {
+                            prof.0.leatherwork = (prof.0.leatherwork + 1).clamp(0, 100)
+                        }
+                        _ => prof.0.smithing = (prof.0.smithing + 1).clamp(0, 100),
+                    }
+                }
+            }
             self.add_memory(
                 actor_id,
                 MemoryKind::Success,
-                if produced.amount > 0 {
+                if !produced_item_ids.is_empty() {
+                    let item_names = produced_item_ids
+                        .iter()
+                        .map(|item_id| self.item_display_name_for_id(*item_id))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("Trabalho concluido produzindo {}.", item_names)
+                } else if produced.amount > 0 {
                     format!(
                         "Trabalho concluido produzindo {}.",
                         self.resource_display_name(&produced.resource_id)
@@ -2202,13 +2833,13 @@ impl Simulation {
             .unwrap_or(false)
     }
 
-    pub(super) fn household_by_id(&self, household_id: BuildingId) -> Option<&HouseholdEconomy> {
+    pub fn household_by_id(&self, household_id: BuildingId) -> Option<&HouseholdEconomy> {
         self.households
             .iter()
             .find(|household| household.id == household_id)
     }
 
-    pub(super) fn household_by_id_mut(
+    pub fn household_by_id_mut(
         &mut self,
         household_id: BuildingId,
     ) -> Option<&mut HouseholdEconomy> {
@@ -2949,7 +3580,7 @@ impl Simulation {
             .iter()
             .map(|target| {
                 let current =
-                    Self::total_resource_amount(&establishment.stock, &target.resource_id);
+                    self.establishment_total_resource_units(establishment, &target.resource_id);
                 let shortage = (target.amount - current).max(0);
                 let mut unit_price = self.base_price(&target.resource_id) + shortage / 2;
                 if establishment.cash < 10 {
@@ -2977,9 +3608,7 @@ impl Simulation {
             let available: i32 = self
                 .establishments
                 .iter()
-                .map(|establishment| {
-                    Self::total_resource_amount(&establishment.stock, &resource.id)
-                })
+                .map(|establishment| self.establishment_total_resource_units(establishment, &resource.id))
                 .sum::<i32>()
                 + self
                     .households
@@ -3151,6 +3780,7 @@ impl Simulation {
         establishment_type_id: &str,
         systemic_reason: String,
         priority: u8,
+        funding_polity_id: Option<PolityId>,
     ) {
         let Some(establishment_type) = self.establishment_type_def(establishment_type_id).cloned()
         else {
@@ -3169,7 +3799,7 @@ impl Simulation {
             return;
         };
         let Some((planned_footprint, entrance)) =
-            self.plan_construction_site(establishment_type.location_kind)
+            self.plan_construction_site(establishment_type.location_kind, funding_polity_id)
         else {
             return;
         };
@@ -3197,6 +3827,7 @@ impl Simulation {
             priority,
             systemic_reason: systemic_reason.clone(),
             resulting_building_id: None,
+            funding_polity_id,
         });
         self.push_event(WorldEvent {
             day: self.day,
@@ -3216,6 +3847,7 @@ impl Simulation {
     pub(super) fn plan_construction_site(
         &self,
         kind: LocationKind,
+        restrict_to_polity: Option<PolityId>,
     ) -> Option<(Vec<TileCoord>, TileCoord)> {
         let (width, height) = match kind {
             LocationKind::Home => (7, 5),
@@ -3237,11 +3869,24 @@ impl Simulation {
             .flat_map(|project| project.planned_footprint.iter().copied())
             .collect::<HashSet<_>>();
 
+        let polity_tiles: Option<HashSet<TileCoord>> = restrict_to_polity.map(|polity_id| {
+            self.territories
+                .iter()
+                .filter(|t| t.controller_polity_id == polity_id)
+                .flat_map(|t| t.tile_coords.iter().copied())
+                .collect()
+        });
+
         for y in 2..(self.spatial.grid.height - height - 2).max(2) {
             for x in 2..(self.spatial.grid.width - width - 2).max(2) {
                 let footprint = (y..y + height)
                     .flat_map(|yy| (x..x + width).map(move |xx| TileCoord { x: xx, y: yy }))
                     .collect::<Vec<_>>();
+                if let Some(ref tiles) = polity_tiles {
+                    if !footprint.iter().all(|coord| tiles.contains(coord)) {
+                        continue;
+                    }
+                }
                 if !footprint
                     .iter()
                     .all(|coord| self.is_buildable_tile(*coord, &occupied_by_projects))
@@ -3557,6 +4202,7 @@ impl Simulation {
                 storage_fixture_id,
                 cash: 20,
                 stock: establishment_type.default_stock.clone(),
+                item_stock_ids: Vec::new(),
                 stock_targets: establishment_type.stock_targets.clone(),
                 posted_prices: Vec::new(),
                 wage_per_shift: establishment_type.wage_per_shift,
@@ -3565,6 +4211,17 @@ impl Simulation {
             };
             establishment.posted_prices = self.recalculate_posted_prices(&establishment);
             self.establishments.push(establishment);
+        }
+        if let Some(first_coord) = project.planned_footprint.first() {
+            if let Some(territory) = self
+                .territories
+                .iter_mut()
+                .find(|t| t.tile_coords.contains(first_coord))
+            {
+                if !territory.building_ids.contains(&building_id) {
+                    territory.building_ids.push(building_id);
+                }
+            }
         }
         self.sync_establishment_stocks_to_fixtures();
         self.sync_household_pantries_to_fixtures();
@@ -3701,6 +4358,7 @@ impl Simulation {
                 "casa",
                 format!("falta de camas para {deficit} agente(s)"),
                 95,
+                None,
             );
         }
 
@@ -3734,6 +4392,7 @@ impl Simulation {
                     metric.pressure
                 ),
                 70,
+                None,
             );
         }
     }
@@ -4350,7 +5009,8 @@ impl Simulation {
             for recipe in recipes {
                 let primary_output = recipe.output_resource_id;
                 let target = self.stock_target_amount(&establishment, &primary_output);
-                let current = Self::total_resource_amount(&establishment.stock, &primary_output);
+                let current =
+                    self.establishment_total_resource_units(&establishment, &primary_output);
                 if current <= target + 3 {
                     continue;
                 }
@@ -4457,6 +5117,83 @@ impl Simulation {
                         related_construction_project_id: None,
                     });
                 }
+            }
+
+            let unique_item_outputs = establishment
+                .item_stock_ids
+                .iter()
+                .filter_map(|item_id| self.item_instance(*item_id).map(|item| item.resource_id.clone()))
+                .collect::<std::collections::HashSet<_>>();
+            for item_resource_id in unique_item_outputs {
+                let current = self.establishment_item_count(&establishment, &item_resource_id);
+                let target = self.stock_target_amount(&establishment, &item_resource_id);
+                if current <= target + 1 {
+                    continue;
+                }
+                if self.has_open_task_for(
+                    establishment
+                        .owner_household_ids
+                        .first()
+                        .copied()
+                        .unwrap_or_default(),
+                    EconomicTaskKind::Vender,
+                    Some(&item_resource_id),
+                    &EconomicNode::ExternalMarket,
+                ) {
+                    continue;
+                }
+                let Some(actor_household_id) = establishment.owner_household_ids.first().copied()
+                else {
+                    continue;
+                };
+                let Some(resource_def) = self.resource_def(&item_resource_id) else {
+                    continue;
+                };
+                if !resource_def.can_sell_external {
+                    continue;
+                }
+                let Some(quote) = self.market_quote(&item_resource_id) else {
+                    continue;
+                };
+                let Some((best_item_name, unit_price)) = establishment
+                    .item_stock_ids
+                    .iter()
+                    .filter_map(|item_id| self.item_instance(*item_id))
+                    .filter(|item| item.resource_id == item_resource_id)
+                    .max_by_key(|item| item.craft_quality_score)
+                    .map(|item| {
+                        (
+                            item.display_name.clone(),
+                            self.item_instance_unit_price(item, quote.sell_price.max(1)),
+                        )
+                    })
+                else {
+                    continue;
+                };
+                let task_id = self.next_task_id();
+                self.economic_tasks.push(EconomicTask {
+                    id: task_id,
+                    kind: EconomicTaskKind::Vender,
+                    class: EconomicTaskClass::SurplusSale,
+                    priority: 22,
+                    lock_until_complete: true,
+                    creates_household_reserve: false,
+                    actor_household_id,
+                    assigned_agent_id: None,
+                    source: EconomicNode::Establishment(establishment.id),
+                    destination: EconomicNode::ExternalMarket,
+                    resource_id: Some(item_resource_id.clone()),
+                    amount: 1,
+                    unit_price,
+                    total_price: unit_price,
+                    description: format!(
+                        "Vender {} de {} no mercado externo",
+                        best_item_name, establishment.name
+                    ),
+                    phase: EconomicTaskPhase::AwaitingPickup,
+                    related_establishment_id: Some(establishment.id),
+                    related_construction_project_id: None,
+                });
             }
         }
     }
@@ -4577,7 +5314,7 @@ impl Simulation {
     pub(super) fn total_village_resource_amount(&self, resource_id: &str) -> i32 {
         self.establishments
             .iter()
-            .map(|establishment| Self::total_resource_amount(&establishment.stock, resource_id))
+            .map(|establishment| self.establishment_total_resource_units(establishment, resource_id))
             .sum::<i32>()
             + self
                 .households
@@ -4971,6 +5708,9 @@ impl Simulation {
                     resource_id: resource_id.clone(),
                     amount: cargo_amount,
                 }]),
+                ItemInventoryComponent::default(),
+                EquipmentComponent::default(),
+                CraftProficiencyComponent::default(),
                 PositionComponent(start_coord),
             ),
             (
@@ -5037,6 +5777,9 @@ impl Simulation {
                 },
                 MemoryComponent(vec![]),
                 InventoryComponent::default(),
+                ItemInventoryComponent::default(),
+                EquipmentComponent::default(),
+                CraftProficiencyComponent::default(),
                 PositionComponent(start_coord),
             ),
             (

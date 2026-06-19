@@ -27,6 +27,7 @@ pub type EstateHoldingId = u64;
 pub type SuccessionCrisisId = u64;
 pub type PowerCenterId = u64;
 pub type AuthorityOfficeId = u64;
+pub type ItemInstanceId = u64;
 
 // ===== Semantic legacy enums =====
 //
@@ -122,6 +123,20 @@ pub struct ResourceDef {
     pub consumption_priority: i32,
     pub can_buy_external: bool,
     pub can_sell_external: bool,
+    #[serde(default)]
+    pub item_class: Option<ItemClass>,
+    #[serde(default)]
+    pub equip_slot_preferences: Vec<EquipmentSlot>,
+    #[serde(default)]
+    pub base_durability: i32,
+    #[serde(default)]
+    pub base_prestige: i32,
+    #[serde(default)]
+    pub base_combat_stats: ItemCombatStats,
+    #[serde(default)]
+    pub refinement_scaling: RefinementScalingDef,
+    #[serde(default)]
+    pub material_tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -131,6 +146,11 @@ pub enum ItemAffordanceKind {
     Tool,
     ConstructionMaterial,
     ImprovisedWeapon,
+    Weapon,
+    Armor,
+    Clothing,
+    Jewelry,
+    Prestige,
     Currency,
     TradeGood,
 }
@@ -140,6 +160,131 @@ pub struct ItemAffordanceDef {
     pub kind: ItemAffordanceKind,
     pub strength: i32,
     pub consumes_on_use: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum ItemClass {
+    Weapon,
+    Armor,
+    Clothing,
+    Jewelry,
+    Tool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum EquipmentSlot {
+    MainHand,
+    OffHand,
+    Body,
+    Outer,
+    Accessory1,
+    Accessory2,
+}
+
+impl EquipmentSlot {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MainHand => "mao_principal",
+            Self::OffHand => "mao_secundaria",
+            Self::Body => "corpo",
+            Self::Outer => "camada_externa",
+            Self::Accessory1 => "acessorio_1",
+            Self::Accessory2 => "acessorio_2",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+pub enum RefinementLevel {
+    Rudimentar,
+    #[default]
+    Comum,
+    Bom,
+    Fino,
+    Excepcional,
+}
+
+impl RefinementLevel {
+    pub fn tier(self) -> i32 {
+        match self {
+            Self::Rudimentar => 0,
+            Self::Comum => 1,
+            Self::Bom => 2,
+            Self::Fino => 3,
+            Self::Excepcional => 4,
+        }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Rudimentar => "rudimentar",
+            Self::Comum => "comum",
+            Self::Bom => "bom",
+            Self::Fino => "fino",
+            Self::Excepcional => "excepcional",
+        }
+    }
+
+    pub fn from_quality_score(score: i32) -> Self {
+        match score {
+            s if s < 35 => Self::Rudimentar,
+            s if s < 55 => Self::Comum,
+            s if s < 75 => Self::Bom,
+            s if s < 90 => Self::Fino,
+            _ => Self::Excepcional,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ItemCombatStats {
+    pub damage: i32,
+    pub precision: i32,
+    pub protection: i32,
+    pub injury_severity: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RefinementScalingDef {
+    pub damage_per_tier: i32,
+    pub precision_per_tier: i32,
+    pub protection_per_tier: i32,
+    pub prestige_per_tier: i32,
+    pub durability_per_tier: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ItemInstance {
+    pub id: ItemInstanceId,
+    pub resource_id: String,
+    pub display_name: String,
+    pub refinement_level: RefinementLevel,
+    pub craft_quality_score: i32,
+    pub durability: i32,
+    pub maker_agent_id: Option<u64>,
+    pub maker_name_snapshot: Option<String>,
+    pub material_signature: String,
+    pub combat_profile: ItemCombatStats,
+    pub prestige_value: i32,
+    pub owner_agent_id: Option<u64>,
+    pub owner_household_id: Option<BuildingId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CraftProficiencyState {
+    pub smithing: i32,
+    pub tailoring: i32,
+    pub jewelry: i32,
+    pub leatherwork: i32,
+}
+
+impl CraftProficiencyState {
+    pub fn clamp_all(&mut self) {
+        self.smithing = self.smithing.clamp(0, 100);
+        self.tailoring = self.tailoring.clamp(0, 100);
+        self.jewelry = self.jewelry.clamp(0, 100);
+        self.leatherwork = self.leatherwork.clamp(0, 100);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -481,6 +626,8 @@ pub struct EstablishmentEconomy {
     pub storage_fixture_id: Option<FixtureId>,
     pub cash: i32,
     pub stock: Vec<ResourceStack>,
+    #[serde(default)]
+    pub item_stock_ids: Vec<ItemInstanceId>,
     pub stock_targets: Vec<ResourceStack>,
     pub posted_prices: Vec<PostedPrice>,
     pub wage_per_shift: i32,
@@ -628,6 +775,8 @@ pub struct ConstructionProject {
     pub priority: u8,
     pub systemic_reason: String,
     pub resulting_building_id: Option<BuildingId>,
+    #[serde(default)]
+    pub funding_polity_id: Option<PolityId>,
 }
 
 fn default_economic_task_class() -> EconomicTaskClass {
@@ -741,6 +890,7 @@ pub struct PsychologicalState {
     pub anger: i32,
     pub hope: i32,
     pub guilt: i32,
+    pub long_term_plan: String,
     pub last_updated_day: u32,
     pub notes: Vec<String>,
 }
@@ -795,7 +945,7 @@ impl PsychologicalState {
 
     pub fn summary(&self) -> String {
         format!(
-            "luto={} humilhacao={} medo={} orgulho={} trauma={} raiva={} esperanca={} culpa={}",
+            "luto={} humilhacao={} medo={} orgulho={} trauma={} raiva={} esperanca={} culpa={}{}",
             self.grief,
             self.humiliation,
             self.fear,
@@ -803,7 +953,12 @@ impl PsychologicalState {
             self.trauma,
             self.anger,
             self.hope,
-            self.guilt
+            self.guilt,
+            if self.long_term_plan.is_empty() {
+                String::new()
+            } else {
+                format!(" plano={}", self.long_term_plan)
+            }
         )
     }
 }
@@ -827,13 +982,212 @@ pub enum AgentLifeStatus {
     Morto,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum BodyPartKind {
+    Head,
+    LeftEye,
+    RightEye,
+    Neck,
+    Chest,
+    Heart,
+    Abdomen,
+    LeftArm,
+    RightArm,
+    LeftHand,
+    RightHand,
+    LeftLeg,
+    RightLeg,
+    LeftFoot,
+    RightFoot,
+}
+
+impl BodyPartKind {
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Head => "Cabeça",
+            Self::LeftEye => "Olho Esquerdo",
+            Self::RightEye => "Olho Direito",
+            Self::Neck => "Pescoço",
+            Self::Chest => "Peito",
+            Self::Heart => "Coração",
+            Self::Abdomen => "Abdômen",
+            Self::LeftArm => "Braço Esquerdo",
+            Self::RightArm => "Braço Direito",
+            Self::LeftHand => "Mão Esquerda",
+            Self::RightHand => "Mão Direita",
+            Self::LeftLeg => "Perna Esquerda",
+            Self::RightLeg => "Perna Dianteira ou Direita",
+            Self::LeftFoot => "Pé Esquerdo",
+            Self::RightFoot => "Pé Direito",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum PartInjuryStatus {
+    #[default]
+    Intact,
+    Bruised,
+    Lacerated,
+    Fractured,
+    Severed,
+    Destroyed,
+}
+
+impl PartInjuryStatus {
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Intact => "Intacto",
+            Self::Bruised => "Contundido",
+            Self::Lacerated => "Lacerado",
+            Self::Fractured => "Fraturado",
+            Self::Severed => "Decepado",
+            Self::Destroyed => "Destruído",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BodyPartState {
+    pub kind: BodyPartKind,
+    pub health: i32,
+    pub status: PartInjuryStatus,
+    pub bleeding: i32,
+    pub pain: i32,
+}
+
+pub fn default_body_parts() -> Vec<BodyPartState> {
+    vec![
+        BodyPartState {
+            kind: BodyPartKind::Head,
+            health: 100,
+            status: PartInjuryStatus::Intact,
+            bleeding: 0,
+            pain: 0,
+        },
+        BodyPartState {
+            kind: BodyPartKind::LeftEye,
+            health: 100,
+            status: PartInjuryStatus::Intact,
+            bleeding: 0,
+            pain: 0,
+        },
+        BodyPartState {
+            kind: BodyPartKind::RightEye,
+            health: 100,
+            status: PartInjuryStatus::Intact,
+            bleeding: 0,
+            pain: 0,
+        },
+        BodyPartState {
+            kind: BodyPartKind::Neck,
+            health: 100,
+            status: PartInjuryStatus::Intact,
+            bleeding: 0,
+            pain: 0,
+        },
+        BodyPartState {
+            kind: BodyPartKind::Chest,
+            health: 100,
+            status: PartInjuryStatus::Intact,
+            bleeding: 0,
+            pain: 0,
+        },
+        BodyPartState {
+            kind: BodyPartKind::Heart,
+            health: 100,
+            status: PartInjuryStatus::Intact,
+            bleeding: 0,
+            pain: 0,
+        },
+        BodyPartState {
+            kind: BodyPartKind::Abdomen,
+            health: 100,
+            status: PartInjuryStatus::Intact,
+            bleeding: 0,
+            pain: 0,
+        },
+        BodyPartState {
+            kind: BodyPartKind::LeftArm,
+            health: 100,
+            status: PartInjuryStatus::Intact,
+            bleeding: 0,
+            pain: 0,
+        },
+        BodyPartState {
+            kind: BodyPartKind::RightArm,
+            health: 100,
+            status: PartInjuryStatus::Intact,
+            bleeding: 0,
+            pain: 0,
+        },
+        BodyPartState {
+            kind: BodyPartKind::LeftHand,
+            health: 100,
+            status: PartInjuryStatus::Intact,
+            bleeding: 0,
+            pain: 0,
+        },
+        BodyPartState {
+            kind: BodyPartKind::RightHand,
+            health: 100,
+            status: PartInjuryStatus::Intact,
+            bleeding: 0,
+            pain: 0,
+        },
+        BodyPartState {
+            kind: BodyPartKind::LeftLeg,
+            health: 100,
+            status: PartInjuryStatus::Intact,
+            bleeding: 0,
+            pain: 0,
+        },
+        BodyPartState {
+            kind: BodyPartKind::RightLeg,
+            health: 100,
+            status: PartInjuryStatus::Intact,
+            bleeding: 0,
+            pain: 0,
+        },
+        BodyPartState {
+            kind: BodyPartKind::LeftFoot,
+            health: 100,
+            status: PartInjuryStatus::Intact,
+            bleeding: 0,
+            pain: 0,
+        },
+        BodyPartState {
+            kind: BodyPartKind::RightFoot,
+            health: 100,
+            status: PartInjuryStatus::Intact,
+            bleeding: 0,
+            pain: 0,
+        },
+    ]
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InjuryState {
     pub light_wounds: u8,
     pub severe_wounds: u8,
     pub pain: i32,
     pub bleeding: i32,
     pub recovery_ticks: u32,
+    #[serde(default = "default_body_parts")]
+    pub body_parts: Vec<BodyPartState>,
+}
+
+impl Default for InjuryState {
+    fn default() -> Self {
+        Self {
+            light_wounds: 0,
+            severe_wounds: 0,
+            pain: 0,
+            bleeding: 0,
+            recovery_ticks: 0,
+            body_parts: default_body_parts(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1346,6 +1700,9 @@ pub enum PolicyEffect {
     TradeEmbargo {
         polity_id: Option<PolityId>,
         resource_id: Option<String>,
+    },
+    TaxRate {
+        rate_percent: i32,
     },
     TerritorialClaim {
         territory_id: TerritoryId,
@@ -1868,6 +2225,8 @@ pub enum EventKind {
     SuccessionContested,
     Usurpation,
     FeudalSanction,
+    CreatureKilled,
+    CreatureQuestCreated,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1903,6 +2262,12 @@ pub struct AgentSnapshot {
     pub relations: HashMap<u64, AgentRelation>,
     pub memories: Vec<AgentMemory>,
     pub inventory: Vec<ResourceStack>,
+    #[serde(default)]
+    pub inventory_item_ids: Vec<ItemInstanceId>,
+    #[serde(default)]
+    pub equipped_items: HashMap<EquipmentSlot, ItemInstanceId>,
+    #[serde(default)]
+    pub craft_proficiencies: CraftProficiencyState,
     pub position: TileCoord,
     pub destination: Option<TileCoord>,
     pub destination_label: Option<String>,
@@ -1955,11 +2320,28 @@ pub struct AgentSnapshot {
     pub gender: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HistoricalBootstrapSummary {
+    pub years_simulated: u32,
+    pub founding_households: usize,
+    pub surviving_households: usize,
+    pub living_population: usize,
+    pub major_dynasties: Vec<String>,
+    pub major_conflicts: Vec<String>,
+    pub major_foundations: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimulationSnapshot {
     pub schema_version: u32,
     pub catalog_version: u32,
     pub village_name: String,
+    #[serde(default)]
+    pub world_history_years_simulated: u32,
+    #[serde(default)]
+    pub world_foundation_year: i32,
+    #[serde(default)]
+    pub historical_summary: Option<HistoricalBootstrapSummary>,
     pub day: u32,
     pub tick_of_day: u32,
     pub total_ticks: u64,
@@ -1994,7 +2376,11 @@ pub struct SimulationSnapshot {
     pub next_power_center_id: PowerCenterId,
     #[serde(default)]
     pub next_authority_office_id: AuthorityOfficeId,
+    #[serde(default)]
+    pub next_item_instance_id: ItemInstanceId,
     pub agents: Vec<AgentSnapshot>,
+    #[serde(default)]
+    pub item_instances: Vec<ItemInstance>,
     pub conversations: Vec<ConversationState>,
     pub scheduled_meetings: Vec<ScheduledMeeting>,
     pub combats: Vec<CombatState>,
@@ -2050,6 +2436,14 @@ pub struct SimulationSnapshot {
     pub cultural_traditions: Vec<CulturalTradition>,
     #[serde(default)]
     pub active_escrows: Vec<EscrowAccount>,
+    #[serde(default)]
+    pub next_creature_id: u64,
+    #[serde(default)]
+    pub creatures: Vec<Creature>,
+    #[serde(default)]
+    pub next_hunting_quest_id: u64,
+    #[serde(default)]
+    pub hunting_quests: Vec<HuntingQuest>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -2247,4 +2641,28 @@ pub struct EscrowAccount {
     pub resource_id: String,
     pub amount: i32,
     pub condition_secret_id: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Creature {
+    pub id: u64,
+    pub name: String,
+    pub species: String, // "Silvafaro" | "Pedrapiro" | "Lebre-zelo" | "Brumalisco"
+    pub is_legendary: bool,
+    pub health: i32,
+    pub max_health: i32,
+    pub attack_power: i32,
+    pub position: TileCoord,
+    pub habitat_territory_id: u64,
+    pub active: bool,
+    pub injury: InjuryState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HuntingQuest {
+    pub id: u64,
+    pub target_creature_id: u64,
+    pub reward_gold: i32,
+    pub funding_polity_id: Option<u64>,
+    pub funding_household_id: Option<BuildingId>,
 }

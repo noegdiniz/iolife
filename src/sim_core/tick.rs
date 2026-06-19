@@ -86,6 +86,7 @@ impl Simulation {
         self.process_general_decisions(llm)?;
         self.update_trauma_trackers()?;
         self.check_active_promises()?;
+        self.tick_fauna_behavior()?;
 
         Ok(())
     }

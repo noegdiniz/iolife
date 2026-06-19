@@ -81,6 +81,14 @@ impl Simulation {
         Ok(())
     }
 
+    pub fn debug_apply_think_maker_output(
+        &mut self,
+        agent_id: u64,
+        output: ThinkMakerOutput,
+    ) -> Result<()> {
+        self.apply_think_maker_output(agent_id, output)
+    }
+
     pub fn debug_remove_all_beds(&mut self) {
         self.spatial
             .fixtures
@@ -403,5 +411,216 @@ impl Simulation {
 
     pub fn debug_world_mut(&mut self) -> &mut bevy_ecs::prelude::World {
         &mut self.world
+    }
+
+    pub fn debug_set_agent_work_building(
+        &mut self,
+        agent_id: u64,
+        building_id: Option<BuildingId>,
+    ) -> Result<()> {
+        let entity = self.find_agent_entity(agent_id)?;
+        let mut query = self.world.query::<&mut AgentCore>();
+        if let Ok(mut core) = query.get_mut(&mut self.world, entity) {
+            core.work_building_id = building_id;
+            Ok(())
+        } else {
+            Err(anyhow!("agent core not found"))
+        }
+    }
+
+    pub fn debug_set_establishment_owner_household(
+        &mut self,
+        establishment_id: EstablishmentId,
+        owner_household_id: BuildingId,
+    ) -> Result<()> {
+        if let Some(est) = self
+            .establishments
+            .iter_mut()
+            .find(|e| e.id == establishment_id)
+        {
+            est.owner_household_ids = vec![owner_household_id];
+            est.public_service = false;
+            Ok(())
+        } else {
+            Err(anyhow!("establishment not found"))
+        }
+    }
+
+    pub fn debug_add_establishment_to_estate_holding(
+        &mut self,
+        suzerain_id: u64,
+        establishment_id: EstablishmentId,
+    ) -> Result<()> {
+        if let Some(holding) = self
+            .estate_holdings
+            .iter_mut()
+            .find(|h| h.holder_agent_id == Some(suzerain_id))
+        {
+            holding.establishment_ids.push(establishment_id);
+            Ok(())
+        } else {
+            Err(anyhow!("estate holding not found"))
+        }
+    }
+
+    pub fn debug_recalculate_territory_values(&mut self) {
+        self.recalculate_territory_values();
+    }
+
+    pub fn debug_apply_daily_organic_expansion(&mut self) {
+        self.apply_daily_organic_expansion();
+    }
+
+    pub fn debug_generate_emergent_polity_name(&self, founder_id: u64) -> String {
+        self.generate_emergent_polity_name(founder_id)
+    }
+
+    pub fn debug_execute_construction_material_task(
+        &mut self,
+        agent_id: u64,
+        task: EconomicTask,
+        project_id: u64,
+    ) -> Result<()> {
+        self.execute_construction_material_task(agent_id, task, project_id)
+    }
+
+    pub fn debug_materialize_construction_project(
+        &mut self,
+        project: &ConstructionProject,
+    ) -> Option<BuildingId> {
+        self.materialize_construction_project(project)
+    }
+
+    pub fn debug_territories(&self) -> &[Territory] {
+        &self.territories
+    }
+
+    pub fn debug_territories_mut(&mut self) -> &mut Vec<Territory> {
+        &mut self.territories
+    }
+
+    pub fn debug_polities(&self) -> &[Polity] {
+        &self.polities
+    }
+
+    pub fn debug_polities_mut(&mut self) -> &mut Vec<Polity> {
+        &mut self.polities
+    }
+
+    pub fn debug_wars_mut(&mut self) -> &mut Vec<WarState> {
+        &mut self.wars
+    }
+
+    pub fn debug_wars(&self) -> &[WarState] {
+        &self.wars
+    }
+
+    pub fn debug_next_construction_project_id(&self) -> u64 {
+        self.next_construction_project_id
+    }
+
+    pub fn debug_set_next_construction_project_id(&mut self, val: u64) {
+        self.next_construction_project_id = val;
+    }
+
+    pub fn debug_construction_projects_mut(&mut self) -> &mut Vec<ConstructionProject> {
+        &mut self.construction_projects
+    }
+
+    pub fn debug_establishments_mut(&mut self) -> &mut Vec<EstablishmentEconomy> {
+        &mut self.establishments
+    }
+
+    pub fn debug_establishments(&self) -> &[EstablishmentEconomy] {
+        &self.establishments
+    }
+
+    pub fn debug_spawn_creature(
+        &mut self,
+        id: u64,
+        name: String,
+        species: String,
+        is_legendary: bool,
+        position: TileCoord,
+        habitat_territory_id: u64,
+        max_health: i32,
+        attack_power: i32,
+    ) {
+        self.spawn_creature_entity(
+            id,
+            name,
+            species,
+            is_legendary,
+            position,
+            habitat_territory_id,
+            max_health,
+            attack_power,
+        );
+    }
+
+    pub fn debug_is_creature(&self, id: u64) -> bool {
+        self.is_creature(id)
+    }
+
+    pub fn debug_creature_health(&self, id: u64) -> Result<i32> {
+        let ent = self.find_creature_entity(id)?;
+        Ok(self
+            .world
+            .entity(ent)
+            .get::<CreatureStateComponent>()
+            .unwrap()
+            .health)
+    }
+
+    pub fn debug_creature_position(&self, id: u64) -> Result<TileCoord> {
+        self.creature_position(id)
+    }
+
+    pub fn debug_creatures(&mut self) -> Vec<Creature> {
+        let mut list = Vec::new();
+        let mut creature_query = self.world.query::<(
+            &CreatureCore,
+            &CreatureStateComponent,
+            &InjuryComponent,
+            &PositionComponent,
+            &LifeStatusComponent,
+        )>();
+        for (core, state, injury, position, life) in creature_query.iter(&self.world) {
+            list.push(Creature {
+                id: core.id,
+                name: core.name.clone(),
+                species: core.species.clone(),
+                is_legendary: core.is_legendary,
+                health: state.health,
+                max_health: state.max_health,
+                attack_power: state.attack_power,
+                position: position.0,
+                habitat_territory_id: core.habitat_territory_id,
+                active: life.0 == AgentLifeStatus::Vivo,
+                injury: injury.0.clone(),
+            });
+        }
+        list
+    }
+
+    pub fn debug_apply_attack_on_creature(
+        &mut self,
+        actor_id: u64,
+        target_creature_id: u64,
+        continuing_combat: bool,
+    ) -> Result<()> {
+        self.apply_attack_on_creature(actor_id, target_creature_id, continuing_combat)
+    }
+
+    pub fn debug_tick_fauna_behavior(&mut self) -> Result<()> {
+        self.tick_fauna_behavior()
+    }
+
+    pub fn debug_hunting_quests(&self) -> &Vec<HuntingQuest> {
+        &self.hunting_quests
+    }
+
+    pub fn debug_hunting_quests_mut(&mut self) -> &mut Vec<HuntingQuest> {
+        &mut self.hunting_quests
     }
 }

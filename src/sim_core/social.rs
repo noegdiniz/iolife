@@ -836,6 +836,7 @@ impl Simulation {
         );
         let relational_context =
             self.build_relational_history(speaker_id, listener_id, &relation, &speaker_memories);
+        let speaker_injury = self.agent_injury(speaker_id)?;
 
         Ok(ConversationTurnInput {
             speaker_id,
@@ -851,12 +852,17 @@ impl Simulation {
                 summary
             },
             speaker_psychology,
+            speaker_equipment_summary: self.visible_equipment_summary(speaker_id),
+            speaker_prestige_summary: self.visible_prestige_summary(speaker_id),
+            speaker_prestige_score: self.perceived_status_score(speaker_id),
             listener: ConversationObservedAgentInput {
                 id: listener_id,
                 name: listener_name,
                 role: self.role_display_name(&listener_role),
                 state: listener_state,
                 relation,
+                perceived_status: self.visible_prestige_summary(listener_id),
+                visible_equipment_summary: self.visible_equipment_summary(listener_id),
                 psychological_summary: listener_psychology,
             },
             context: ConversationContextInput {
@@ -894,6 +900,7 @@ impl Simulation {
                 .collect(),
             information_context: self.build_information_context(speaker_id, Some(listener_id)),
             cultural_context: self.build_cultural_context(speaker_id, Some(listener_id)),
+            body_parts: speaker_injury.body_parts.clone(),
         })
     }
 
@@ -3618,6 +3625,9 @@ impl Simulation {
                             tags: vec!["nascimento".to_string(), "familia".to_string()],
                         }]),
                         InventoryComponent::default(),
+                        ItemInventoryComponent::default(),
+                        EquipmentComponent::default(),
+                        CraftProficiencyComponent::default(),
                         PositionComponent(free_bed),
                     ),
                     (

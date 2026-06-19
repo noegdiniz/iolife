@@ -31,6 +31,7 @@ pub(super) struct AgentContext {
     pub(super) task_queue: VecDeque<SimplifiedTask>,
     pub(super) trauma_tracker: TraumaTracker,
     pub(super) psychological_state: PsychologicalState,
+    pub(super) injury: InjuryState,
 }
 
 impl AgentContext {
@@ -38,6 +39,12 @@ impl AgentContext {
         let mut summary = self.profile.values.clone();
         summary.extend(self.profile.long_term_desires.clone());
         summary.extend(self.profile.fears.clone());
+        if !self.psychological_state.long_term_plan.is_empty() {
+            summary.push(format!(
+                "Plano de longo prazo atual: {}",
+                self.psychological_state.long_term_plan
+            ));
+        }
         summary
     }
 }
@@ -93,41 +100,51 @@ impl Simulation {
 
     pub(super) fn collect_contexts(&mut self) -> Vec<AgentContext> {
         let mut query = self.world.query::<(
-            &AgentCore,
-            &ProfileComponent,
-            &StateComponent,
-            &LifeStatusComponent,
-            &RelationComponent,
-            &MemoryComponent,
-            &PositionComponent,
-            &DestinationLabelComponent,
-            &IntentComponent,
-            &DecisionBudgetComponent,
-            &CognitionComponent,
-            &ConversationComponent,
-            &TaskQueueComponent,
-            Option<&TraumaTrackerComponent>,
-            Option<&PsychologicalStateComponent>,
+            (
+                &AgentCore,
+                &ProfileComponent,
+                &StateComponent,
+                &LifeStatusComponent,
+                &RelationComponent,
+                &MemoryComponent,
+                &PositionComponent,
+                &DestinationLabelComponent,
+            ),
+            (
+                &IntentComponent,
+                &DecisionBudgetComponent,
+                &CognitionComponent,
+                &ConversationComponent,
+                &TaskQueueComponent,
+                &InjuryComponent,
+                Option<&TraumaTrackerComponent>,
+                Option<&PsychologicalStateComponent>,
+            ),
         )>();
         query
             .iter(&self.world)
             .map(
                 |(
-                    core,
-                    profile,
-                    state,
-                    life_status,
-                    relations,
-                    memories,
-                    position,
-                    destination_label,
-                    intent,
-                    budget,
-                    cognition,
-                    conversation,
-                    task_queue,
-                    trauma_tracker,
-                    psychological_state,
+                    (
+                        core,
+                        profile,
+                        state,
+                        life_status,
+                        relations,
+                        memories,
+                        position,
+                        destination_label,
+                    ),
+                    (
+                        intent,
+                        budget,
+                        cognition,
+                        conversation,
+                        task_queue,
+                        injury_comp,
+                        trauma_tracker,
+                        psychological_state,
+                    ),
                 )| {
                     let tile = self.tile_at(position.0);
                     AgentContext {
@@ -154,6 +171,7 @@ impl Simulation {
                         psychological_state: psychological_state
                             .map(|p| p.0.clone())
                             .unwrap_or_default(),
+                        injury: injury_comp.0.clone(),
                     }
                 },
             )
@@ -265,6 +283,8 @@ impl Simulation {
         // Also update the active intent's dominant_emotion and justification
         let entity = self.find_agent_entity(agent_id)?;
         let mut entity_mut = self.world.entity_mut(entity);
+        let mut plan_changed = false;
+        let mut new_long_term_plan = String::new();
         if let Some(mut state) = entity_mut.get_mut::<StateComponent>() {
             for belief in &output.belief_updates {
                 if !state.0.active_goals.iter().any(|goal| goal == belief) {
@@ -273,6 +293,19 @@ impl Simulation {
             }
             if state.0.active_goals.len() > 4 {
                 state.0.active_goals.truncate(4);
+            }
+        }
+        if let Some(mut psychological) = entity_mut.get_mut::<PsychologicalStateComponent>() {
+            let previous_plan = psychological.0.long_term_plan.trim();
+            let next_plan = output.long_term_plan.trim();
+            plan_changed = !next_plan.is_empty() && previous_plan != next_plan;
+            psychological.0.long_term_plan = next_plan.to_string();
+            if plan_changed {
+                psychological.0.last_updated_day = self.day;
+                let plan_note = format!("Plano atualizado: {}", psychological.0.long_term_plan);
+                psychological.0.notes.push(plan_note);
+                psychological.0.clamp_all();
+                new_long_term_plan = psychological.0.long_term_plan.clone();
             }
         }
 
@@ -294,6 +327,16 @@ impl Simulation {
             12,
             Vec::new(),
         )?;
+        if plan_changed {
+            self.add_memory(
+                agent_id,
+                MemoryKind::Reflection,
+                format!("Plano de longo prazo atualizado: {}", new_long_term_plan),
+                vec!["plano_longo".to_string(), "reflexao".to_string()],
+                8,
+                Vec::new(),
+            )?;
+        }
 
         Ok(())
     }
@@ -633,6 +676,9 @@ impl Simulation {
                 known_destination: context.destination_label.clone(),
                 blockers: self.local_blockers(context.position),
                 state: context.state.clone(),
+                self_equipment_summary: self.visible_equipment_summary(context.id),
+                self_prestige_summary: self.visible_prestige_summary(context.id),
+                self_prestige_score: self.perceived_status_score(context.id),
                 cognition_trigger: cognition_trigger.clone(),
                 context_depth,
                 psychological_context,
@@ -648,6 +694,7 @@ impl Simulation {
                 chaos_pressure: self.agent_chaos_pressure(context.id).unwrap_or(0),
                 personality_traits: context.profile.traits.clone(),
                 trauma_traits: context.profile.trauma_traits.clone(),
+                body_parts: context.injury.body_parts.clone(),
             };
             requests.push(PreparedDecisionRequest {
                 agent_id: context.id,
@@ -1199,6 +1246,12 @@ impl Simulation {
             pieces.push(format!(
                 "Estado interno atual: {}",
                 psychological_state.summary()
+            ));
+        }
+        if !psychological_state.long_term_plan.is_empty() {
+            pieces.push(format!(
+                "Plano de longo prazo atual: {}",
+                psychological_state.long_term_plan
             ));
         }
         if pieces.is_empty() {

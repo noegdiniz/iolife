@@ -39,6 +39,39 @@ impl Simulation {
         self.events.iter().rev().take(limit).cloned().collect()
     }
 
+    pub fn history_overview(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "bootstrap_historico={} anos | fundacao={} | resumo={}",
+            self.world_history_years_simulated,
+            self.world_foundation_year,
+            self.historical_summary
+                .as_ref()
+                .map(|summary| format!(
+                    "lares_fundadores={} sobreviventes={} vivos={}",
+                    summary.founding_households,
+                    summary.surviving_households,
+                    summary.living_population
+                ))
+                .unwrap_or_else(|| "-".to_string())
+        ));
+        if let Some(summary) = &self.historical_summary {
+            if !summary.major_dynasties.is_empty() {
+                lines.push(format!("dinastias={}", summary.major_dynasties.join(", ")));
+            }
+            if !summary.major_conflicts.is_empty() {
+                lines.push(format!("conflitos={}", summary.major_conflicts.join(", ")));
+            }
+            if !summary.major_foundations.is_empty() {
+                lines.push(format!(
+                    "fundacoes={}",
+                    summary.major_foundations.join(", ")
+                ));
+            }
+        }
+        lines
+    }
+
     pub fn economy_overview(&self) -> Vec<String> {
         let mut lines = vec![format!(
             "caixa_publico={} | imposto_diario_por_lar={}",
@@ -722,6 +755,11 @@ impl Simulation {
                 injury: injury.0.clone(),
                 institutional_perception: institutional_perception.0.clone(),
                 psychological_state,
+                craft_proficiencies: self.craft_proficiencies_for_agent(core.id),
+                perceived_status_score: self.perceived_status_score(core.id),
+                visible_prestige_summary: self.visible_prestige_summary(core.id),
+                equipped_items: self.equipped_item_summaries(core.id),
+                inventory_items: self.inventory_item_summaries(core.id, 8),
                 rumor_beliefs: rumor_belief_map.get(&core.id).cloned().unwrap_or_default(),
                 known_rumors: rumor_belief_map
                     .get(&core.id)
@@ -812,6 +850,10 @@ impl Simulation {
                 work_establishment_cash: work_establishment.map(|entry| entry.cash),
                 work_establishment_stock: work_establishment
                     .map(|entry| entry.stock.clone())
+                    .unwrap_or_default(),
+                work_establishment_items: core
+                    .work_building_id
+                    .map(|building_id| self.establishment_item_stock_summaries(building_id, 8))
                     .unwrap_or_default(),
                 local_prices: self.local_prices_for_agent(position.0),
                 public_treasury: self.village_economy.public_treasury,

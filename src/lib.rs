@@ -7,4 +7,5 @@ pub mod persistence;
 pub mod sim_core;
 pub mod tui;
 pub mod world_gen;
+pub mod world_history;
 pub mod world_model;

@@ -357,7 +357,7 @@ fn render_agent_detail(frame: &mut Frame<'_>, area: Rect, view: Option<&AgentVie
         view.scheduled_meetings.join("; ")
     };
     let detail = format!(
-        "Nome: {}\nPapel: {}\nVida: {:?}\nFerimentos: leves={} graves={} dor={} sangramento={}\nLar: {}\nArea: {}\nEdificio: {}\nSala: {}\nPosicao: ({}, {})\nDestino: {}\nCaminho pendente: {} tiles\nFoco: {}\nHumor:{} Energia:{} Saude:{} Fome:{} Stress:{}\n\nIntento geral: {}\nUltimo pensamento: {}\n\nPolitica:\nPosicao: {}\nQueixas: {}\nInstituicoes: lider={} justica={} imposto={} racionamento={} guardas={} guerra={} medo={} corrupcao={} equidade={}\nFeudal:\nTitulo: {}\nSenhor direto: {}\nSubordinados: {}\nObrigacoes: {}\nPoder: {}\nSucessao: {}\nPsicologia: {}\nRumores acreditados: {}\nHistorias conhecidas: {}\nEncontros: {}\n\nEconomia:\nCaixa do lar: {}\nDivida de imposto: {}\nDespensa: {}\nSalario pendente: {}\nCaixa publico: {}\nTarefa economica: {}\nCarregando: {}\nEstabelecimento: {}\nCaixa do estabelecimento: {}\nEstoque do estabelecimento: {}\nPrecos locais: {}\n\n{}\n\n{}\n\nMemorias recentes:\n{}",
+        "Nome: {}\nPapel: {}\nVida: {:?}\nFerimentos: leves={} graves={} dor={} sangramento={}\nLar: {}\nArea: {}\nEdificio: {}\nSala: {}\nPosicao: ({}, {})\nDestino: {}\nCaminho pendente: {} tiles\nFoco: {}\nHumor:{} Energia:{} Saude:{} Fome:{} Stress:{}\n\nIntento geral: {}\nUltimo pensamento: {}\n\nPolitica:\nPosicao: {}\nQueixas: {}\nInstituicoes: lider={} justica={} imposto={} racionamento={} guardas={} guerra={} medo={} corrupcao={} equidade={}\nFeudal:\nTitulo: {}\nSenhor direto: {}\nSubordinados: {}\nObrigacoes: {}\nPoder: {}\nSucessao: {}\nPsicologia: {}\nPlano de longo prazo: {}\nRumores acreditados: {}\nHistorias conhecidas: {}\nEncontros: {}\n\nEconomia:\nCaixa do lar: {}\nDivida de imposto: {}\nDespensa: {}\nSalario pendente: {}\nCaixa publico: {}\nTarefa economica: {}\nCarregando: {}\nEstabelecimento: {}\nCaixa do estabelecimento: {}\nEstoque do estabelecimento: {}\nPrecos locais: {}\n\n{}\n\n{}\n\nMemorias recentes:\n{}",
         view.name,
         view.role_name,
         view.life_status,
@@ -429,6 +429,11 @@ fn render_agent_detail(frame: &mut Frame<'_>, area: Rect, view: Option<&AgentVie
             view.succession_status.join("; ")
         },
         view.psychological_state.summary(),
+        if view.psychological_state.long_term_plan.is_empty() {
+            "-".to_string()
+        } else {
+            view.psychological_state.long_term_plan.clone()
+        },
         rumors,
         stories,
         meetings,
