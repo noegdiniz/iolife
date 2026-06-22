@@ -394,11 +394,12 @@ pub trait LlmAdapter: Send + Sync {
     ) -> LlmResult<ConversationTurnOutput>;
 }
 
-pub fn adapter_from_env() -> Box<dyn LlmAdapter> {
-    match OpenAiCompatibleAdapter::from_env() {
-        Ok(adapter) => Box::new(adapter),
-        Err(_) => Box::new(MockLlmAdapter),
-    }
+pub fn adapter_from_env() -> AnyResult<Box<dyn LlmAdapter>> {
+    OpenAiCompatibleAdapter::from_env()
+        .map(|adapter| Box::new(adapter) as Box<dyn LlmAdapter>)
+        .context(
+            "falha ao inicializar provider LLM real; configure o adapter compatível antes de rodar",
+        )
 }
 
 #[derive(Clone)]

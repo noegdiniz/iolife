@@ -890,6 +890,13 @@ pub struct PsychologicalState {
     pub anger: i32,
     pub hope: i32,
     pub guilt: i32,
+    pub status_anxiety: i32,
+    pub revenge_drive: i32,
+    pub submission_drive: i32,
+    pub dominance_drive: i32,
+    pub last_public_humiliation_tick: u64,
+    pub last_public_humiliation_by: Option<u64>,
+    pub active_revenge_target: Option<u64>,
     pub long_term_plan: String,
     pub last_updated_day: u32,
     pub notes: Vec<String>,
@@ -909,6 +916,13 @@ impl PsychologicalState {
         self.anger = self.anger.clamp(0, 100);
         self.hope = self.hope.clamp(0, 100);
         self.guilt = self.guilt.clamp(0, 100);
+        self.status_anxiety = self.status_anxiety.clamp(0, 100);
+        self.revenge_drive = self.revenge_drive.clamp(0, 100);
+        self.submission_drive = self.submission_drive.clamp(0, 100);
+        self.dominance_drive = self.dominance_drive.clamp(0, 100);
+        if self.revenge_drive == 0 {
+            self.active_revenge_target = None;
+        }
         if self.notes.len() > 20 {
             let keep_from = self.notes.len() - 20;
             self.notes.drain(0..keep_from);
@@ -924,6 +938,19 @@ impl PsychologicalState {
         self.anger += delta.anger;
         self.hope += delta.hope;
         self.guilt += delta.guilt;
+        self.status_anxiety += delta.status_anxiety;
+        self.revenge_drive += delta.revenge_drive;
+        self.submission_drive += delta.submission_drive;
+        self.dominance_drive += delta.dominance_drive;
+        if delta.last_public_humiliation_tick > 0 {
+            self.last_public_humiliation_tick = delta.last_public_humiliation_tick;
+        }
+        if delta.last_public_humiliation_by.is_some() {
+            self.last_public_humiliation_by = delta.last_public_humiliation_by;
+        }
+        if delta.active_revenge_target.is_some() {
+            self.active_revenge_target = delta.active_revenge_target;
+        }
         self.last_updated_day = day;
         if !note.is_empty() {
             self.notes.push(note);
@@ -940,12 +967,19 @@ impl PsychologicalState {
         self.hope = (self.hope - 1).max(0);
         self.guilt = (self.guilt - 1).max(0);
         self.trauma = (self.trauma - 1).max(0);
+        self.status_anxiety = (self.status_anxiety - 1).max(0);
+        self.revenge_drive = (self.revenge_drive - 1).max(0);
+        self.submission_drive = (self.submission_drive - 1).max(0);
+        self.dominance_drive = (self.dominance_drive - 1).max(0);
+        if self.revenge_drive == 0 {
+            self.active_revenge_target = None;
+        }
         self.clamp_all();
     }
 
     pub fn summary(&self) -> String {
         format!(
-            "luto={} humilhacao={} medo={} orgulho={} trauma={} raiva={} esperanca={} culpa={}{}",
+            "luto={} humilhacao={} medo={} orgulho={} trauma={} raiva={} esperanca={} culpa={} ansiedade_status={} vinganca={} submissao={} dominancia={}{}",
             self.grief,
             self.humiliation,
             self.fear,
@@ -954,6 +988,10 @@ impl PsychologicalState {
             self.anger,
             self.hope,
             self.guilt,
+            self.status_anxiety,
+            self.revenge_drive,
+            self.submission_drive,
+            self.dominance_drive,
             if self.long_term_plan.is_empty() {
                 String::new()
             } else {

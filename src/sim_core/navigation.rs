@@ -9,10 +9,10 @@ pub(super) struct ResolvedTargetCandidate {
 
 impl Simulation {
     pub(super) fn ensure_navigation_for_current_intent(&mut self, agent_id: u64) -> Result<()> {
-        let _ = self.sync_intent_with_locked_task(agent_id)?;
+        let synced_intent = self.sync_intent_with_locked_task(agent_id)?;
         let entity = self.find_agent_entity(agent_id)?;
         let (
-            intent,
+            planner_intent,
             current_pos,
             current_destination,
             current_path_len,
@@ -52,14 +52,10 @@ impl Simulation {
         if active_conversation_id.is_some() {
             return Ok(());
         }
-        let Some(intent) = intent else {
+        let planner_intent = synced_intent.or(planner_intent);
+        let Some(intent) = self.active_utility_intent(agent_id)?.or(planner_intent) else {
             return Ok(());
         };
-        if intent.kind == IntentKind::Comer && !self.household_has_food_available(agent_id)? {
-            if self.reroute_eat_intent_to_food_purchase(agent_id)? {
-                return self.ensure_navigation_for_current_intent(agent_id);
-            }
-        }
         if current_path_len > 0 {
             return Ok(());
         }
@@ -1101,5 +1097,50 @@ impl Simulation {
         prices.sort_by_key(|price| (price.resource_id.clone(), price.unit_price));
         prices.truncate(8);
         prices
+    }
+
+    pub(super) fn local_equipment_offers_for_agent(&self, position: TileCoord) -> Vec<String> {
+        let mut offers = self
+            .establishments
+            .iter()
+            .filter(|establishment| {
+                establishment
+                    .building_id
+                    .and_then(|building_id| self.building_by_id(building_id))
+                    .map(|building| building.entrance.manhattan(position) <= 20)
+                    .unwrap_or(false)
+            })
+            .flat_map(|establishment| {
+                establishment
+                    .item_stock_ids
+                    .iter()
+                    .filter_map(|item_id| self.item_instance(*item_id))
+                    .map(|item| {
+                        let base_unit_price = establishment
+                            .posted_prices
+                            .iter()
+                            .find(|price| price.resource_id == item.resource_id)
+                            .map(|price| price.unit_price)
+                            .unwrap_or_else(|| self.base_price(&item.resource_id));
+                        let unit_price = self.item_instance_unit_price(item, base_unit_price);
+                        (
+                            unit_price,
+                            item.craft_quality_score,
+                            self.describe_item_offer(item, &establishment.name, unit_price),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        offers.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| b.1.cmp(&a.1))
+                .then_with(|| a.2.cmp(&b.2))
+        });
+        offers
+            .into_iter()
+            .map(|(_, _, summary)| summary)
+            .take(8)
+            .collect()
     }
 }

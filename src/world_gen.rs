@@ -3536,6 +3536,14 @@ fn build_psychology(
         } else {
             (person.trauma / 4).clamp(0, 50)
         },
+        status_anxiety: (household.hardship * 3 + (40 - household.social_rank).max(0))
+            .clamp(0, 100),
+        revenge_drive: household.rage.clamp(0, 100),
+        submission_drive: (person.trauma / 3 + household.hardship * 2).clamp(0, 100),
+        dominance_drive: (household.social_rank + person.legitimacy / 3).clamp(0, 100),
+        last_public_humiliation_tick: 0,
+        last_public_humiliation_by: None,
+        active_revenge_target: None,
         long_term_plan: String::new(),
         last_updated_day: day,
         notes: vec![format!("Herdou marcas de {}", role_focus(role_id))],

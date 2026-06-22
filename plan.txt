@@ -1,0 +1,113 @@
+# Conversas e Reuniões em Grupo V1
+
+## Resumo
+Expandir o protocolo social atual de 1:1 para **grupos pequenos de 3 a 5 agentes**, mantendo o motor como orquestrador determinístico e o LLM como mente individual por turno. O primeiro corte terá **uma conversa de grupo única por entidade**, **um falante por tick**, escolha de turno por **prioridade de reação + round-robin estável**, e continuidade espacial por **mesma sala + raio curto**. Reuniões passam a aceitar múltiplos convidados em uma única proposta e, quando começam, abrem uma conversa de grupo formal.
+
+## Mudanças Principais
+### Domínio e snapshot
+- Generalizar `ConversationState` para participantes variáveis:
+  - trocar `participants: [u64; 2]` por `participant_ids: Vec<u64>`
+  - manter `current_speaker_id`, `turn_count`, `summary`, `recent_turns`, `status`, `outcome`
+  - adicionar estado derivado/persistido mínimo para orquestração: `last_speaker_id`, `turn_order_cursor` ou equivalente estável
+- Generalizar `ConversationTurn`:
+  - manter `speaker_id`
+  - substituir `listener_id` por metadado opcional de alvo direto, por exemplo `addressed_agent_ids: Vec<u64>`
+  - os demais participantes são audiência implícita da conversa
+- Generalizar `ConversationParticipantState`:
+  - manter estado individual por agente
+  - adicionar flags simples úteis para grupo, como `engaged`, `wants_to_continue`, `last_addressed_tick`, se necessário
+- Generalizar `ScheduledMeeting`:
+  - trocar `invitee_id` por `participant_ids: Vec<u64>` ou `invitee_ids: Vec<u64>`
+  - persistir respostas individuais por agente, por exemplo `responses: Vec<MeetingParticipantResponse>`
+  - status do encontro continua único: `Proposed`, `Accepted`, `Rejected`, `Active`, `Completed`, `Missed`, `Cancelled`
+- Atualizar `ConversationComponent`:
+  - remover a dependência de `conversation_partner_id`
+  - substituir por algo como `conversation_participant_ids: Vec<u64>` runtime/snapshot-safe ou derivável do `active_conversation_id`
+- Subir `SNAPSHOT_SCHEMA_VERSION` e rejeitar saves antigos sem migração.
+
+### Cognição e contrato LLM
+- Generalizar `ConversationTurnInput`:
+  - substituir `listener` singular por `participants: Vec<ConversationObservedAgentInput>` excluindo o speaker
+  - incluir para cada participante: relação, status percebido, equipamento visível, resumo psicológico e distância social relevante
+  - incluir `audience_size`, `is_group_conversation`, `recent_speakers`, `recent_targets` e `public_pressure_summary`
+- Atualizar `ConversationContextInput`:
+  - adicionar `participant_ids`, `participant_names`, `group_size`, `current_room_place_id`, `time_context` e resumo curto da dinâmica do grupo
+- Expandir `ConversationTurnOutput`:
+  - manter fala única por turno
+  - adicionar campo estruturado opcional para alvo(s) do turno, por exemplo `addressed_agent_ids: Vec<u64>`
+  - manter efeitos existentes como promessa, rumor, escrow, meeting, mas sempre validados pelo motor
+- Generalizar `ProposedMeeting`:
+  - trocar `invitee_id` por `invitee_ids: Vec<u64>`
+  - manter `place_id`, `scheduled_day`, `scheduled_time`, `purpose`
+- Manter `MeetingResponse` individual por agente:
+  - continua respondendo um `meeting_id`
+  - um participante aceita/rejeita por vez
+- Endurecer prompts:
+  - conversa em grupo deve usar apenas `agent_id` válidos da lista de participantes para endereçamento estruturado
+  - encontro deve usar apenas `place_id` canônico e `invitee_ids` válidos
+  - o LLM não escolhe ordem de turno, nem composição do grupo fora dos IDs permitidos
+
+### Motor social e reuniões
+- Substituir a abertura 1:1 por abertura de grupo:
+  - `open_conversation` passa a aceitar `Vec<u64>` de participantes
+  - valida tamanho `3..=5` no primeiro corte
+  - todos precisam estar elegíveis, vivos, sem conversa ativa conflitante e sem cooldown incompatível
+- Regra espacial de conversa:
+  - grupo continua ativo apenas se todos permanecerem na **mesma sala** e dentro de **raio curto**
+  - se um participante sair do raio/sala, ele é removido da conversa
+  - se o grupo cair para menos de 2 participantes, a conversa encerra
+  - se cair para exatamente 2, a conversa continua como conversa comum, sem recriar entidade
+- Regra de turno:
+  - um único falante por tick
+  - prioridade 1: agente diretamente endereçado/ofendido/cobrado no turno anterior
+  - fallback: round-robin estável entre participantes engajados
+  - o motor decide a vez; o LLM responde só pela própria mente
+- Efeitos sociais por turno:
+  - aplicar deltas fortes no alvo direto
+  - aplicar deltas leves de audiência nos demais ouvintes, principalmente em confiança, ressentimento, prestígio percebido, humilhação pública e legitimidade social
+  - grupo com 3+ agentes passa a contar como contexto social público para appraisal
+- Reuniões:
+  - proposta pode convidar múltiplos agentes de uma vez
+  - encontro só fica `Accepted` quando houver quórum mínimo determinístico: default `propositor + pelo menos 1 convidado`, e vira conversa de grupo se 3+ comparecerem
+  - ao chegar o horário, o motor tenta convergir os participantes ao `place_id`
+  - quem faltar recebe `Missed`; presença parcial ainda pode gerar encontro reduzido se houver quórum
+- Observabilidade:
+  - `AgentView` e headless passam a mostrar lista curta de participantes, tamanho do grupo, falante atual e encontros pendentes por grupo
+  - TUI não é prioridade neste corte; no máximo não deve quebrar
+
+### Regras e limites do primeiro corte
+- Escopo fechado em grupos de **3 a 5 agentes**
+- Uma conversa ativa continua sendo uma entidade única; sem subgrupos, sem múltiplos falantes por tick, sem interrupção livre
+- Regra espacial: **mesma sala + raio curto**
+- Reuniões continuam **1:1 na resposta**, mas **1:N na proposta**
+- Efeitos sociais continuam determinados pelo motor; o LLM não altera relações ou status diretamente
+- `place_id` e `agent_id` estruturados continuam sendo contrato estrito, sem heurística por nome
+
+## Interfaces e Tipos Públicos
+- `SimulationSnapshot` passa a persistir conversas e reuniões em grupo
+- `ConversationState`, `ConversationTurn`, `ConversationParticipantState` e `ScheduledMeeting` deixam de assumir 1:1
+- `DecisionInput` pode permanecer igual neste corte
+- `ConversationTurnInput` e `ProposedMeeting` mudam shape para grupo
+- `ConversationTurnOutput` ganha alvo(s) estruturados opcionais
+- `AgentView`/headless deixam de expor “partner” singular e passam a expor participantes/grupo
+
+## Testes
+- Abrir conversa com 3 agentes válidos cria grupo corretamente e bloqueia agentes já ocupados
+- Conversa em grupo alterna falante por prioridade + round-robin estável
+- Agente endereçado diretamente responde antes dos demais quando elegível
+- Participante que sai da sala ou do raio curto é removido da conversa
+- Conversa encerra quando cai abaixo do mínimo viável
+- Proposta de reunião com múltiplos convidados persiste IDs, respostas e horário corretamente
+- Comparecimento parcial gera encontro reduzido quando houver quórum
+- `place_id` inválido ou `agent_id` inválido em proposta/saída continua falhando como contrato
+- Save/load preserva conversa de grupo ativa, ordem de turno, participantes e reunião agendada
+- Headless mostra grupo ativo e encontros sem assumir parceiro singular
+- Regressão: conversa 1:1 continua funcionando como caso degenerado do modelo generalizado
+
+## Assumptions e Defaults
+- Primeiro corte: grupos pequenos `3..=5`
+- Turno: prioridade de reação social + round-robin estável
+- Continuidade espacial: mesma sala + raio curto
+- Grupo de 3+ já conta como contexto público para humilhação/status
+- TUI fica fora de prioridade; headless e views devem continuar coerentes
+- Sem compatibilidade com snapshots antigos

@@ -1,5 +1,5 @@
 use crate::agent_mind::{
-    ConversationContextInput, ConversationObservedAgentInput, ConversationTurnInput,
+    ConversationContextInput, ConversationObservedAgentInput, ConversationTurnInput, DecisionInput,
     EconomicContextInput, EconomicOpportunityInput, FeudalContextInput, InformationContextInput,
     InstitutionalContextInput, LegalContextInput, MeetingResponse, NearbyAgentInput,
     NearbyFixtureInput, PoliticalContextInput, ProposedMeeting, PsychologicalContextInput,
@@ -52,6 +52,7 @@ mod navigation;
 mod politics;
 mod social;
 mod tick;
+mod utility_ai;
 mod views;
 
 use cognition::{AgentContext, ConversationBatchItem, PreparedConversationTurn};
@@ -60,8 +61,9 @@ use helpers::{
     political_issue_summary, reconstruct_path, sentence_for_case_severity, social_goal_from_move,
 };
 pub use tick::tick_interval_ms;
+use utility_ai::UtilityControlComponent;
 
-const SNAPSHOT_SCHEMA_VERSION: u32 = 23;
+const SNAPSHOT_SCHEMA_VERSION: u32 = 24;
 pub const SIMULATED_MINUTES_PER_TICK: u32 = 1;
 pub const DEFAULT_TICKS_PER_DAY: u32 = 24 * 60 / SIMULATED_MINUTES_PER_TICK;
 pub const DEFAULT_TICKS_PER_SECOND: u32 = 1;
@@ -162,6 +164,30 @@ pub struct CognitionComponent {
     pub last_deliberation_energy: i32,
     pub last_deliberation_health: i32,
     pub last_deliberation_stress: i32,
+}
+
+#[derive(Debug)]
+pub struct CompletedActionPlan {
+    pub agent_id: u64,
+    pub nearby_ids: Vec<u64>,
+    pub cognition_trigger: String,
+    pub social_opportunity_signature: Option<String>,
+    pub input: DecisionInput,
+    pub raw_plan: String,
+}
+
+#[derive(Debug)]
+pub struct SkippedActionPlan {
+    pub agent_id: u64,
+    pub cognition_trigger: String,
+    pub social_opportunity_signature: Option<String>,
+    pub error: LlmError,
+}
+
+#[derive(Debug)]
+pub enum ActionPlannerResult {
+    Completed(CompletedActionPlan),
+    Skipped(SkippedActionPlan),
 }
 
 #[derive(Component, Clone, Default)]
@@ -302,6 +328,14 @@ pub struct AgentView {
     pub feudal_power_summary: Option<String>,
     pub succession_status: Vec<String>,
     pub scheduled_meetings: Vec<String>,
+    pub planner_status: String,
+    pub active_utility_directive: Option<String>,
+    pub reactive_stance: String,
+    pub reactive_reason: String,
+    pub reactive_revenge_target: Option<String>,
+    pub reactive_status_pressure: String,
+    pub reactive_defiance_posture: String,
+    pub control_mode: String,
 }
 
 #[derive(Debug, Clone)]
@@ -330,6 +364,11 @@ pub enum ThinkMakerResult {
 struct PendingThoughts {
     agent_id: u64,
     handle: std::thread::JoinHandle<ThinkMakerResult>,
+}
+
+struct PendingActionPlan {
+    agent_id: u64,
+    handle: std::thread::JoinHandle<ActionPlannerResult>,
 }
 
 pub struct Simulation {
@@ -398,6 +437,7 @@ pub struct Simulation {
     economic_tasks: Vec<EconomicTask>,
     construction_projects: Vec<ConstructionProject>,
     pending_thoughts: Vec<PendingThoughts>,
+    pending_action_plans: Vec<PendingActionPlan>,
     pub crops: HashMap<TileCoord, CropState>,
     pub secrets: Vec<Secret>,
     pub caravans: Vec<CaravanState>,
@@ -423,6 +463,9 @@ pub struct Simulation {
 impl Drop for Simulation {
     fn drop(&mut self) {
         for pending in self.pending_thoughts.drain(..) {
+            let _ = pending.handle.join();
+        }
+        for pending in self.pending_action_plans.drain(..) {
             let _ = pending.handle.join();
         }
     }
@@ -532,6 +575,7 @@ impl Simulation {
                         carrying_capacity: agent.carrying_capacity,
                     },
                     TraumaTrackerComponent(agent.trauma_tracker),
+                    UtilityControlComponent::default(),
                 ),
             ));
         }
@@ -684,6 +728,7 @@ impl Simulation {
             economic_tasks: snapshot.economic_tasks,
             construction_projects: snapshot.construction_projects,
             pending_thoughts: Vec::new(),
+            pending_action_plans: Vec::new(),
             crops: snapshot.crops,
             secrets: snapshot.secrets.clone(),
             caravans: snapshot.caravans.clone(),

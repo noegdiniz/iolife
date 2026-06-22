@@ -647,38 +647,39 @@ impl Simulation {
         };
         let mut views = Vec::new();
         let mut query = self.world.query::<(
-            &AgentCore,
-            &StateComponent,
-            &LifeStatusComponent,
-            &InjuryComponent,
-            &InstitutionalPerceptionComponent,
-            &PositionComponent,
-            &DestinationComponent,
-            &DestinationLabelComponent,
-            &PathComponent,
-            &IntentComponent,
-            &ThoughtComponent,
-            &MemoryComponent,
-            &RelationComponent,
-            &ConversationComponent,
-            &EconomicActivityComponent,
+            (
+                &AgentCore,
+                &StateComponent,
+                &LifeStatusComponent,
+                &InjuryComponent,
+                &InstitutionalPerceptionComponent,
+                &PositionComponent,
+                &DestinationComponent,
+                &DestinationLabelComponent,
+            ),
+            (
+                &PathComponent,
+                &IntentComponent,
+                &ThoughtComponent,
+                &MemoryComponent,
+                &RelationComponent,
+                &ConversationComponent,
+                &EconomicActivityComponent,
+                &UtilityControlComponent,
+            ),
         )>();
         for (
-            core,
-            state,
-            life_status,
-            injury,
-            institutional_perception,
-            position,
-            destination,
-            destination_label,
-            path,
-            intent,
-            thought,
-            memories,
-            relations,
-            conversation,
-            economic,
+            (
+                core,
+                state,
+                life_status,
+                injury,
+                institutional_perception,
+                position,
+                destination,
+                destination_label,
+            ),
+            (path, intent, thought, memories, relations, conversation, economic, utility),
         ) in query.iter(&self.world)
         {
             let psychological_state = psychological_state_map
@@ -707,6 +708,9 @@ impl Simulation {
             let work_establishment = core
                 .work_building_id
                 .and_then(|building_id| self.establishment_by_building(building_id));
+            let reactive_summary = self
+                .current_reactive_psychology_summary(core.id)
+                .unwrap_or_default();
             let scheduled_meetings = self
                 .scheduled_meetings
                 .iter()
@@ -874,6 +878,33 @@ impl Simulation {
                 feudal_power_summary: Some(self.build_feudal_context(core.id).power_summary),
                 succession_status: self.build_feudal_context(core.id).succession_status,
                 scheduled_meetings,
+                planner_status: if self.planner_pending_for_agent(core.id) {
+                    "pending".to_string()
+                } else if intent.0.is_some() {
+                    "ready".to_string()
+                } else {
+                    "idle".to_string()
+                },
+                active_utility_directive: utility.active.as_ref().map(|directive| {
+                    format!(
+                        "{} [{}] ({})",
+                        directive.kind, directive.stance, directive.score
+                    )
+                }),
+                reactive_stance: reactive_summary.stance.clone(),
+                reactive_reason: reactive_summary.reason.clone(),
+                reactive_revenge_target: reactive_summary
+                    .target_agent_id
+                    .and_then(|id| agent_name_map.get(&id).cloned()),
+                reactive_status_pressure: reactive_summary.status_pressure_summary.clone(),
+                reactive_defiance_posture: reactive_summary.defiance_posture_summary.clone(),
+                control_mode: if utility.active.is_some() {
+                    "utility".to_string()
+                } else if intent.0.is_some() {
+                    "planner".to_string()
+                } else {
+                    "idle".to_string()
+                },
             });
         }
         views.sort_by(|a, b| a.name.cmp(&b.name));

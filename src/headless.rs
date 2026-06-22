@@ -196,7 +196,7 @@ fn print_report(sim: &mut Simulation, config: &HeadlessConfig, label: &str) {
             view.work_establishment_items.join("; ")
         };
         println!(
-            "[headless] agente | {} | papel={} | vida={:?} | ferimentos=leves:{} graves:{} dor:{} sangramento:{} | pos=({}, {}) | area={} | destino={} | intencao={} | politica={} | queixas={} | instituicoes=lider:{} justica:{} imposto:{} rac:{} guardas:{} guerra:{} medo:{} corrupcao:{} equidade:{} | feudal=titulo:{} senhor:{} poder:{} obrigacoes:{} sucessao:{} | psicologia={} | plano_longo={} | prestigio={}({}) | equipamento={} | inventario={} | oficio=fer:{} alf:{} our:{} couro:{} | rumores={} | historias={} | caixa_lar={} | imposto_devendo={} | caixa_publico={} | pantry={} | salario_pendente={} | tarefa={} | estoque_inst_trabalho={} | pensamento={} ",
+            "[headless] agente | {} | papel={} | vida={:?} | ferimentos=leves:{} graves:{} dor:{} sangramento:{} | pos=({}, {}) | area={} | destino={} | intencao={} | controle={} | planner={} | utility={} | stance={} | reativo={} | vinganca_alvo={} | pressao_status={} | desafio={} | politica={} | queixas={} | instituicoes=lider:{} justica:{} imposto:{} rac:{} guardas:{} guerra:{} medo:{} corrupcao:{} equidade:{} | feudal=titulo:{} senhor:{} poder:{} obrigacoes:{} sucessao:{} | psicologia={} | plano_longo={} | prestigio={}({}) | equipamento={} | inventario={} | oficio=fer:{} alf:{} our:{} couro:{} | rumores={} | historias={} | caixa_lar={} | imposto_devendo={} | caixa_publico={} | pantry={} | salario_pendente={} | tarefa={} | estoque_inst_trabalho={} | pensamento={} ",
             view.name,
             view.role_name,
             view.life_status,
@@ -217,6 +217,18 @@ fn print_report(sim: &mut Simulation, config: &HeadlessConfig, label: &str) {
                 .as_ref()
                 .map(|intent| intent.kind.as_str().to_string())
                 .unwrap_or_else(|| "-".to_string()),
+            view.control_mode,
+            view.planner_status,
+            view.active_utility_directive
+                .clone()
+                .unwrap_or_else(|| "-".to_string()),
+            view.reactive_stance.clone(),
+            view.reactive_reason.clone(),
+            view.reactive_revenge_target
+                .clone()
+                .unwrap_or_else(|| "-".to_string()),
+            view.reactive_status_pressure.clone(),
+            view.reactive_defiance_posture.clone(),
             view.political_position,
             if view.political_grievances.is_empty() {
                 "-".to_string()

@@ -341,8 +341,7 @@ impl Simulation {
         Ok(())
     }
 
-    pub(super) fn process_general_decisions(&mut self, llm: &dyn LlmAdapter) -> Result<()> {
-        // 1. Process completed background thoughts
+    pub(super) fn poll_background_cognition(&mut self, llm: &dyn LlmAdapter) -> Result<()> {
         let mut completed_results = Vec::new();
         let mut skipped_results = Vec::new();
 
@@ -391,54 +390,115 @@ impl Simulation {
             }
         }
 
-        // 2. Synchronous Action Planning
+        let mut completed_plans = Vec::new();
+        let mut skipped_plans = Vec::new();
+        let mut active_plans = Vec::new();
+        for pending in self.pending_action_plans.drain(..) {
+            if pending.handle.is_finished() {
+                match pending.handle.join() {
+                    Ok(ActionPlannerResult::Completed(plan)) => completed_plans.push(plan),
+                    Ok(ActionPlannerResult::Skipped(plan)) => skipped_plans.push(plan),
+                    Err(_) => {
+                        return Err(anyhow!(
+                            "Background Action Planner thread panicked for agent {}",
+                            pending.agent_id
+                        ));
+                    }
+                }
+            } else {
+                active_plans.push(pending);
+            }
+        }
+        self.pending_action_plans = active_plans;
+
+        completed_plans.sort_by_key(|plan| plan.agent_id);
+        for plan in completed_plans {
+            self.apply_completed_action_plan(llm, plan)?;
+        }
+
+        for plan in skipped_plans {
+            if !plan.error.is_transient() {
+                if let Some(entity) = self.find_agent_entity(plan.agent_id).ok() {
+                    if let Some(mut budget) = self
+                        .world
+                        .entity_mut(entity)
+                        .get_mut::<DecisionBudgetComponent>()
+                    {
+                        budget.cooldown_until = self.total_ticks + 60;
+                    }
+                }
+                eprintln!(
+                    "Persistent Action Planner failure for agent {}: {}. Put on 60-tick cooldown.",
+                    plan.agent_id, plan.error
+                );
+            }
+            self.handle_transient_decision_failure(
+                plan.agent_id,
+                &plan.cognition_trigger,
+                plan.social_opportunity_signature,
+                &plan.error,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    pub(super) fn spawn_general_decisions(&mut self, llm: &dyn LlmAdapter) -> Result<()> {
         let requests = self.prepare_decision_requests()?;
 
-        use rayon::prelude::*;
-        let planner_results = requests
-            .into_par_iter()
-            .map(|request| {
-                let res = llm.plan_actions(&request.input);
-                (request, res)
-            })
-            .collect::<Vec<_>>();
-
-        for (request, plan_res) in planner_results {
+        for request in requests {
             let agent_id = request.agent_id;
-            let input = request.input;
-
-            self.pending_thoughts
-                .retain(|pending| pending.agent_id != agent_id);
-
-            let raw_plan = match plan_res {
-                Ok(plan) => plan,
-                Err(error) => {
-                    if !error.is_transient() {
-                        if let Some(entity) = self.find_agent_entity(agent_id).ok() {
-                            if let Some(mut budget) = self
-                                .world
-                                .entity_mut(entity)
-                                .get_mut::<DecisionBudgetComponent>()
-                            {
-                                budget.cooldown_until = self.total_ticks + 60;
-                            }
-                        }
-                        eprintln!(
-                            "Persistent Action Planner failure for agent {}: {}. Put on 60-tick cooldown.",
-                            agent_id, error
-                        );
-                    }
-                    self.handle_transient_decision_failure(
+            let worker_llm = llm.clone_box();
+            let handle = std::thread::spawn(move || {
+                let PreparedDecisionRequest {
+                    agent_id,
+                    nearby_ids,
+                    cognition_trigger,
+                    social_opportunity_signature,
+                    input,
+                } = request;
+                match worker_llm.plan_actions(&input) {
+                    Ok(raw_plan) => ActionPlannerResult::Completed(CompletedActionPlan {
                         agent_id,
-                        &request.cognition_trigger,
-                        request.social_opportunity_signature,
-                        &error,
-                    )?;
-                    continue;
+                        nearby_ids,
+                        cognition_trigger,
+                        social_opportunity_signature,
+                        input,
+                        raw_plan,
+                    }),
+                    Err(error) => ActionPlannerResult::Skipped(SkippedActionPlan {
+                        agent_id,
+                        cognition_trigger,
+                        social_opportunity_signature,
+                        error,
+                    }),
                 }
-            };
+            });
+            self.pending_action_plans
+                .push(PendingActionPlan { agent_id, handle });
+        }
+        Ok(())
+    }
 
-            let tasks = parse_action_planner_output(&raw_plan);
+    fn apply_completed_action_plan(
+        &mut self,
+        llm: &dyn LlmAdapter,
+        plan: CompletedActionPlan,
+    ) -> Result<()> {
+        let CompletedActionPlan {
+            agent_id,
+            nearby_ids,
+            cognition_trigger,
+            social_opportunity_signature,
+            input,
+            raw_plan,
+        } = plan;
+
+        self.pending_thoughts
+            .retain(|pending| pending.agent_id != agent_id);
+
+        let tasks = parse_action_planner_output(&raw_plan);
+        if llm.provider_name() == "openai-compatible" {
             if let Some(invalid_task) = tasks
                 .iter()
                 .find(|task| self.llm_task_has_invalid_physical_place(task))
@@ -458,71 +518,64 @@ impl Simulation {
                         "place_id_obrigatorio".to_string(),
                     ],
                 });
-                continue;
+                return Ok(());
             }
-
-            let first_task = tasks.first().cloned();
-            if let Some(task) = first_task {
-                let intent = AgentIntent {
-                    kind: task.kind,
-                    target_agent: task.target_agent,
-                    target_semantic: task.target_semantic.clone(),
-                    justification: "Planejamento instintivo".to_string(),
-                    dominant_emotion: "contido".to_string(),
-                    perceived_risk: 0,
-                    belief_updates: Vec::new(),
-                    priority: 1,
-                    social_move: task.social_move,
-                };
-                let validated = validate_intent(intent, &request.nearby_ids);
-
-                let entity = self.find_agent_entity(agent_id)?;
-                let mut entity_mut = self.world.entity_mut(entity);
-                let mut queue = entity_mut
-                    .get_mut::<TaskQueueComponent>()
-                    .ok_or_else(|| anyhow!("missing task queue component"))?;
-                queue.0.clear();
-                for t in tasks.iter().skip(1) {
-                    queue.0.push_back(t.clone());
-                }
-                drop(queue);
-                drop(entity_mut);
-
-                self.assign_intent(agent_id, validated, "Pensando...".to_string())?;
-            } else {
-                let entity = self.find_agent_entity(agent_id)?;
-                let mut entity_mut = self.world.entity_mut(entity);
-                entity_mut
-                    .get_mut::<TaskQueueComponent>()
-                    .ok_or_else(|| anyhow!("missing task queue component"))?
-                    .0
-                    .clear();
-            }
-
-            self.record_cognition_trigger(agent_id, &request.cognition_trigger)?;
-            self.record_social_opportunity_signature(
-                agent_id,
-                request.social_opportunity_signature.clone(),
-            )?;
-
-            // 3. Spawn Think Maker in background
-            let think_input = ThinkMakerInput {
-                decision_input: input,
-                planned_tasks: tasks,
-            };
-            let worker_llm = llm.clone_box();
-            let handle =
-                std::thread::spawn(move || match worker_llm.generate_thoughts(&think_input) {
-                    Ok(output) => {
-                        ThinkMakerResult::Completed(CompletedThoughts { agent_id, output })
-                    }
-                    Err(error) => ThinkMakerResult::Skipped(SkippedThoughts { agent_id, error }),
-                });
-
-            self.pending_thoughts
-                .push(PendingThoughts { agent_id, handle });
         }
 
+        let first_task = tasks.first().cloned();
+        if let Some(task) = first_task {
+            let intent = AgentIntent {
+                kind: task.kind,
+                target_agent: task.target_agent,
+                target_semantic: task.target_semantic.clone(),
+                justification: "Planejamento instintivo".to_string(),
+                dominant_emotion: "contido".to_string(),
+                perceived_risk: 0,
+                belief_updates: Vec::new(),
+                priority: 1,
+                social_move: task.social_move,
+            };
+            let validated = validate_intent(intent, &nearby_ids);
+
+            let entity = self.find_agent_entity(agent_id)?;
+            let mut entity_mut = self.world.entity_mut(entity);
+            let mut queue = entity_mut
+                .get_mut::<TaskQueueComponent>()
+                .ok_or_else(|| anyhow!("missing task queue component"))?;
+            queue.0.clear();
+            for t in tasks.iter().skip(1) {
+                queue.0.push_back(t.clone());
+            }
+            drop(queue);
+            drop(entity_mut);
+
+            self.assign_intent(agent_id, validated, "Pensando...".to_string())?;
+        } else {
+            let entity = self.find_agent_entity(agent_id)?;
+            let mut entity_mut = self.world.entity_mut(entity);
+            entity_mut
+                .get_mut::<TaskQueueComponent>()
+                .ok_or_else(|| anyhow!("missing task queue component"))?
+                .0
+                .clear();
+        }
+
+        self.record_cognition_trigger(agent_id, &cognition_trigger)?;
+        self.record_social_opportunity_signature(agent_id, social_opportunity_signature)?;
+        self.clear_utility_control(agent_id)?;
+
+        let think_input = ThinkMakerInput {
+            decision_input: input,
+            planned_tasks: tasks,
+        };
+        let worker_llm = llm.clone_box();
+        let handle = std::thread::spawn(move || match worker_llm.generate_thoughts(&think_input) {
+            Ok(output) => ThinkMakerResult::Completed(CompletedThoughts { agent_id, output }),
+            Err(error) => ThinkMakerResult::Skipped(SkippedThoughts { agent_id, error }),
+        });
+
+        self.pending_thoughts
+            .push(PendingThoughts { agent_id, handle });
         Ok(())
     }
 
@@ -563,6 +616,9 @@ impl Simulation {
                 continue;
             }
             if context.active_conversation_id.is_some() {
+                continue;
+            }
+            if self.planner_pending_for_agent(context.id) {
                 continue;
             }
             if self.should_hold_locked_economic_task(&context) {
@@ -640,6 +696,7 @@ impl Simulation {
             let feudal_context = self.build_feudal_context(context.id);
             let information_context = self.build_information_context(context.id, None);
             let cultural_context = self.build_cultural_context(context.id, None);
+            let reactive_summary = self.current_reactive_psychology_summary(context.id)?;
             let time_context = self.time_context();
             let world_places = self.world_place_inputs();
             let input = DecisionInput {
@@ -679,6 +736,11 @@ impl Simulation {
                 self_equipment_summary: self.visible_equipment_summary(context.id),
                 self_prestige_summary: self.visible_prestige_summary(context.id),
                 self_prestige_score: self.perceived_status_score(context.id),
+                reactive_stance: reactive_summary.stance.clone(),
+                status_pressure_summary: reactive_summary.status_pressure_summary.clone(),
+                revenge_summary: reactive_summary.revenge_summary.clone(),
+                public_shame_summary: reactive_summary.public_shame_summary.clone(),
+                authority_posture_summary: reactive_summary.authority_posture_summary.clone(),
                 cognition_trigger: cognition_trigger.clone(),
                 context_depth,
                 psychological_context,
@@ -1392,6 +1454,7 @@ impl Simulation {
                 )
             })
             .collect::<Vec<_>>();
+        let equipment_market_offers = self.local_equipment_offers_for_agent(context.position);
         let base_resource_availability = self
             .catalog
             .resources
@@ -1512,6 +1575,7 @@ impl Simulation {
             tax_pressure,
             work_obligations,
             local_prices,
+            equipment_market_offers,
             base_resource_availability,
             scarcity_signals,
             grain_availability: format!("graos disponiveis localmente: {grain_availability_total}"),

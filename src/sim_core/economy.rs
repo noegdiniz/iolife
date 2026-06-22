@@ -107,303 +107,6 @@ impl Simulation {
             let _ = self.mark_agent_dead(agent_id, "colapso fisico");
         }
     }
-
-    pub(super) fn apply_emergency_food_rule(&mut self, agent_id: u64) -> Result<bool> {
-        let state = self.agent_state(agent_id)?;
-        if state.hunger < 70 {
-            return Ok(false);
-        }
-        if self.household_has_food_available(agent_id)? {
-            self.apply_eat(agent_id)?;
-            return Ok(true);
-        }
-
-        if let Some(task) = self.active_economic_task_for_agent(agent_id)
-            && matches!(
-                task.kind,
-                EconomicTaskKind::Comprar
-                    | EconomicTaskKind::Transportar
-                    | EconomicTaskKind::ReceberPagamento
-            )
-        {
-            return Ok(false);
-        }
-
-        let eat_intent = AgentIntent {
-            kind: IntentKind::Comer,
-            target_agent: None,
-            target_semantic: Some("comida da despensa".to_string()),
-            justification: "Fome critica exige resolver alimentacao antes de qualquer plano."
-                .to_string(),
-            dominant_emotion: "urgencia".to_string(),
-            perceived_risk: 9,
-            belief_updates: vec!["A fome passou a dominar a prioridade imediata.".to_string()],
-            priority: 10,
-            social_move: None,
-        };
-        let entity = self.find_agent_entity(agent_id)?;
-        {
-            let mut entity_mut = self.world.entity_mut(entity);
-            entity_mut
-                .get_mut::<IntentComponent>()
-                .ok_or_else(|| anyhow!("missing intent component"))?
-                .0 = Some(eat_intent.clone());
-            entity_mut
-                .get_mut::<ThoughtComponent>()
-                .ok_or_else(|| anyhow!("missing thought component"))?
-                .0 = "Fome critica: priorizando comida ou compra de alimento.".to_string();
-            entity_mut
-                .get_mut::<DestinationComponent>()
-                .ok_or_else(|| anyhow!("missing destination component"))?
-                .0 = None;
-            entity_mut
-                .get_mut::<DestinationLabelComponent>()
-                .ok_or_else(|| anyhow!("missing destination label component"))?
-                .0 = eat_intent.target_semantic.clone();
-            entity_mut
-                .get_mut::<PathComponent>()
-                .ok_or_else(|| anyhow!("missing path component"))?
-                .0
-                .clear();
-        }
-        if self.reroute_eat_intent_to_food_purchase(agent_id)? {
-            self.ensure_navigation_for_current_intent(agent_id)?;
-            return Ok(true);
-        }
-        // Reroute falhou (sem oferta viavel) â€” limpar intent para que o
-        // motor autonomo decida a proxima acao (trabalhar, coletar pagamento, etc).
-        self.clear_intent_navigation(agent_id)?;
-        Ok(false)
-    }
-
-    pub(super) fn apply_survival_economy(&mut self, agent_id: u64) -> Result<Option<AgentIntent>> {
-        let in_active_faction = self
-            .political_factions
-            .iter()
-            .any(|f| f.is_action_active && f.member_ids.contains(&agent_id));
-        if in_active_faction {
-            return Ok(None);
-        }
-        let state = self.agent_state(agent_id)?;
-        let hunger = state.hunger;
-        let energy = state.energy;
-        let household_id = self.household_id_for_agent(agent_id);
-        let has_pending_payments = household_id
-            .and_then(|id| self.household_by_id(id))
-            .map(|h| !h.pending_payments.is_empty())
-            .unwrap_or(false);
-        let can_afford_food = household_id
-            .and_then(|id| self.best_food_source_for_household(id))
-            .is_some();
-
-        // â”€â”€ Prioridade 1: Comer se com fome e despensa tem comida â”€â”€â”€â”€â”€â”€â”€â”€
-        if hunger >= 50 && self.household_has_food_available(agent_id)? {
-            let intent = AgentIntent {
-                kind: IntentKind::Comer,
-                target_agent: None,
-                target_semantic: Some("comida da despensa".to_string()),
-                justification: "Motor autonomo: fome detectada, comida disponivel na despensa."
-                    .to_string(),
-                dominant_emotion: "fome".to_string(),
-                perceived_risk: 0,
-                belief_updates: Vec::new(),
-                priority: 8,
-                social_move: None,
-            };
-            self.set_autopilot_intent(agent_id, &intent, "Fome: indo comer da despensa.")?;
-            return Ok(Some(intent));
-        }
-
-        // â”€â”€ Prioridade 2: Comprar comida (sÃ³ se tem dinheiro suficiente) â”€â”€
-        if hunger >= 45 && !self.household_has_food_available(agent_id)? && can_afford_food {
-            let purchase_intent = AgentIntent {
-                kind: IntentKind::Comprar,
-                target_agent: None,
-                target_semantic: Some("comida para a despensa".to_string()),
-                justification: "Motor autonomo: despensa vazia, procurando comida para comprar."
-                    .to_string(),
-                dominant_emotion: "urgencia".to_string(),
-                perceived_risk: 0,
-                belief_updates: Vec::new(),
-                priority: 9,
-                social_move: None,
-            };
-            self.ensure_economic_tasks();
-            self.bind_or_create_economic_task(agent_id, &purchase_intent)?;
-            let task_found = self
-                .active_economic_task_for_agent(agent_id)
-                .map(|task| task.kind == EconomicTaskKind::Comprar)
-                .unwrap_or(false);
-            if task_found {
-                let task_desc = self
-                    .active_economic_task_for_agent(agent_id)
-                    .map(|task| task.description.clone())
-                    .unwrap_or_default();
-                let intent = AgentIntent {
-                    kind: IntentKind::Comprar,
-                    target_agent: None,
-                    target_semantic: Some(task_desc.clone()),
-                    justification: format!("Motor autonomo: comprando comida â€” {}", task_desc),
-                    dominant_emotion: "urgencia".to_string(),
-                    perceived_risk: 0,
-                    belief_updates: Vec::new(),
-                    priority: 9,
-                    social_move: None,
-                };
-                self.set_autopilot_intent(
-                    agent_id,
-                    &intent,
-                    &format!("Despensa vazia: {}", task_desc),
-                )?;
-                return Ok(Some(intent));
-            }
-        }
-
-        // â”€â”€ Prioridade 3: Coletar pagamentos pendentes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        // Se o lar tem pending_payments (salÃ¡rios), um membro vai buscar.
-        if has_pending_payments {
-            let payment_intent = AgentIntent {
-                kind: IntentKind::ReceberPagamento,
-                target_agent: None,
-                target_semantic: Some("pagamentos pendentes".to_string()),
-                justification: "Motor autonomo: salarios pendentes para recolher.".to_string(),
-                dominant_emotion: "determinado".to_string(),
-                perceived_risk: 0,
-                belief_updates: Vec::new(),
-                priority: 8,
-                social_move: None,
-            };
-            self.ensure_economic_tasks();
-            self.bind_or_create_economic_task(agent_id, &payment_intent)?;
-            let task_found = self
-                .active_economic_task_for_agent(agent_id)
-                .map(|task| task.kind == EconomicTaskKind::ReceberPagamento)
-                .unwrap_or(false);
-            if task_found {
-                let task_desc = self
-                    .active_economic_task_for_agent(agent_id)
-                    .map(|task| task.description.clone())
-                    .unwrap_or_default();
-                let intent = AgentIntent {
-                    kind: IntentKind::ReceberPagamento,
-                    target_agent: None,
-                    target_semantic: Some(task_desc.clone()),
-                    justification: format!("Motor autonomo: {}", task_desc),
-                    dominant_emotion: "determinado".to_string(),
-                    perceived_risk: 0,
-                    belief_updates: Vec::new(),
-                    priority: 8,
-                    social_move: None,
-                };
-                self.set_autopilot_intent(agent_id, &intent, &format!("Salario: {}", task_desc))?;
-                return Ok(Some(intent));
-            }
-        }
-
-        // â”€â”€ Prioridade 4: Descansar se energia crÃ­tica â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        if energy <= 15 {
-            let intent = AgentIntent {
-                kind: IntentKind::Descansar,
-                target_agent: None,
-                target_semantic: Some("cama de casa".to_string()),
-                justification: "Motor autonomo: energia critica, precisa descansar.".to_string(),
-                dominant_emotion: "exaustao".to_string(),
-                perceived_risk: 0,
-                belief_updates: Vec::new(),
-                priority: 7,
-                social_move: None,
-            };
-            self.set_autopilot_intent(agent_id, &intent, "Exausto: indo descansar.")?;
-            return Ok(Some(intent));
-        }
-
-        // â”€â”€ Prioridade 5: Trabalho produtivo baseado no papel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        {
-            let work_intent = AgentIntent {
-                kind: IntentKind::Trabalhar,
-                target_agent: None,
-                target_semantic: Some("trabalho".to_string()),
-                justification: "Motor autonomo: sem tarefas pendentes, buscando trabalho."
-                    .to_string(),
-                dominant_emotion: "determinado".to_string(),
-                perceived_risk: 0,
-                belief_updates: Vec::new(),
-                priority: 5,
-                social_move: None,
-            };
-            self.ensure_economic_tasks();
-            self.bind_or_create_economic_task(agent_id, &work_intent)?;
-            if let Some(task) = self.active_economic_task_for_agent(agent_id).cloned() {
-                let intent = Self::intent_for_economic_task(&task);
-                self.set_autopilot_intent(
-                    agent_id,
-                    &intent,
-                    &format!("Trabalho: {}", task.description),
-                )?;
-                return Ok(Some(intent));
-            }
-        }
-
-        // â”€â”€ Prioridade 6: LogÃ­stica (transporte de insumos) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        {
-            let logistics_intent = AgentIntent {
-                kind: IntentKind::Transportar,
-                target_agent: None,
-                target_semantic: Some("logistica".to_string()),
-                justification: "Motor autonomo: ajudando com logistica.".to_string(),
-                dominant_emotion: "determinado".to_string(),
-                perceived_risk: 0,
-                belief_updates: Vec::new(),
-                priority: 4,
-                social_move: None,
-            };
-            self.bind_or_create_economic_task(agent_id, &logistics_intent)?;
-            if let Some(task) = self.active_economic_task_for_agent(agent_id).cloned() {
-                let intent = Self::intent_for_economic_task(&task);
-                self.set_autopilot_intent(
-                    agent_id,
-                    &intent,
-                    &format!("Logistica: {}", task.description),
-                )?;
-                return Ok(Some(intent));
-            }
-        }
-
-        Ok(None)
-    }
-
-    pub(super) fn set_autopilot_intent(
-        &mut self,
-        agent_id: u64,
-        intent: &AgentIntent,
-        thought: &str,
-    ) -> Result<()> {
-        let entity = self.find_agent_entity(agent_id)?;
-        let mut entity_mut = self.world.entity_mut(entity);
-        entity_mut
-            .get_mut::<IntentComponent>()
-            .ok_or_else(|| anyhow!("missing intent component"))?
-            .0 = Some(intent.clone());
-        entity_mut
-            .get_mut::<ThoughtComponent>()
-            .ok_or_else(|| anyhow!("missing thought component"))?
-            .0 = thought.to_string();
-        entity_mut
-            .get_mut::<DestinationComponent>()
-            .ok_or_else(|| anyhow!("missing destination component"))?
-            .0 = None;
-        entity_mut
-            .get_mut::<DestinationLabelComponent>()
-            .ok_or_else(|| anyhow!("missing destination label component"))?
-            .0 = intent.target_semantic.clone();
-        entity_mut
-            .get_mut::<PathComponent>()
-            .ok_or_else(|| anyhow!("missing path component"))?
-            .0
-            .clear();
-        Ok(())
-    }
-
     pub(super) fn bind_or_create_economic_task(
         &mut self,
         agent_id: u64,
@@ -1211,15 +914,20 @@ impl Simulation {
                     .find(|price| price.resource_id == resource_id)
                     .map(|price| price.unit_price)
                     .unwrap_or_else(|| self.base_price(resource_id));
-                let is_local = self.village_index_of_establishment(establishment.id)
-                    == Some(dest_village_idx);
+                let is_local =
+                    self.village_index_of_establishment(establishment.id) == Some(dest_village_idx);
                 let adjusted_floor = if is_local {
                     base_unit_price
                 } else {
                     (base_unit_price as f64 * 1.3) as i32
                 };
                 let unit_price = self.item_instance_unit_price(item, adjusted_floor);
-                Some((establishment.id, establishment.name.clone(), item.display_name.clone(), unit_price))
+                Some((
+                    establishment.id,
+                    establishment.name.clone(),
+                    item.display_name.clone(),
+                    unit_price,
+                ))
             })
             .filter(|(_, _, _, unit_price)| household.treasury >= *unit_price)
             .min_by_key(|(_, _, _, unit_price)| *unit_price)?;
@@ -1279,28 +987,32 @@ impl Simulation {
             .filter(|establishment| {
                 self.village_index_of_establishment(establishment.id) == Some(dest_village_idx)
                     && establishment.cash > 0
-                    && establishment
+                    && (establishment
                         .posted_prices
                         .iter()
                         .any(|price| price.resource_id == resource_id)
+                        || self
+                            .recipes_for_establishment(establishment)
+                            .iter()
+                            .any(|recipe| recipe.output_resource_id == resource_id))
             })
             .filter_map(|establishment| {
                 let posted_price = establishment
                     .posted_prices
                     .iter()
-                    .find(|price| price.resource_id == resource_id)?
-                    .unit_price;
+                    .find(|price| price.resource_id == resource_id)
+                    .map(|price| price.unit_price)
+                    .unwrap_or_else(|| self.base_price(resource_id));
                 let sale_price = (posted_price * 8 / 10).max(1);
                 (establishment.cash >= sale_price)
                     .then(|| (establishment.id, establishment.name.clone(), sale_price))
             })
             .max_by_key(|(_, _, sale_price)| *sale_price);
 
-        let (destination, related_establishment_id, sale_price, destination_label) =
+        let (destination, sale_price, destination_label) =
             if let Some((establishment_id, establishment_name, sale_price)) = local_buyer {
                 (
                     EconomicNode::Establishment(establishment_id),
-                    Some(establishment_id),
                     sale_price,
                     establishment_name,
                 )
@@ -1312,7 +1024,6 @@ impl Simulation {
                 let quote = self.market_quote(resource_id)?;
                 (
                     EconomicNode::ExternalMarket,
-                    None,
                     quote.sell_price.max(1),
                     "mercado externo".to_string(),
                 )
@@ -1336,7 +1047,7 @@ impl Simulation {
             total_price: sale_price,
             description: format!("Vender {item_name} em {destination_label}"),
             phase: EconomicTaskPhase::AwaitingPickup,
-            related_establishment_id,
+            related_establishment_id: None,
             related_construction_project_id: None,
         });
         Some(task_id)
@@ -1384,7 +1095,8 @@ impl Simulation {
             return Ok(true);
         };
 
-        let Some(item_id) = self.remove_item_from_establishment_stock(source_id, &resource_id) else {
+        let Some(item_id) = self.remove_item_from_establishment_stock(source_id, &resource_id)
+        else {
             self.fail_economic_task(agent_id, task.id)?;
             return Ok(true);
         };
@@ -1428,13 +1140,82 @@ impl Simulation {
         if task.kind != EconomicTaskKind::Vender || !self.is_equipment_resource(&resource_id) {
             return Ok(false);
         }
+        if task.class == EconomicTaskClass::GeneralCommerce
+            && task.phase == EconomicTaskPhase::AwaitingPickup
+        {
+            let agent_name = self.agent_name(agent_id)?;
+            let Some(item_id) = self.remove_item_from_agent_inventory(agent_id, &resource_id)?
+            else {
+                self.fail_economic_task(agent_id, task.id)?;
+                return Ok(true);
+            };
+            self.maybe_auto_equip_best_items(agent_id)?;
+            let item_name = self.item_display_name_for_id(item_id);
+            let mut paid = false;
+            match task.destination {
+                EconomicNode::Establishment(establishment_id) => {
+                    if let Some(establishment) = self.establishment_by_id_mut(establishment_id)
+                        && establishment.cash >= task.total_price
+                    {
+                        establishment.cash -= task.total_price;
+                        paid = true;
+                    }
+                    if !paid {
+                        let _ = self.add_item_to_agent_inventory(agent_id, item_id);
+                        self.maybe_auto_equip_best_items(agent_id)?;
+                        self.fail_economic_task(agent_id, task.id)?;
+                        return Ok(true);
+                    }
+                    let _ = self.add_item_to_establishment_stock(establishment_id, item_id);
+                }
+                EconomicNode::ExternalMarket => {
+                    paid = true;
+                    if let Some(item) = self.item_instance_mut(item_id) {
+                        item.owner_agent_id = None;
+                        item.owner_household_id = None;
+                    }
+                }
+                _ => {
+                    let _ = self.add_item_to_agent_inventory(agent_id, item_id);
+                    self.maybe_auto_equip_best_items(agent_id)?;
+                    self.fail_economic_task(agent_id, task.id)?;
+                    return Ok(true);
+                }
+            }
+            if paid && let Some(household) = self.household_by_id_mut(task.actor_household_id) {
+                household.treasury += task.total_price;
+            }
+            if let Some(task_state) = self
+                .economic_tasks
+                .iter_mut()
+                .find(|entry| entry.id == task.id)
+            {
+                task_state.phase = EconomicTaskPhase::Completed;
+            }
+            self.clear_active_economic_task(agent_id)?;
+            self.push_event(WorldEvent {
+                day: self.day,
+                tick: self.tick_of_day,
+                actor: agent_id,
+                target: None,
+                kind: EventKind::Commerce,
+                summary: format!("{agent_name} vende {item_name}."),
+                impact_tags: vec![
+                    "comercio".to_string(),
+                    "equipamento".to_string(),
+                    resource_id,
+                ],
+            });
+            self.sync_establishment_stocks_to_fixtures();
+            return Ok(true);
+        }
         let agent_name = self.agent_name(agent_id)?;
         match task.phase {
             EconomicTaskPhase::AwaitingPickup => {
                 let item_name = match task.source {
                     EconomicNode::Establishment(establishment_id) => {
-                        let Some(item_id) =
-                            self.remove_item_from_establishment_stock(establishment_id, &resource_id)
+                        let Some(item_id) = self
+                            .remove_item_from_establishment_stock(establishment_id, &resource_id)
                         else {
                             self.fail_economic_task(agent_id, task.id)?;
                             return Ok(true);
@@ -1478,10 +1259,7 @@ impl Simulation {
                     actor: agent_id,
                     target: None,
                     kind: EventKind::Logistics,
-                    summary: format!(
-                        "{agent_name} separa {} para venda.",
-                        item_name
-                    ),
+                    summary: format!("{agent_name} separa {} para venda.", item_name),
                     impact_tags: vec![
                         "logistica".to_string(),
                         "equipamento".to_string(),
@@ -1492,7 +1270,8 @@ impl Simulation {
                 Ok(true)
             }
             EconomicTaskPhase::InTransit => {
-                let Some(item_id) = self.remove_item_from_agent_inventory(agent_id, &resource_id)?
+                let Some(item_id) =
+                    self.remove_item_from_agent_inventory(agent_id, &resource_id)?
                 else {
                     self.fail_economic_task(agent_id, task.id)?;
                     return Ok(true);
@@ -3575,7 +3354,7 @@ impl Simulation {
         &self,
         establishment: &EstablishmentEconomy,
     ) -> Vec<PostedPrice> {
-        establishment
+        let mut prices = establishment
             .stock_targets
             .iter()
             .map(|target| {
@@ -3594,7 +3373,38 @@ impl Simulation {
                     unit_price: unit_price.max(1),
                 }
             })
-            .collect()
+            .collect::<Vec<_>>();
+
+        let unique_item_resources = establishment
+            .item_stock_ids
+            .iter()
+            .filter_map(|item_id| self.item_instance(*item_id))
+            .map(|item| item.resource_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        for resource_id in unique_item_resources {
+            if prices.iter().any(|price| price.resource_id == resource_id) {
+                continue;
+            }
+            let Some(best_item) = establishment
+                .item_stock_ids
+                .iter()
+                .filter_map(|item_id| self.item_instance(*item_id))
+                .filter(|item| item.resource_id == resource_id)
+                .max_by_key(|item| item.craft_quality_score)
+            else {
+                continue;
+            };
+            let mut unit_price =
+                self.item_instance_unit_price(best_item, self.base_price(&resource_id));
+            if let Some(quote) = self.market_quote(&resource_id) {
+                unit_price = unit_price.clamp(quote.sell_price.max(1), quote.buy_price.max(1));
+            }
+            prices.push(PostedPrice {
+                resource_id,
+                unit_price,
+            });
+        }
+        prices
     }
 
     pub(super) fn compute_scarcity_metrics(&self) -> Vec<ScarcityMetric> {
@@ -3608,7 +3418,9 @@ impl Simulation {
             let available: i32 = self
                 .establishments
                 .iter()
-                .map(|establishment| self.establishment_total_resource_units(establishment, &resource.id))
+                .map(|establishment| {
+                    self.establishment_total_resource_units(establishment, &resource.id)
+                })
                 .sum::<i32>()
                 + self
                     .households
@@ -5122,7 +4934,10 @@ impl Simulation {
             let unique_item_outputs = establishment
                 .item_stock_ids
                 .iter()
-                .filter_map(|item_id| self.item_instance(*item_id).map(|item| item.resource_id.clone()))
+                .filter_map(|item_id| {
+                    self.item_instance(*item_id)
+                        .map(|item| item.resource_id.clone())
+                })
                 .collect::<std::collections::HashSet<_>>();
             for item_resource_id in unique_item_outputs {
                 let current = self.establishment_item_count(&establishment, &item_resource_id);
@@ -5314,7 +5129,9 @@ impl Simulation {
     pub(super) fn total_village_resource_amount(&self, resource_id: &str) -> i32 {
         self.establishments
             .iter()
-            .map(|establishment| self.establishment_total_resource_units(establishment, resource_id))
+            .map(|establishment| {
+                self.establishment_total_resource_units(establishment, resource_id)
+            })
             .sum::<i32>()
             + self
                 .households

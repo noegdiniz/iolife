@@ -450,6 +450,13 @@ impl Simulation {
             )?;
         }
 
+        self.mark_revenge_target(
+            target_id,
+            actor_id,
+            if target_died { 25 } else { 16 },
+            format!("agressao sofrida de {}", actor_name),
+        )?;
+
         // Trauma traits for victim
         let event_kind = if target_died {
             EventKind::Death
@@ -482,6 +489,7 @@ impl Simulation {
         }
         let stolen = self.transfer_stolen_material(actor_id, target_id, true)?;
         self.apply_attack(actor_id, target_id, false)?;
+        let actor_name = self.agent_name(actor_id)?;
         if !stolen.is_empty() {
             let victim_conscious = self.life_status(target_id)? == AgentLifeStatus::Vivo;
             self.open_crime_case_if_observed(
@@ -492,7 +500,6 @@ impl Simulation {
                 stolen.clone(),
                 victim_conscious,
             )?;
-            let actor_name = self.agent_name(actor_id)?;
             let target_name = self.agent_name(target_id)?;
             self.push_event(WorldEvent {
                 day: self.day,
@@ -504,6 +511,13 @@ impl Simulation {
                 impact_tags: vec!["roubo".to_string(), "crime".to_string()],
             });
         }
+
+        self.mark_revenge_target(
+            target_id,
+            actor_id,
+            14,
+            format!("roubo sofrido de {}", actor_name),
+        )?;
 
         // Trauma traits for theft victim
         self.apply_trauma_traits_for_event(target_id, "victim", EventKind::Theft)?;
@@ -576,6 +590,13 @@ impl Simulation {
             summary: format!("{actor_name} furta {} de {target_name}.", stolen.join(", ")),
             impact_tags: vec!["furto".to_string(), "crime".to_string()],
         });
+
+        self.mark_revenge_target(
+            target_id,
+            actor_id,
+            12,
+            format!("furto sofrido de {}", actor_name),
+        )?;
 
         // Trauma traits for theft victim
         self.apply_trauma_traits_for_event(target_id, "victim", EventKind::Theft)?;
@@ -879,6 +900,13 @@ impl Simulation {
             ),
             impact_tags: vec!["punicao".to_string(), "justica".to_string()],
         });
+
+        self.mark_public_humiliation(
+            target_id,
+            Some(actor_id),
+            i32::from(severity).clamp(8, 22),
+            format!("punicao publica no caso {}", case_id),
+        )?;
 
         // Trauma traits for punished agent
         self.apply_trauma_traits_for_event(target_id, "victim", EventKind::Punishment)?;

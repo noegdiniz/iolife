@@ -58,10 +58,17 @@ impl Simulation {
         self.apply_needs_decay();
         self.refresh_economy_state()?;
         self.refresh_political_state()?;
+        self.poll_background_cognition(llm)?;
         self.apply_faction_action_overrides()?;
         self.apply_child_behaviors()?;
         self.apply_caravan_behaviors()?;
         let agent_ids = self.agent_ids();
+
+        for agent_id in &agent_ids {
+            if self.can_agent_act(*agent_id)? {
+                self.refresh_realtime_utility_control(*agent_id)?;
+            }
+        }
 
         for agent_id in &agent_ids {
             if self.can_agent_act(*agent_id)? {
@@ -83,7 +90,7 @@ impl Simulation {
 
         self.process_scheduled_meetings()?;
         self.process_active_conversations(llm)?;
-        self.process_general_decisions(llm)?;
+        self.spawn_general_decisions(llm)?;
         self.update_trauma_trackers()?;
         self.check_active_promises()?;
         self.tick_fauna_behavior()?;
@@ -129,20 +136,16 @@ impl Simulation {
         {
             return Ok(());
         }
-        if self.apply_emergency_food_rule(agent_id)? {
-            return Ok(());
-        }
         let synced_intent = self.sync_intent_with_locked_task(agent_id)?;
-        let mut intent = self
+        let planner_intent = self
             .world
             .entity(entity)
             .get::<IntentComponent>()
             .ok_or_else(|| anyhow!("missing intent component"))?
             .0
             .clone();
-        if synced_intent.is_some() {
-            intent = synced_intent;
-        }
+        let planner_intent = synced_intent.or(planner_intent);
+        let mut intent = self.active_utility_intent(agent_id)?.or(planner_intent);
 
         if intent.is_none() {
             if let Some(task) = self.active_economic_task_for_agent(agent_id).cloned() {
@@ -257,24 +260,9 @@ impl Simulation {
             }
         }
 
-        // â”€â”€ Motor EconÃ´mico AutÃ´nomo â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        // Se o agente ainda nÃ£o tem intent (aguardando LLM ou recÃ©m-criado),
-        // aplica regras determinÃ­sticas de sobrevivÃªncia e produÃ§Ã£o.
-        if intent.is_none() {
-            intent = self.apply_survival_economy(agent_id)?;
-            if intent.is_some() {
-                self.ensure_navigation_for_current_intent(agent_id)?;
-            }
-        }
-
         let Some(intent) = intent else {
             return Ok(());
         };
-        if intent.kind == IntentKind::Comer && !self.household_has_food_available(agent_id)? {
-            if self.reroute_eat_intent_to_food_purchase(agent_id)? {
-                return self.try_execute_current_intent(agent_id, llm);
-            }
-        }
         if !self.ready_to_execute(agent_id, &intent)? {
             return Ok(());
         }

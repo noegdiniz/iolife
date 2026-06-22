@@ -26,7 +26,7 @@ fn main() -> Result<()> {
             None => Simulation::seeded(options.simulation.clone()),
         }
     };
-    let llm = adapter_from_env();
+    let llm = adapter_from_env()?;
     match options.mode {
         RunMode::Tui => run_tui(simulation, llm, persistence),
         RunMode::Headless(config) => run_headless(simulation, llm, persistence, config),

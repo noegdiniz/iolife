@@ -837,6 +837,7 @@ impl Simulation {
         let relational_context =
             self.build_relational_history(speaker_id, listener_id, &relation, &speaker_memories);
         let speaker_injury = self.agent_injury(speaker_id)?;
+        let reactive_summary = self.current_reactive_psychology_summary(speaker_id)?;
 
         Ok(ConversationTurnInput {
             speaker_id,
@@ -855,6 +856,15 @@ impl Simulation {
             speaker_equipment_summary: self.visible_equipment_summary(speaker_id),
             speaker_prestige_summary: self.visible_prestige_summary(speaker_id),
             speaker_prestige_score: self.perceived_status_score(speaker_id),
+            reactive_stance: reactive_summary.stance.clone(),
+            status_pressure_summary: reactive_summary.status_pressure_summary.clone(),
+            revenge_summary: reactive_summary.revenge_summary.clone(),
+            public_shame_summary: reactive_summary.public_shame_summary.clone(),
+            authority_posture_summary: reactive_summary.authority_posture_summary.clone(),
+            prestige_gap_summary: reactive_summary.prestige_gap_summary.clone(),
+            humiliation_risk_summary: reactive_summary.humiliation_risk_summary.clone(),
+            deference_or_revenge_summary: reactive_summary.deference_or_revenge_summary.clone(),
+            audience_summary: reactive_summary.audience_summary.clone(),
             listener: ConversationObservedAgentInput {
                 id: listener_id,
                 name: listener_name,
@@ -2855,6 +2865,12 @@ impl Simulation {
         )?;
 
         self.apply_trauma_trait(promise.promiser_id, "traidor")?;
+        self.mark_revenge_target(
+            promise.promisee_id,
+            promise.promiser_id,
+            18,
+            format!("promessa quebrada por {}", promiser_name),
+        )?;
 
         self.add_memory(
             promise.promisee_id,

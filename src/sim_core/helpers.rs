@@ -18,8 +18,11 @@ pub(super) fn merge_stack(stacks: &mut Vec<ResourceStack>, stack: ResourceStack)
 }
 
 pub(super) fn consume_matching(stacks: &mut Vec<ResourceStack>, accepted: &[&str]) -> bool {
-    for stack in stacks.iter_mut() {
-        if accepted.contains(&stack.resource_id.as_str()) && stack.amount > 0 {
+    for resource_id in accepted {
+        if let Some(stack) = stacks
+            .iter_mut()
+            .find(|stack| stack.resource_id == *resource_id && stack.amount > 0)
+        {
             stack.amount -= 1;
             return true;
         }
@@ -290,7 +293,11 @@ impl Simulation {
             .unwrap_or_default()
     }
 
-    pub(super) fn item_instance_unit_price(&self, item: &ItemInstance, unit_price_floor: i32) -> i32 {
+    pub(super) fn item_instance_unit_price(
+        &self,
+        item: &ItemInstance,
+        unit_price_floor: i32,
+    ) -> i32 {
         let quality_bonus = item.craft_quality_score.clamp(0, 100) / 10;
         let prestige_bonus = item.prestige_value.max(0) / 3;
         let combat_bonus = (item.combat_profile.damage.max(0)
@@ -310,10 +317,10 @@ impl Simulation {
             .item_stock_ids
             .iter()
             .position(|item_id| {
-            self.item_instance(*item_id)
-                .map(|item| item.resource_id == resource_id)
-                .unwrap_or(false)
-        })?;
+                self.item_instance(*item_id)
+                    .map(|item| item.resource_id == resource_id)
+                    .unwrap_or(false)
+            })?;
         Some(
             self.establishment_by_id_mut(establishment_id)?
                 .item_stock_ids
@@ -668,6 +675,82 @@ impl Simulation {
                     || normalized.contains(&resource.display_name.to_lowercase())
             })
             .map(|resource| resource.id.clone())
+    }
+
+    pub(super) fn describe_item_offer(
+        &self,
+        item: &ItemInstance,
+        establishment_name: &str,
+        unit_price: i32,
+    ) -> String {
+        let class = self
+            .item_class_for_resource(&item.resource_id)
+            .map(|class| match class {
+                ItemClass::Weapon => "arma",
+                ItemClass::Armor => "armadura",
+                ItemClass::Clothing => "roupa",
+                ItemClass::Jewelry => "joia",
+                ItemClass::Tool => "ferramenta",
+            })
+            .unwrap_or("item");
+        let slot_summary = self
+            .resource_def(&item.resource_id)
+            .map(|resource| {
+                resource
+                    .equip_slot_preferences
+                    .iter()
+                    .map(|slot| slot.as_str())
+                    .collect::<Vec<_>>()
+                    .join("/")
+            })
+            .filter(|slots| !slots.is_empty())
+            .unwrap_or_else(|| "sem_slot".to_string());
+        let profile = self.current_item_combat_profile(item);
+        match self.item_class_for_resource(&item.resource_id) {
+            Some(ItemClass::Weapon) => format!(
+                "{} em {} por {} moedas [{} {} dano={} precisao={} prest={} dur={}]",
+                item.display_name,
+                establishment_name,
+                unit_price,
+                class,
+                slot_summary,
+                profile.damage,
+                profile.precision,
+                item.prestige_value,
+                item.durability
+            ),
+            Some(ItemClass::Armor) | Some(ItemClass::Clothing) => format!(
+                "{} em {} por {} moedas [{} {} protecao={} prest={} dur={}]",
+                item.display_name,
+                establishment_name,
+                unit_price,
+                class,
+                slot_summary,
+                profile.protection,
+                item.prestige_value,
+                item.durability
+            ),
+            Some(ItemClass::Jewelry) => format!(
+                "{} em {} por {} moedas [{} {} prest={} dur={}]",
+                item.display_name,
+                establishment_name,
+                unit_price,
+                class,
+                slot_summary,
+                item.prestige_value,
+                item.durability
+            ),
+            _ => format!(
+                "{} em {} por {} moedas [{} {} prest={} dur={}]",
+                item.display_name,
+                establishment_name,
+                unit_price,
+                class,
+                slot_summary,
+                item.prestige_value,
+                item.durability
+            ),
+        }
     }
 
     pub(super) fn role_def(&self, role_id: &str) -> Option<&crate::world_model::RoleDef> {
