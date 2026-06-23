@@ -15,8 +15,8 @@ use medieval_village_llm::world_model::{
     InsurrectionStatus, IntentKind, ItemAffordanceKind, LocationKind, MemoryKind, MilitaryDemand,
     MilitaryDemandStatus, PartInjuryStatus, PolicyActStatus, PolicyDomain, PolicyEffect,
     PoliticalFaction, Polity, PromiseCondition, PsychologicalState, RelationDelta, ResourceKind,
-    ResourceStack, ScheduledMeetingStatus, SimplifiedTask, SocialMove, TileCoord, TileKind,
-    WarStage, WarState, WarStatus, WorldEvent,
+    ResourceStack, SNAPSHOT_SCHEMA_VERSION, ScheduledMeetingStatus, SimplifiedTask, SocialMove,
+    TileCoord, TileKind, WarStage, WarState, WarStatus, WorldEvent,
 };
 use rusqlite::{Connection, params};
 use std::collections::HashMap;
@@ -154,6 +154,11 @@ impl InstrumentedAdapter {
             },
             tone: Some("medido".to_string()),
             risk_shift: Some(0),
+            addressed_agent_ids: input
+                .participants
+                .first()
+                .map(|agent| vec![agent.id])
+                .unwrap_or_default(),
             economic_transfer: None,
             revealed_secret: None,
             make_promise: None,
@@ -180,6 +185,7 @@ impl InstrumentedAdapter {
             relation_delta_hint: RelationDelta::default(),
             tone: Some("confidencial".to_string()),
             risk_shift: Some(1),
+            addressed_agent_ids: Vec::new(),
             economic_transfer: None,
             revealed_secret: None,
             make_promise: None,
@@ -206,6 +212,7 @@ impl InstrumentedAdapter {
             relation_delta_hint: RelationDelta::default(),
             tone: Some("ritual".to_string()),
             risk_shift: Some(0),
+            addressed_agent_ids: Vec::new(),
             economic_transfer: None,
             revealed_secret: None,
             make_promise: None,
@@ -466,12 +473,94 @@ fn historical_bootstrap_emits_only_macro_events() {
 #[test]
 fn historical_bootstrap_materializes_macro_state() {
     let snapshot = Simulation::seeded(SimulationConfig::default()).snapshot();
-    assert!(snapshot.historical_summary.is_some());
+    let summary = snapshot
+        .historical_summary
+        .as_ref()
+        .expect("historical summary");
     assert!(snapshot.world_history_years_simulated >= 1);
     assert!(!snapshot.feudal_titles.is_empty());
     assert!(!snapshot.feudal_contracts.is_empty());
     assert!(!snapshot.policy_acts.is_empty());
     assert!(!snapshot.events.is_empty());
+    assert!(summary.average_territorial_stability > 0);
+    assert!(!summary.dominant_households.is_empty());
+    assert!(
+        !summary.dominant_stories.is_empty()
+            || !summary.recent_crises.is_empty()
+            || !summary.active_decrees.is_empty()
+    );
+}
+
+#[test]
+fn historical_bootstrap_is_deterministic_for_same_seed() {
+    let config = SimulationConfig {
+        history_years: 40,
+        history_seed: Some(4242),
+        ..SimulationConfig::default()
+    };
+    let a = Simulation::seeded(config.clone()).snapshot();
+    let b = Simulation::seeded(config).snapshot();
+    assert_eq!(a.village_name, b.village_name);
+    assert_eq!(a.historical_summary, b.historical_summary);
+    assert_eq!(
+        a.agents
+            .iter()
+            .map(|agent| (&agent.name, &agent.role_id, agent.age))
+            .collect::<Vec<_>>(),
+        b.agents
+            .iter()
+            .map(|agent| (&agent.name, &agent.role_id, agent.age))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn historical_bootstrap_varies_with_different_seed() {
+    let a = Simulation::seeded(SimulationConfig {
+        history_years: 40,
+        history_seed: Some(101),
+        ..SimulationConfig::default()
+    })
+    .snapshot();
+    let b = Simulation::seeded(SimulationConfig {
+        history_years: 40,
+        history_seed: Some(202),
+        ..SimulationConfig::default()
+    })
+    .snapshot();
+    assert_ne!(a.historical_summary, b.historical_summary);
+}
+
+#[test]
+fn historical_catalog_drives_macro_construction_and_events() {
+    let snapshot = Simulation::seeded(SimulationConfig {
+        history_years: 80,
+        history_seed: Some(77),
+        ..SimulationConfig::default()
+    })
+    .snapshot();
+    let establishment_type_ids = snapshot
+        .establishments
+        .iter()
+        .map(|establishment| establishment.establishment_type_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    assert!(establishment_type_ids.contains("fazenda"));
+    assert!(establishment_type_ids.contains("lenhal"));
+    assert!(establishment_type_ids.contains("pedreira"));
+    assert!(snapshot.events.iter().any(|event| {
+        matches!(
+            event.kind,
+            EventKind::Construction
+                | EventKind::Commerce
+                | EventKind::MilitarySupply
+                | EventKind::CulturalStory
+        )
+    }));
+    assert!(snapshot.agents.iter().any(|agent| {
+        agent.psychological_state.trauma > 0
+            || agent.psychological_state.pride > 0
+            || agent.injury.pain > 0
+    }));
 }
 
 #[test]
@@ -485,12 +574,12 @@ fn parses_conversation_meeting_fields() {
       "relation_delta_hint": {"trust": 1, "friendship": 0, "resentment": 0, "attraction": 0, "moral_debt": 0, "reputation": 0},
       "tone": "baixo",
       "risk_shift": 1,
-      "propose_meeting": {"invitee_id": 2, "place_id": "building:7", "scheduled_day": 1, "scheduled_time": "18:30", "purpose": "negociar apoio"},
+      "propose_meeting": {"invitee_ids": [2], "place_id": "building:7", "scheduled_day": 1, "scheduled_time": "18:30", "purpose": "negociar apoio"},
       "meeting_response": {"meeting_id": 4, "accept": true, "reason": "convem ouvir"}
     }"#;
     let parsed = parse_conversation_turn_json(payload).unwrap();
     let meeting = parsed.propose_meeting.unwrap();
-    assert_eq!(meeting.invitee_id, 2);
+    assert_eq!(meeting.invitee_ids, vec![2]);
     assert_eq!(meeting.place_id, "building:7");
     assert_eq!(meeting.scheduled_time, "18:30");
     let response = parsed.meeting_response.unwrap();
@@ -505,17 +594,24 @@ fn snapshot_persists_scheduled_meetings() {
         .push(medieval_village_llm::world_model::ScheduledMeeting {
             id: 1,
             proposer_id: 1,
-            invitee_id: 2,
+            invitee_ids: vec![2],
             place_id: "special:external_market".to_string(),
             scheduled_day: 1,
             scheduled_tick: 10,
             purpose: "testar persistencia".to_string(),
             status: ScheduledMeetingStatus::Accepted,
             created_tick: 0,
-            response_tick: Some(0),
+            responses: vec![
+                medieval_village_llm::world_model::MeetingParticipantResponse {
+                    agent_id: 2,
+                    accept: true,
+                    reason: "aceito".to_string(),
+                    response_tick: 0,
+                },
+            ],
         });
     let snapshot = sim.snapshot();
-    assert_eq!(snapshot.schema_version, 22);
+    assert_eq!(snapshot.schema_version, SNAPSHOT_SCHEMA_VERSION);
     assert_eq!(snapshot.scheduled_meetings.len(), 1);
     let mut restored = Simulation::from_snapshot(snapshot);
     assert_eq!(restored.meetings_overview().len(), 1);
@@ -901,7 +997,7 @@ fn conversation_requires_adjacency_and_alternates_turns() {
     let conversation = snapshot
         .conversations
         .iter()
-        .find(|conversation| conversation.participants == [1, 2])
+        .find(|conversation| conversation.participant_ids == vec![1, 2])
         .expect("conversation should exist");
     let conversation_id = conversation.id;
     assert_eq!(conversation.current_speaker_id, 1);
@@ -931,7 +1027,7 @@ fn conversation_requires_adjacency_and_alternates_turns() {
     let conversation = snapshot
         .conversations
         .iter()
-        .find(|conversation| conversation.participants == [1, 2])
+        .find(|conversation| conversation.participant_ids == vec![1, 2])
         .expect("conversation should still exist");
     assert_eq!(conversation.turn_count, 2);
     assert_eq!(conversation.current_speaker_id, 1);
@@ -950,6 +1046,14 @@ fn conversation_rumor_creates_belief_and_information_context() {
         .debug_try_social(1, 2, &MockLlmAdapter)
         .expect("open conversation");
     let conversation_id = simulation.snapshot().conversations[0].id;
+    let corruption_before = simulation
+        .snapshot()
+        .agents
+        .iter()
+        .find(|agent| agent.id == 2)
+        .expect("listener before rumor")
+        .institutional_perception
+        .perceived_corruption;
     let output = InstrumentedAdapter::rumor_turn_output(
         3,
         "corrupcao",
@@ -980,7 +1084,12 @@ fn conversation_rumor_creates_belief_and_information_context() {
             .iter()
             .any(|belief| belief.rumor_id == rumor.id && belief.belief >= 50)
     );
-    assert!(listener.institutional_perception.perceived_corruption > 0);
+    assert!(
+        listener.institutional_perception.perceived_corruption > corruption_before,
+        "corruption should increase from {} to {}",
+        corruption_before,
+        listener.institutional_perception.perceived_corruption
+    );
     let inputs = state.conversation_inputs.lock().unwrap();
     assert!(inputs.iter().any(|input| {
         input
@@ -1019,7 +1128,7 @@ fn rumor_retransmission_increases_distortion_and_preserves_chain() {
     resumed.conversations.clear();
     for agent in &mut resumed.agents {
         agent.active_conversation_id = None;
-        agent.conversation_partner_id = None;
+        agent.conversation_participant_ids.clear();
         agent.social_cooldown_until = 0;
     }
     let mut simulation = Simulation::from_snapshot(resumed);
@@ -1037,7 +1146,7 @@ fn rumor_retransmission_increases_distortion_and_preserves_chain() {
         .snapshot()
         .conversations
         .iter()
-        .find(|conversation| conversation.participants == [2, 4])
+        .find(|conversation| conversation.participant_ids == vec![2, 4])
         .expect("second conversation")
         .id;
     let (adapter, _) = InstrumentedAdapter::new();
@@ -1089,7 +1198,8 @@ fn conversation_shared_story_creates_cultural_story_and_belief() {
     let snapshot = simulation.snapshot();
     let story = snapshot
         .cultural_stories
-        .first()
+        .iter()
+        .find(|story| story.title == "A ponte dos corajosos")
         .expect("cultural story created");
     assert_eq!(story.title, "A ponte dos corajosos");
     assert_eq!(
@@ -1115,11 +1225,14 @@ fn conversation_shared_story_creates_cultural_story_and_belief() {
             .any(|belief| belief.story_id == story.id && belief.belief >= 20)
     );
     let inputs = state.conversation_inputs.lock().unwrap();
-    assert!(
-        inputs
+    assert!(inputs.iter().any(|input| {
+        input
+            .cultural_context
+            .known_stories
             .iter()
-            .any(|input| input.cultural_context.known_stories.is_empty())
-    );
+            .any(|story| story.contains("fundacao") || story.contains("Fundacao"))
+            || !input.cultural_context.known_stories.is_empty()
+    }));
 }
 
 #[test]
@@ -1288,14 +1401,14 @@ fn persists_and_restores_spatial_snapshot() {
         .expect("advance one social turn");
     persistence.save(&mut simulation, "manual").expect("save");
     let snapshot = persistence.load_latest().expect("load").expect("snapshot");
-    assert_eq!(snapshot.schema_version, 22);
+    assert_eq!(snapshot.schema_version, SNAPSHOT_SCHEMA_VERSION);
     assert!(!snapshot.spatial.buildings.is_empty());
     assert!(!snapshot.spatial.fixtures.is_empty());
     assert!(snapshot.agents.iter().all(|agent| agent.position.x >= 0));
     let conversation = snapshot
         .conversations
         .iter()
-        .find(|conversation| conversation.participants == [1, 2])
+        .find(|conversation| conversation.participant_ids == vec![1, 2])
         .expect("conversation should persist");
     assert_eq!(conversation.turn_count, 1);
     assert_eq!(conversation.current_speaker_id, 2);
@@ -1333,13 +1446,13 @@ fn parallelizes_conversation_turns_for_multiple_active_conversations() {
     let first_id = before
         .conversations
         .iter()
-        .find(|conversation| conversation.participants == [1, 2])
+        .find(|conversation| conversation.participant_ids == vec![1, 2])
         .expect("first conversation")
         .id;
     let second_id = before
         .conversations
         .iter()
-        .find(|conversation| conversation.participants == [3, 4])
+        .find(|conversation| conversation.participant_ids == vec![3, 4])
         .expect("second conversation")
         .id;
 
@@ -1404,13 +1517,13 @@ fn conversation_batch_ends_timed_out_conversation_without_aborting_others() {
     let first_id = before
         .conversations
         .iter()
-        .find(|conversation| conversation.participants == [1, 2])
+        .find(|conversation| conversation.participant_ids == vec![1, 2])
         .expect("first conversation")
         .id;
     let second_id = before
         .conversations
         .iter()
-        .find(|conversation| conversation.participants == [3, 4])
+        .find(|conversation| conversation.participant_ids == vec![3, 4])
         .expect("second conversation")
         .id;
 
@@ -1511,7 +1624,7 @@ fn schema_error_in_conversation_batch_remains_fatal() {
         .snapshot()
         .conversations
         .iter()
-        .find(|conversation| conversation.participants == [1, 2])
+        .find(|conversation| conversation.participant_ids == vec![1, 2])
         .expect("conversation")
         .id;
 
@@ -2192,17 +2305,20 @@ fn leader_decree_creates_typed_policy_act() {
     let act = snapshot
         .policy_acts
         .iter()
-        .find(|act| act.agenda_tag == "imposto_guerra")
+        .rev()
+        .find(|act| {
+            act.agenda_tag == "imposto_guerra"
+                && act.effects.iter().any(|effect| {
+                    matches!(
+                        effect,
+                        PolicyEffect::TaxModifier {
+                            multiplier_percent: 200
+                        }
+                    )
+                })
+        })
         .expect("typed policy act");
     assert_eq!(act.status, PolicyActStatus::Active);
-    assert!(act.effects.iter().any(|effect| {
-        matches!(
-            effect,
-            PolicyEffect::TaxModifier {
-                multiplier_percent: 200
-            }
-        )
-    }));
     assert!(
         snapshot
             .political_issues
@@ -2899,7 +3015,7 @@ fn async_decision_processing_permits_independent_progress() {
 fn agricultural_crop_growth_and_harvesting_cycle() {
     let (adapter, _) = InstrumentedAdapter::new();
     let mut config = SimulationConfig::default();
-    config.max_agents = 0; // Ensure we have a farmer
+    config.max_agents = 10; // Ensure we have enough historical agents to include a farmer
     let mut simulation = Simulation::seeded(config);
 
     // 1. Initial State: No crops planted

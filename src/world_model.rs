@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Single source of truth for persisted snapshot compatibility.
+pub const SNAPSHOT_SCHEMA_VERSION: u32 = 26;
+
 // ===== Identifiers =====
 
 pub type BuildingId = u64;
@@ -2152,7 +2155,8 @@ pub struct PoliticalFaction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationTurn {
     pub speaker_id: u64,
-    pub listener_id: u64,
+    #[serde(default)]
+    pub addressed_agent_ids: Vec<u64>,
     pub tick: u64,
     pub utterance: String,
     pub speech_act: String,
@@ -2166,14 +2170,22 @@ pub struct ConversationParticipantState {
     pub social_goal: String,
     pub last_speech_act: Option<String>,
     pub last_emotion: Option<String>,
+    #[serde(default)]
+    pub engaged: bool,
+    #[serde(default)]
+    pub wants_to_continue: bool,
+    #[serde(default)]
+    pub last_addressed_tick: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationState {
     pub id: ConversationId,
-    pub participants: [u64; 2],
+    pub participant_ids: Vec<u64>,
     pub initiator_id: u64,
     pub current_speaker_id: u64,
+    pub last_speaker_id: Option<u64>,
+    pub turn_order_cursor: usize,
     pub started_at_tick: u64,
     pub turn_count: u32,
     pub max_turns: u32,
@@ -2197,18 +2209,27 @@ pub enum ScheduledMeetingStatus {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MeetingParticipantResponse {
+    pub agent_id: u64,
+    pub accept: bool,
+    pub reason: String,
+    pub response_tick: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduledMeeting {
     pub id: ScheduledMeetingId,
     pub proposer_id: u64,
-    pub invitee_id: u64,
+    pub invitee_ids: Vec<u64>,
     pub place_id: String,
     pub scheduled_day: u32,
     pub scheduled_tick: u32,
     pub purpose: String,
     pub status: ScheduledMeetingStatus,
     pub created_tick: u64,
-    pub response_tick: Option<u64>,
+    #[serde(default)]
+    pub responses: Vec<MeetingParticipantResponse>,
 }
 
 // ===== Events and snapshots =====
@@ -2313,7 +2334,8 @@ pub struct AgentSnapshot {
     pub current_building_id: Option<BuildingId>,
     pub current_room_id: Option<RoomId>,
     pub active_conversation_id: Option<ConversationId>,
-    pub conversation_partner_id: Option<u64>,
+    #[serde(default)]
+    pub conversation_participant_ids: Vec<u64>,
     pub last_social_act: Option<String>,
     pub social_cooldown_until: u64,
     pub last_intent: Option<AgentIntent>,
@@ -2358,7 +2380,7 @@ pub struct AgentSnapshot {
     pub gender: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct HistoricalBootstrapSummary {
     pub years_simulated: u32,
     pub founding_households: usize,
@@ -2367,6 +2389,18 @@ pub struct HistoricalBootstrapSummary {
     pub major_dynasties: Vec<String>,
     pub major_conflicts: Vec<String>,
     pub major_foundations: Vec<String>,
+    #[serde(default)]
+    pub recent_crises: Vec<String>,
+    #[serde(default)]
+    pub active_decrees: Vec<String>,
+    #[serde(default)]
+    pub dominant_stories: Vec<String>,
+    #[serde(default)]
+    pub average_territorial_stability: i32,
+    #[serde(default)]
+    pub dominant_households: Vec<String>,
+    #[serde(default)]
+    pub recent_wars: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

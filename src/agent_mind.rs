@@ -266,6 +266,10 @@ pub struct ConversationContextInput {
     pub current_area: String,
     pub current_building: Option<String>,
     pub current_room: Option<String>,
+    pub current_room_place_id: Option<String>,
+    pub participant_ids: Vec<u64>,
+    pub participant_names: Vec<String>,
+    pub group_size: usize,
     pub max_turns: u32,
     pub turn_count: u32,
     pub turns_remaining: u32,
@@ -282,6 +286,7 @@ pub struct ConversationObservedAgentInput {
     pub perceived_status: String,
     pub visible_equipment_summary: String,
     pub psychological_summary: PsychologicalContextInput,
+    pub distance_tiles: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -318,12 +323,17 @@ pub struct ConversationTurnInput {
     pub humiliation_risk_summary: String,
     pub deference_or_revenge_summary: String,
     pub audience_summary: String,
-    pub listener: ConversationObservedAgentInput,
+    pub audience_size: usize,
+    pub is_group_conversation: bool,
+    pub public_pressure_summary: String,
+    pub participants: Vec<ConversationObservedAgentInput>,
     pub context: ConversationContextInput,
     pub turn_trigger: String,
     pub relational_context: RelationalHistoryInput,
     pub recent_memories: Vec<RelevantMemoryInput>,
     pub recent_turns: Vec<String>,
+    pub recent_speakers: Vec<u64>,
+    pub recent_targets: Vec<u64>,
     pub chaos_pressure: u32,
     pub personality_traits: Vec<String>,
     pub trauma_traits: Vec<String>,
@@ -387,7 +397,7 @@ pub struct ProposedEscrow {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProposedMeeting {
-    pub invitee_id: u64,
+    pub invitee_ids: Vec<u64>,
     pub place_id: String,
     pub scheduled_day: u32,
     pub scheduled_time: String,
@@ -411,6 +421,8 @@ pub struct ConversationTurnOutput {
     pub relation_delta_hint: RelationDelta,
     pub tone: Option<String>,
     pub risk_shift: Option<i32>,
+    #[serde(default)]
+    pub addressed_agent_ids: Vec<u64>,
     #[serde(default)]
     pub economic_transfer: Option<EconomicTransfer>,
     #[serde(default)]
@@ -736,6 +748,8 @@ pub(crate) fn parse_conversation_turn_json_with_notes(
     let propose_meeting = parse_proposed_meeting(object.get("propose_meeting"), &mut notes);
     let meeting_response = parse_meeting_response(object.get("meeting_response"), &mut notes);
 
+    let addressed_agent_ids = parse_target_agent_ids(object.get("addressed_agent_ids"), &mut notes);
+
     Ok((
         ConversationTurnOutput {
             utterance,
@@ -746,6 +760,7 @@ pub(crate) fn parse_conversation_turn_json_with_notes(
             relation_delta_hint,
             tone,
             risk_shift,
+            addressed_agent_ids,
             economic_transfer,
             revealed_secret,
             make_promise,
@@ -878,6 +893,24 @@ fn parse_strict_intent_kind(value: Option<&Value>) -> Result<IntentKind> {
             "decision payload field `kind` has invalid value `{raw}`"
         )),
     }
+}
+
+fn parse_target_agent_ids(value: Option<&Value>, notes: &mut Vec<String>) -> Vec<u64> {
+    let Some(value) = value else {
+        return Vec::new();
+    };
+    if let Some(array) = value.as_array() {
+        let mut ids = Vec::new();
+        for entry in array {
+            if let Some(id) = parse_target_agent(Some(entry), notes) {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+        return ids;
+    }
+    parse_target_agent(Some(value), notes).into_iter().collect()
 }
 
 fn parse_target_agent(value: Option<&Value>, notes: &mut Vec<String>) -> Option<u64> {
@@ -1769,7 +1802,11 @@ fn parse_proposed_meeting(
             return None;
         }
     };
-    let invitee_id = parse_target_agent(obj.get("invitee_id"), notes)?;
+    let invitee_ids = parse_target_agent_ids(obj.get("invitee_ids"), notes);
+    if invitee_ids.is_empty() {
+        notes.push("propose_meeting ignorado: invitee_ids vazio ou invalido".to_string());
+        return None;
+    }
     let place_id = obj
         .get("place_id")
         .and_then(|v| v.as_str())
@@ -1797,7 +1834,7 @@ fn parse_proposed_meeting(
         .unwrap_or("encontro")
         .to_string();
     Some(ProposedMeeting {
-        invitee_id,
+        invitee_ids,
         place_id,
         scheduled_day,
         scheduled_time,

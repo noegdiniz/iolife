@@ -60,21 +60,21 @@ pub(super) struct PreparedDecisionRequest {
 pub(super) struct PreparedConversationTurn {
     pub(super) conversation_id: ConversationId,
     pub(super) speaker_id: u64,
-    pub(super) listener_id: u64,
+    pub(super) primary_target_id: Option<u64>,
     pub(super) input: ConversationTurnInput,
 }
 
 pub(super) struct CompletedConversationTurn {
     pub(super) conversation_id: ConversationId,
     pub(super) speaker_id: u64,
-    pub(super) listener_id: u64,
+    pub(super) primary_target_id: Option<u64>,
     pub(super) output: ConversationTurnOutput,
 }
 
 pub(super) struct InterruptedConversationTurn {
     pub(super) conversation_id: ConversationId,
     pub(super) speaker_id: u64,
-    pub(super) listener_id: u64,
+    pub(super) primary_target_id: Option<u64>,
     pub(super) error: LlmError,
 }
 
@@ -785,7 +785,7 @@ impl Simulation {
                         CompletedConversationTurn {
                             conversation_id,
                             speaker_id: turn.speaker_id,
-                            listener_id: turn.listener_id,
+                            primary_target_id: turn.primary_target_id,
                             output,
                         },
                     ));
@@ -796,7 +796,7 @@ impl Simulation {
                             InterruptedConversationTurn {
                                 conversation_id,
                                 speaker_id: turn.speaker_id,
-                                listener_id: turn.listener_id,
+                                primary_target_id: turn.primary_target_id,
                                 error,
                             },
                         ));

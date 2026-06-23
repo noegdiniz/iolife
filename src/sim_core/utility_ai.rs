@@ -1512,28 +1512,28 @@ impl Simulation {
         }
         if let Some(target_id) = psychology.last_public_humiliation_by
             && self
-                .agent_distance_from_immutable(position, target_id)?
+                .agent_distance_from_immutable(position, target_id)
                 .is_some_and(|d| d <= 3)
         {
             return Ok(Some(target_id));
         }
         if let Some(target_id) = psychology.active_revenge_target
             && self
-                .agent_distance_from_immutable(position, target_id)?
+                .agent_distance_from_immutable(position, target_id)
                 .is_some_and(|d| d <= 4)
         {
             return Ok(Some(target_id));
         }
         if let Some(target_id) = promise_target
             && self
-                .agent_distance_from_immutable(position, target_id)?
+                .agent_distance_from_immutable(position, target_id)
                 .is_some_and(|d| d <= 4)
         {
             return Ok(Some(target_id));
         }
         if let Some(target_id) = legal_target
             && self
-                .agent_distance_from_immutable(position, target_id)?
+                .agent_distance_from_immutable(position, target_id)
                 .is_some_and(|d| d <= 5)
         {
             return Ok(Some(target_id));

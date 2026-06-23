@@ -68,6 +68,33 @@ impl Simulation {
                     summary.major_foundations.join(", ")
                 ));
             }
+            if summary.average_territorial_stability != 0 {
+                lines.push(format!(
+                    "estabilidade_territorial_media={}",
+                    summary.average_territorial_stability
+                ));
+            }
+            if !summary.recent_crises.is_empty() {
+                lines.push(format!("crises={}", summary.recent_crises.join(", ")));
+            }
+            if !summary.active_decrees.is_empty() {
+                lines.push(format!("decretos={}", summary.active_decrees.join(", ")));
+            }
+            if !summary.dominant_stories.is_empty() {
+                lines.push(format!(
+                    "historias_dominantes={}",
+                    summary.dominant_stories.join(", ")
+                ));
+            }
+            if !summary.dominant_households.is_empty() {
+                lines.push(format!(
+                    "casas_dominantes={}",
+                    summary.dominant_households.join(", ")
+                ));
+            }
+            if !summary.recent_wars.is_empty() {
+                lines.push(format!("guerras={}", summary.recent_wars.join(", ")));
+            }
         }
         lines
     }
@@ -592,9 +619,15 @@ impl Simulation {
                 let proposer = self
                     .agent_name(meeting.proposer_id)
                     .unwrap_or_else(|_| format!("Agente {}", meeting.proposer_id));
-                let invitee = self
-                    .agent_name(meeting.invitee_id)
-                    .unwrap_or_else(|_| format!("Agente {}", meeting.invitee_id));
+                let invitee = meeting
+                    .invitee_ids
+                    .iter()
+                    .map(|agent_id| {
+                        self.agent_name(*agent_id)
+                            .unwrap_or_else(|_| format!("Agente {}", agent_id))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 let place = self
                     .place_by_id(&meeting.place_id)
                     .map(|place| place.display_name)
@@ -708,14 +741,13 @@ impl Simulation {
             let work_establishment = core
                 .work_building_id
                 .and_then(|building_id| self.establishment_by_building(building_id));
-            let reactive_summary = self
-                .current_reactive_psychology_summary(core.id)
-                .unwrap_or_default();
+            let reactive_summary: crate::sim_core::utility_ai::ReactivePsychologySummary =
+                Default::default();
             let scheduled_meetings = self
                 .scheduled_meetings
                 .iter()
                 .filter(|meeting| {
-                    (meeting.proposer_id == core.id || meeting.invitee_id == core.id)
+                    (meeting.proposer_id == core.id || meeting.invitee_ids.contains(&core.id))
                         && matches!(
                             meeting.status,
                             ScheduledMeetingStatus::Proposed
@@ -814,9 +846,11 @@ impl Simulation {
                     .map(|(id, relation)| (*id, relation.clone()))
                     .collect(),
                 active_conversation_id: conversation.active_conversation_id,
-                conversation_partner_name: conversation
-                    .conversation_partner_id
-                    .and_then(|partner_id| agent_name_map.get(&partner_id).cloned()),
+                conversation_participant_names: conversation
+                    .conversation_participant_ids
+                    .iter()
+                    .filter_map(|partner_id| agent_name_map.get(partner_id).cloned())
+                    .collect(),
                 conversation_turn_count: conversation.active_conversation_id.and_then(
                     |conversation_id| {
                         conversation_map
@@ -991,7 +1025,7 @@ impl Simulation {
         self.conversations
             .iter()
             .filter(|conversation| conversation.status == ConversationStatus::Active)
-            .flat_map(|conversation| conversation.participants)
+            .flat_map(|conversation| conversation.participant_ids.clone())
             .collect()
     }
 

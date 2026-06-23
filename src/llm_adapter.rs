@@ -196,12 +196,13 @@ Use EXATAMENTE este shape:
     "condition_secret_id": numero inteiro
   },
   "propose_meeting": null ou {
-    "invitee_id": numero inteiro,
+    "invitee_ids": [numeros inteiros],
     "place_id": "place_id exato de world_places",
     "scheduled_day": numero inteiro,
     "scheduled_time": "HH:MM",
     "purpose": "string curta"
   },
+  "addressed_agent_ids": [numeros inteiros validos entre os participantes] ou [],
   "meeting_response": null ou {
     "meeting_id": numero inteiro,
     "accept": boolean,
@@ -219,13 +220,14 @@ Tipos obrigatorios:
 - trust/friendship/resentment/attraction/moral_debt/reputation: inteiros pequenos entre -2 e 2
 - tone: string ou null
 - risk_shift: inteiro pequeno entre -5 e 5, never string
+- addressed_agent_ids: array de inteiros validos entre os participantes da conversa, ou []
 - economic_transfer: null ou objeto contendo recipient_id (inteiro/null), amount (inteiro), resource_id ("moedas"/"graos"), use_public_treasury (boolean)
 - revealed_secret: null ou objeto contendo secret_id (inteiro) e recipient_id (inteiro)
 - make_promise: null ou objeto com recipient_id (inteiro), condition_type ("DeliverResource"/"VoteForPolicy"/"KeepSecret"), resource_id/amount/policy_domain/policy_value/secret_id (valores ou null) e duration_ticks (inteiro)
 - spread_rumor: null ou objeto com target_agent_id (inteiro), topic (string), claim (string curta opcional) e is_true (boolean)
 - shared_story: null ou objeto com story_id (inteiro/null), title (string/null), version (string curta obrigatoria), kind (string/null), tone (string/null), moral (string/null), tags (array de strings)
 - escrow_deposit: null ou objeto com target_agent_id (inteiro), resource_id ("moedas"/"graos"), amount (inteiro) e condition_secret_id (inteiro)
-- propose_meeting: null ou objeto com invitee_id (inteiro), place_id (string exata de world_places), scheduled_day (inteiro), scheduled_time ("HH:MM") e purpose (string curta)
+- propose_meeting: null ou objeto com invitee_ids (array de inteiros validos), place_id (string exata de world_places), scheduled_day (inteiro), scheduled_time ("HH:MM") e purpose (string curta)
 - meeting_response: null ou objeto com meeting_id (inteiro), accept (boolean) e reason (string curta)
 
 Regras obrigatorias:
@@ -241,7 +243,7 @@ Regras obrigatorias:
 - Se usar spread_rumor, topic deve ser categoria curta e claim deve ser a alegacao concreta em uma frase curta.
 - Historias culturais: voce pode contar, reinterpretar, negar ou evitar uma historia conhecida em cultural_context. Se usar shared_story, nao decida se ela vira verdade ou norma; o motor calcula forca cultural, distorcao e efeitos.
 - Se usar shared_story, version deve ser uma frase curta e concreta, diferente de rumor factual recente.
-- Encontros: voce pode propor ou responder a encontro, mas qualquer local estruturado DEVE usar place_id exato de world_places. O motor valida horario futuro, pathfinding e presenca fisica.
+- Encontros: voce pode propor ou responder a encontro, mas qualquer local estruturado DEVE usar place_id exato de world_places. Se propuser encontro em grupo, use apenas invitee_ids validos do grupo atual. O motor valida horario futuro, pathfinding e presenca fisica.
 
 Regras de Diálogo e Manipulação:
 - NUNCA participe de conversas fúteis, casuais ou conversas fiadas amigáveis sem interesse prático.
@@ -564,7 +566,11 @@ impl LlmAdapter for MockLlmAdapter {
         &self,
         input: &ConversationTurnInput,
     ) -> LlmResult<ConversationTurnOutput> {
-        let relation = &input.listener.relation;
+        let primary_listener = input.participants.first();
+        let fallback_relation = crate::world_model::AgentRelation::default();
+        let relation = primary_listener
+            .map(|listener| &listener.relation)
+            .unwrap_or(&fallback_relation);
         let hostile = relation.resentment > 35
             || input.speaker_state.stress > 70
             || !input.relational_context.unresolved_offenses.is_empty();
@@ -582,17 +588,26 @@ impl LlmAdapter for MockLlmAdapter {
         let mut utterance = if hostile {
             format!(
                 "{} encara {} e cobra explicacoes.",
-                input.speaker_name, input.listener.name
+                input.speaker_name,
+                primary_listener
+                    .map(|listener| listener.name.as_str())
+                    .unwrap_or("o grupo")
             )
         } else if friendly {
             format!(
                 "{} fala com {} em tom acolhedor.",
-                input.speaker_name, input.listener.name
+                input.speaker_name,
+                primary_listener
+                    .map(|listener| listener.name.as_str())
+                    .unwrap_or("o grupo")
             )
         } else {
             format!(
                 "{} testa o humor de {} com uma frase curta.",
-                input.speaker_name, input.listener.name
+                input.speaker_name,
+                primary_listener
+                    .map(|listener| listener.name.as_str())
+                    .unwrap_or("o grupo")
             )
         };
         for part in &input.body_parts {
@@ -663,6 +678,10 @@ impl LlmAdapter for MockLlmAdapter {
                 "medido".to_string()
             }),
             risk_shift: Some(if hostile { 2 } else { -1 }),
+            addressed_agent_ids: primary_listener
+                .into_iter()
+                .map(|listener| listener.id)
+                .collect(),
             economic_transfer: None,
             revealed_secret: None,
             make_promise: None,

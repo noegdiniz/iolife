@@ -1347,10 +1347,45 @@ fn generate_procedural_world(
     }
 
     let spatial = builder.finish();
-    let materialized = materialize_history(&history, &spatial, &village_layouts, &config, catalog);
+    let mut materialized =
+        materialize_history(&history, &spatial, &village_layouts, &config, catalog);
+
+    if materialized.feudal_contracts.is_empty() && materialized.agents.len() >= 2 {
+        let suzerain_agent_id = materialized.agents[0].id;
+        if let Some(vassal_agent_id) = materialized
+            .agents
+            .iter()
+            .find(|agent| agent.id != suzerain_agent_id)
+            .map(|agent| agent.id)
+        {
+            materialized.feudal_contracts.push(FeudalContract {
+                id: materialized.next_feudal_contract_id,
+                suzerain_agent_id,
+                vassal_agent_id,
+                territory_id: materialized
+                    .territories
+                    .first()
+                    .map(|territory| territory.id),
+                holding_id: materialized
+                    .estate_holdings
+                    .first()
+                    .map(|holding| holding.id),
+                tribute_due_per_day: 2,
+                levy_duty: 1,
+                judicial_aid_duty: 1,
+                maintenance_duty: 1,
+                loyalty: 42,
+                coercion: 25,
+                perceived_legitimacy: 35,
+                status: FeudalContractStatus::Active,
+                last_updated_day: 1,
+            });
+            materialized.next_feudal_contract_id += 1;
+        }
+    }
 
     SimulationSnapshot {
-        schema_version: 22,
+        schema_version: SNAPSHOT_SCHEMA_VERSION,
         catalog_version: catalog.version,
         village_name: config.village_name,
         world_history_years_simulated: history.years_simulated,
@@ -1634,6 +1669,36 @@ fn materialize_history(
                     role_id: slot.role_id.to_string(),
                     work_building_id: slot.work_building_id,
                     preferred_home_slot_index: slot.home_slot_index,
+                    home_building_id: None,
+                    home_bed: None,
+                });
+                next_agent_id += 1;
+            }
+        }
+        let selected_in_settlement = selected_agent_seeds
+            .iter()
+            .filter(|seed| seed.settlement_index == layout.index)
+            .count();
+        if selected_in_settlement < 2 {
+            let fallback_people = settlement
+                .people
+                .iter()
+                .filter(|person| person.alive && !used_people.contains(&person.id))
+                .take(2 - selected_in_settlement)
+                .map(|person| person.id)
+                .collect::<Vec<_>>();
+            for person_id in fallback_people {
+                if next_agent_id > config.max_agents as u64 {
+                    break;
+                }
+                used_people.insert(person_id);
+                selected_agent_seeds.push(SelectedAgentSeed {
+                    new_id: next_agent_id,
+                    settlement_index: layout.index,
+                    historical_person_id: person_id,
+                    role_id: "campones".to_string(),
+                    work_building_id: layout.farm_id,
+                    preferred_home_slot_index: 0,
                     home_building_id: None,
                     home_bed: None,
                 });
@@ -2032,7 +2097,7 @@ fn materialize_history(
             profile: build_profile(person, household, &seed.role_id),
             state: build_agent_state(person, household, &seed.role_id),
             life_status: AgentLifeStatus::Vivo,
-            injury: InjuryState::default(),
+            injury: initial_historical_injury(person, household),
             institutional_perception: build_institutional_perception(
                 person,
                 household,
@@ -2061,7 +2126,7 @@ fn materialize_history(
             current_building_id: Some(home_building_id.unwrap_or(layout.home_building_ids[0])),
             current_room_id: room_at_position(spatial, position),
             active_conversation_id: None,
-            conversation_partner_id: None,
+            conversation_participant_ids: Vec::new(),
             last_social_act: None,
             social_cooldown_until: 0,
             last_intent: None,
@@ -2245,13 +2310,28 @@ fn materialize_history(
             continue;
         };
         let polity_id = polity_id_by_settlement[&layout.index];
-        let lord_agent_id = settlement
+        let mut lord_agent_id = settlement
             .leader_person_id
             .and_then(|id| old_to_new_id.get(&id).copied());
-        let field_vassal_agent_id = settlement
+        if lord_agent_id.is_none() {
+            lord_agent_id = selected_agent_seeds
+                .iter()
+                .find(|seed| seed.settlement_index == layout.index)
+                .map(|seed| seed.new_id);
+        }
+        let mut field_vassal_agent_id = settlement
             .field_vassal_person_id
             .and_then(|id| old_to_new_id.get(&id).copied())
             .or_else(|| role_agent_id(layout.index, "campones", &selected_agent_seeds));
+        if field_vassal_agent_id.is_none() || field_vassal_agent_id == lord_agent_id {
+            field_vassal_agent_id = selected_agent_seeds
+                .iter()
+                .find(|seed| {
+                    seed.settlement_index == layout.index && Some(seed.new_id) != lord_agent_id
+                })
+                .map(|seed| seed.new_id)
+                .or(field_vassal_agent_id);
+        }
         let steward_agent_id = settlement
             .steward_person_id
             .and_then(|id| old_to_new_id.get(&id).copied())
@@ -2528,6 +2608,35 @@ fn materialize_history(
                 });
                 out.next_succession_crisis_id += 1;
             }
+        }
+    }
+
+    if out.feudal_contracts.is_empty() && out.agents.len() >= 2 {
+        let suzerain_agent_id = out.agents[0].id;
+        let vassal_agent_id = out
+            .agents
+            .iter()
+            .find(|agent| agent.id != suzerain_agent_id)
+            .map(|agent| agent.id)
+            .unwrap_or(suzerain_agent_id);
+        if suzerain_agent_id != vassal_agent_id {
+            out.feudal_contracts.push(FeudalContract {
+                id: out.next_feudal_contract_id,
+                suzerain_agent_id,
+                vassal_agent_id,
+                territory_id: out.territories.first().map(|territory| territory.id),
+                holding_id: out.estate_holdings.first().map(|holding| holding.id),
+                tribute_due_per_day: 2,
+                levy_duty: 1,
+                judicial_aid_duty: 1,
+                maintenance_duty: 1,
+                loyalty: 42,
+                coercion: 25,
+                perceived_legitimacy: 35,
+                status: FeudalContractStatus::Active,
+                last_updated_day: 1,
+            });
+            out.next_feudal_contract_id += 1;
         }
     }
 
@@ -3452,8 +3561,8 @@ fn build_profile(
         long_term_desires: role_desires(role_id, household),
         moral_tolerances: role_moral_tolerances(role_id, person),
         social_style: role_social_style(role_id, person),
-        trauma_traits: if person.trauma >= 25 {
-            vec!["carrega trauma herdado".to_string()]
+        trauma_traits: if person.trauma + household.trauma_memory + household.war_exposure >= 25 {
+            vec!["carrega trauma historico e familiar".to_string()]
         } else {
             Vec::new()
         },
@@ -3466,14 +3575,34 @@ fn build_agent_state(
     role_id: &str,
 ) -> AgentState {
     AgentState {
-        mood: (50 + person.sociability / 6 - household.rage / 4).clamp(0, 100),
-        energy: (55 + person.diligence / 4 - person.trauma / 5).clamp(20, 100),
-        health: (75 - person.trauma / 4).clamp(35, 100),
+        mood: (50 + person.sociability / 6 - household.rage / 4 + household.prestige / 20)
+            .clamp(0, 100),
+        energy: (55 + person.diligence / 4 - (person.trauma + household.trauma_memory) / 8)
+            .clamp(20, 100),
+        health: (75 - person.trauma / 4 - household.war_exposure / 10).clamp(35, 100),
         hunger: (10 + household.hardship * 6).clamp(0, 100),
-        stress: (15 + household.hardship * 5 + person.trauma / 2).clamp(0, 100),
+        stress: (15 + household.hardship * 5 + person.trauma / 2 + household.war_exposure / 3)
+            .clamp(0, 100),
         current_focus: role_focus(role_id).to_string(),
         active_goals: vec![derive_long_term_plan(role_id, household, None)],
     }
+}
+
+fn initial_historical_injury(
+    person: &HistoricalPerson,
+    household: &HistoricalHousehold,
+) -> InjuryState {
+    let mut injury = InjuryState::default();
+    let historical_damage =
+        person.trauma / 4 + household.war_exposure / 3 + household.trauma_memory / 5;
+    if historical_damage >= 12 {
+        injury.pain = historical_damage.clamp(1, 45);
+        injury.recovery_ticks = (historical_damage as u32 * 6).clamp(12, 240);
+    }
+    if household.war_exposure >= 35 {
+        injury.bleeding = (household.war_exposure / 18).clamp(0, 5);
+    }
+    injury
 }
 
 fn build_institutional_perception(
@@ -3500,8 +3629,13 @@ fn build_institutional_perception(
             .filter(|story| matches!(story.kind, CulturalStoryKind::CantoDeGuerra))
             .count() as i32
             * 12
-            - household.hardship * 4,
-        fear_of_authority: (10 + household.social_rank / 3 + household.rage / 2).clamp(-100, 100),
+            - household.hardship * 4
+            - household.war_exposure / 2,
+        fear_of_authority: (10
+            + household.social_rank / 3
+            + household.rage / 2
+            + household.trauma_memory / 3)
+            .clamp(-100, 100),
         perceived_corruption: (household.rage * 2 + household.feudal_arrears * 6
             - household.legitimacy)
             .clamp(-100, 100),
@@ -3524,23 +3658,30 @@ fn build_psychology(
     day: u32,
 ) -> PsychologicalState {
     let mut state = PsychologicalState {
-        grief: (person.trauma / 3).clamp(0, 100),
-        humiliation: (household.hardship * 4).clamp(0, 100),
-        fear: (person.trauma / 2 + household.rage).clamp(0, 100),
-        pride: (household.social_rank + person.legitimacy / 2).clamp(0, 100),
-        trauma: person.trauma.clamp(0, 100),
-        anger: (household.rage * 2).clamp(0, 100),
-        hope: (45 + person.diligence / 3 - household.hardship * 2).clamp(0, 100),
+        grief: ((person.trauma + household.trauma_memory) / 3).clamp(0, 100),
+        humiliation: (household.hardship * 4 + household.feudal_arrears * 3).clamp(0, 100),
+        fear: (person.trauma / 2 + household.rage + household.war_exposure / 2).clamp(0, 100),
+        pride: (household.social_rank + household.prestige / 2 + person.legitimacy / 2)
+            .clamp(0, 100),
+        trauma: (person.trauma + household.trauma_memory + household.war_exposure / 2)
+            .clamp(0, 100),
+        anger: (household.rage * 2 + household.feudal_arrears).clamp(0, 100),
+        hope: (45 + person.diligence / 3 + household.legitimacy / 5 - household.hardship * 2)
+            .clamp(0, 100),
         guilt: if role_id == "lider_local" {
             household.hardship.clamp(0, 60)
         } else {
             (person.trauma / 4).clamp(0, 50)
         },
-        status_anxiety: (household.hardship * 3 + (40 - household.social_rank).max(0))
+        status_anxiety: (household.hardship * 3
+            + (45 - household.prestige).max(0)
+            + household.feudal_arrears)
             .clamp(0, 100),
-        revenge_drive: household.rage.clamp(0, 100),
-        submission_drive: (person.trauma / 3 + household.hardship * 2).clamp(0, 100),
-        dominance_drive: (household.social_rank + person.legitimacy / 3).clamp(0, 100),
+        revenge_drive: (household.rage + household.cultural_pressure / 2).clamp(0, 100),
+        submission_drive: ((person.trauma + household.trauma_memory) / 3 + household.hardship * 2)
+            .clamp(0, 100),
+        dominance_drive: (household.social_rank + household.prestige / 2 + person.legitimacy / 3)
+            .clamp(0, 100),
         last_public_humiliation_tick: 0,
         last_public_humiliation_by: None,
         active_revenge_target: None,

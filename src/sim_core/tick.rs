@@ -336,8 +336,7 @@ impl Simulation {
                 if let Some(target_id) = intent.target_agent {
                     if self.agents_adjacent(agent_id, target_id)?
                         && self.open_conversation(
-                            agent_id,
-                            target_id,
+                            vec![agent_id, target_id],
                             intent.social_move.unwrap_or(SocialMove::Chat),
                             &intent.justification,
                         )?

@@ -1,7 +1,8 @@
 use crate::sim_core::SimulationConfig;
 use crate::world_model::{
-    CulturalStoryKind, EconomyCatalog, HistoricalBootstrapSummary, InsurrectionStage,
-    JusticeSeverity, LocalNorms, RationingPolicy, ResourceStack, WarStage,
+    CulturalStoryKind, EconomyCatalog, EstablishmentTypeDef, HistoricalBootstrapSummary,
+    InsurrectionStage, ItemAffordanceKind, JusticeSeverity, LocalNorms, RationingPolicy, RecipeDef,
+    ResourceStack, WarStage,
 };
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -146,6 +147,10 @@ pub(crate) struct HistoricalHousehold {
     pub feudal_arrears: i32,
     pub hardship: i32,
     pub legitimacy: i32,
+    pub prestige: i32,
+    pub trauma_memory: i32,
+    pub cultural_pressure: i32,
+    pub war_exposure: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -181,6 +186,9 @@ pub(crate) struct HistoricalTerritoryState {
     pub productivity: i32,
     pub controller_settlement_id: usize,
     pub pressure: i32,
+    pub security: i32,
+    pub cultural_pressure: i32,
+    pub war_exposure: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -440,6 +448,10 @@ pub(crate) fn simulate_world_history(
                 feudal_arrears: 0,
                 hardship: 0,
                 legitimacy: rng.random_range(35..=60),
+                prestige: rng.random_range(12..=36),
+                trauma_memory: 0,
+                cultural_pressure: 0,
+                war_exposure: 0,
             });
         }
 
@@ -466,6 +478,9 @@ pub(crate) fn simulate_world_history(
                     productivity: 12 + idx as i32 * 3,
                     controller_settlement_id: settlement_idx,
                     pressure: 45,
+                    security: 55,
+                    cultural_pressure: 0,
+                    war_exposure: 0,
                 })
                 .collect(),
             polity: HistoricalPolityState {
@@ -513,11 +528,18 @@ pub(crate) fn simulate_world_history(
             settlement.recent_constructions.clear();
             settlement.recent_military_demands.clear();
             settlement.recent_insurrection = None;
-            simulate_spring(settlement, year, catalog, &mut next_person_id, &mut rng);
-            simulate_summer(settlement, year, &mut rng);
+            simulate_demography_and_lineage(
+                settlement,
+                year,
+                catalog,
+                &mut next_person_id,
+                &mut rng,
+            );
+            simulate_summer(settlement, year, catalog, &mut rng);
             simulate_autumn(settlement, year, &mut rng);
         }
         simulate_winter(&mut world, year, &mut rng);
+        simulate_cultural_memory(&mut world, year);
     }
 
     for settlement in &mut world.settlements {
@@ -527,7 +549,7 @@ pub(crate) fn simulate_world_history(
     world
 }
 
-fn simulate_spring(
+fn simulate_demography_and_lineage(
     settlement: &mut HistoricalSettlement,
     year: i32,
     catalog: &EconomyCatalog,
@@ -543,7 +565,7 @@ fn simulate_spring(
 
     let mut pending_marriages = Vec::new();
     for pair in unmarried.chunks(2) {
-        if pair.len() == 2 && rng.random_bool(0.35) {
+        if pair.len() == 2 && rng.random_bool(0.55) {
             let a = settlement
                 .people
                 .iter()
@@ -599,9 +621,9 @@ fn simulate_spring(
             .expect("mother household exists");
         let household = &settlement.households[household_index];
         let fertility_boost = if household.grain > household.member_ids.len() as i32 * 3 {
-            0.22
+            0.34
         } else {
-            0.08
+            0.16
         };
         if rng.random_bool(fertility_boost) {
             let child_id = *next_person_id;
@@ -647,24 +669,53 @@ fn simulate_spring(
     }
 }
 
-fn simulate_summer(settlement: &mut HistoricalSettlement, year: i32, rng: &mut StdRng) {
+#[derive(Debug, Clone, Default)]
+struct HistoricalProductionMetrics {
+    total_grain: i32,
+    total_wood: i32,
+    total_ore: i32,
+    produced_food_units: i32,
+    tool_capacity: i32,
+    construction_capacity: i32,
+    prestige_goods: i32,
+    adult_count: i32,
+    avg_craft: i32,
+    avg_diligence: i32,
+    food_demand: i32,
+    security_need: i32,
+}
+
+fn simulate_summer(
+    settlement: &mut HistoricalSettlement,
+    year: i32,
+    catalog: &EconomyCatalog,
+    rng: &mut StdRng,
+) {
+    let metrics = simulate_aggregate_production(settlement, year, catalog, rng);
+    simulate_catalog_construction_pressure(settlement, year, catalog, &metrics);
+    simulate_historical_commerce(settlement, year, &metrics);
+}
+
+fn simulate_aggregate_production(
+    settlement: &mut HistoricalSettlement,
+    year: i32,
+    catalog: &EconomyCatalog,
+    rng: &mut StdRng,
+) -> HistoricalProductionMetrics {
     let adult_ids = living_adults(settlement, year);
+    let adult_count = adult_ids.len().max(1) as i32;
+    let field_productivity = territory_value(settlement, "campos", |state| state.productivity, 12);
+    let wood_productivity = territory_value(settlement, "lenhal", |state| state.productivity, 12);
+    let quarry_productivity =
+        territory_value(settlement, "pedreira", |state| state.productivity, 12);
     let mut total_grain = 0;
     let mut total_wood = 0;
     let mut total_ore = 0;
     let mut craft_pressure = 0;
+    let mut diligence_pressure = 0;
+    let mut food_demand = 0;
+
     for household in &mut settlement.households {
-        let members = household
-            .member_ids
-            .iter()
-            .filter(|member_id| {
-                settlement
-                    .people
-                    .iter()
-                    .find(|person| person.id == **member_id)
-                    .is_some_and(|person| person.alive)
-            })
-            .count() as i32;
         let household_adults = household
             .member_ids
             .iter()
@@ -676,32 +727,46 @@ fn simulate_summer(settlement: &mut HistoricalSettlement, year: i32, rng: &mut S
             })
             .filter(|person| person.alive && age_at(person, year) >= 16)
             .collect::<Vec<_>>();
-        let diligence: i32 = household_adults
+        let living_members = household
+            .member_ids
+            .iter()
+            .filter(|member_id| {
+                settlement
+                    .people
+                    .iter()
+                    .find(|person| person.id == **member_id)
+                    .is_some_and(|person| person.alive)
+            })
+            .count() as i32;
+        let diligence = household_adults
             .iter()
             .map(|person| person.diligence)
             .sum::<i32>()
             / household_adults.len().max(1) as i32;
-        let craft: i32 = household_adults
+        let craft = household_adults
             .iter()
             .map(|person| person.craft)
             .sum::<i32>()
             / household_adults.len().max(1) as i32;
-        let grain_gain = members.max(1) * 2
+        let grain_gain = living_members.max(1) * 2
             + diligence / 18
+            + field_productivity / 10
             + settlement
                 .active_establishments
                 .get("fazenda")
                 .copied()
                 .unwrap_or(0) as i32
             + rng.random_range(0..=3);
-        let wood_gain = members.max(1)
+        let wood_gain = living_members.max(1)
+            + wood_productivity / 12
             + settlement
                 .active_establishments
                 .get("lenhal")
                 .copied()
                 .unwrap_or(0) as i32
             + rng.random_range(0..=2);
-        let ore_gain = (members / 2).max(1)
+        let ore_gain = (living_members / 2).max(1)
+            + quarry_productivity / 14
             + settlement
                 .active_establishments
                 .get("pedreira")
@@ -711,112 +776,216 @@ fn simulate_summer(settlement: &mut HistoricalSettlement, year: i32, rng: &mut S
         household.grain += grain_gain;
         household.wood += wood_gain;
         household.ore += ore_gain;
-        household.wealth += grain_gain / 2 + craft / 20;
+        household.wealth += grain_gain / 2 + craft / 22;
+        household.prestige =
+            (household.prestige + craft / 35 + household.wealth / 90).clamp(0, 100);
         total_grain += grain_gain;
         total_wood += wood_gain;
         total_ore += ore_gain;
         craft_pressure += craft;
+        diligence_pressure += diligence;
+        food_demand += living_members.max(1) * 3;
     }
 
-    let mut new_constructions = Vec::new();
-    if adult_ids.len() >= 5
-        && total_grain >= 18
-        && !settlement.active_establishments.contains_key("padaria")
-    {
-        settlement
-            .active_establishments
-            .insert("padaria".to_string(), 1);
-        new_constructions.push((
-            "padaria",
-            "vila_central",
-            "A producao de graos sustentou a abertura de uma padaria.",
-            "deficit de alimento processado",
-        ));
+    let avg_craft = craft_pressure / adult_count;
+    let avg_diligence = diligence_pressure / adult_count;
+    let mut metrics = HistoricalProductionMetrics {
+        total_grain,
+        total_wood,
+        total_ore,
+        produced_food_units: total_grain,
+        tool_capacity: 0,
+        construction_capacity: total_wood + total_ore,
+        prestige_goods: 0,
+        adult_count,
+        avg_craft,
+        avg_diligence,
+        food_demand,
+        security_need: settlement
+            .households
+            .iter()
+            .map(|household| household.rage)
+            .sum::<i32>()
+            / settlement.households.len().max(1) as i32,
+    };
+
+    let active = settlement.active_establishments.clone();
+    for (establishment_type_id, count) in active {
+        let Some(establishment) = catalog
+            .establishment_types
+            .iter()
+            .find(|entry| entry.id == establishment_type_id)
+        else {
+            continue;
+        };
+        for recipe_id in &establishment.production_recipe_ids {
+            let Some(recipe) = recipe_by_id(catalog, recipe_id) else {
+                continue;
+            };
+            let runs = (count as i32) * (1 + (avg_craft / 45).max(0) + (avg_diligence / 70).max(0));
+            if runs <= 0 {
+                continue;
+            }
+            let input_shortage = consume_recipe_inputs(settlement, recipe, runs);
+            let efficiency = (100 - input_shortage * 18).clamp(20, 120);
+            let output_amount = recipe.output_amount * runs * efficiency / 100;
+            if output_amount <= 0 {
+                continue;
+            }
+            apply_historical_resource_output(
+                settlement,
+                catalog,
+                &recipe.output_resource_id,
+                output_amount,
+            );
+            if resource_has_affordance(
+                catalog,
+                &recipe.output_resource_id,
+                ItemAffordanceKind::Food,
+            ) {
+                metrics.produced_food_units += output_amount;
+            }
+            if resource_has_affordance(
+                catalog,
+                &recipe.output_resource_id,
+                ItemAffordanceKind::Tool,
+            ) || resource_has_affordance(
+                catalog,
+                &recipe.output_resource_id,
+                ItemAffordanceKind::Weapon,
+            ) || resource_has_affordance(
+                catalog,
+                &recipe.output_resource_id,
+                ItemAffordanceKind::Armor,
+            ) {
+                metrics.tool_capacity += output_amount;
+                settlement.polity.military_readiness =
+                    (settlement.polity.military_readiness + output_amount / 2).clamp(0, 100);
+            }
+            if resource_has_affordance(
+                catalog,
+                &recipe.output_resource_id,
+                ItemAffordanceKind::ConstructionMaterial,
+            ) {
+                metrics.construction_capacity += output_amount;
+            }
+            if resource_has_affordance(
+                catalog,
+                &recipe.output_resource_id,
+                ItemAffordanceKind::Prestige,
+            ) || resource_has_affordance(
+                catalog,
+                &recipe.output_resource_id,
+                ItemAffordanceKind::Clothing,
+            ) || resource_has_affordance(
+                catalog,
+                &recipe.output_resource_id,
+                ItemAffordanceKind::Jewelry,
+            ) {
+                metrics.prestige_goods += output_amount;
+                for household in &mut settlement.households {
+                    household.prestige = (household.prestige + output_amount / 2).clamp(0, 100);
+                    household.wealth += output_amount;
+                }
+            }
+        }
     }
-    if adult_ids.len() >= 5
-        && total_grain >= 15
-        && settlement.households.iter().any(|h| h.wealth >= 55)
-        && !settlement.active_establishments.contains_key("taverna")
+
+    if let Some(territory) = settlement
+        .territory_states
+        .iter_mut()
+        .find(|state| state.key == "campos")
     {
-        settlement
-            .active_establishments
-            .insert("taverna".to_string(), 1);
-        new_constructions.push((
-            "taverna",
-            "vila_central",
-            "O excedente e a riqueza local sustentaram a primeira taverna.",
-            "circulacao comercial e social",
-        ));
+        territory.productivity = (territory.productivity + metrics.avg_diligence / 30
+            - metrics.security_need / 20)
+            .clamp(5, 100);
     }
-    if total_ore >= 10
-        && total_wood >= 10
-        && craft_pressure / adult_ids.len().max(1) as i32 >= 40
-        && !settlement.active_establishments.contains_key("forja")
+    if let Some(territory) = settlement
+        .territory_states
+        .iter_mut()
+        .find(|state| state.key == "vila_central")
     {
-        settlement
-            .active_establishments
-            .insert("forja".to_string(), 1);
-        new_constructions.push((
-            "forja",
-            "vila_central",
-            "A abundancia de metal e madeira permitiu erguer uma forja.",
-            "capacidade artesanal e metalurgica",
-        ));
+        territory.security = (territory.security + settlement.polity.military_readiness / 25
+            - metrics.security_need / 12)
+            .clamp(0, 100);
     }
-    if adult_ids.len() >= 4
-        && !settlement
-            .active_establishments
-            .contains_key("posto_guarda")
-    {
-        settlement
-            .active_establishments
-            .insert("posto_guarda".to_string(), 1);
-        new_constructions.push((
-            "posto_guarda",
-            "civico",
-            "A inseguranca e o crescimento local exigiram um posto da guarda.",
-            "controle civico e coercao",
-        ));
-    }
-    if settlement
-        .households
+    metrics
+}
+
+fn simulate_catalog_construction_pressure(
+    settlement: &mut HistoricalSettlement,
+    year: i32,
+    catalog: &EconomyCatalog,
+    metrics: &HistoricalProductionMetrics,
+) {
+    let mut candidates = catalog
+        .establishment_types
         .iter()
-        .any(|household| household.wealth >= 70)
-        && !settlement.active_establishments.contains_key("solar")
-    {
+        .filter(|definition| definition.construction_recipe_id.is_some())
+        .filter(|definition| materializer_supports_establishment(&definition.id))
+        .filter(|definition| {
+            !settlement
+                .active_establishments
+                .contains_key(&definition.id)
+        })
+        .filter_map(|definition| {
+            let score = historical_construction_score(settlement, catalog, definition, metrics);
+            (score >= 42).then_some((definition, score))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|(_, score)| -*score);
+    for (definition, score) in candidates.into_iter().take(2) {
         settlement
             .active_establishments
-            .insert("solar".to_string(), 1);
-        new_constructions.push((
-            "solar",
-            "civico",
-            "A concentracao de riqueza consolidou um solar senhorial.",
-            "consolidacao de poder local",
-        ));
-    }
-    for (establishment_type_id, target_territory_key, summary, reason) in new_constructions {
+            .insert(definition.id.clone(), 1);
+        let territory_key = target_territory_for_establishment(definition);
+        let reason =
+            historical_construction_reason(settlement, catalog, definition, metrics, score);
+        let summary = format!(
+            "{} construiu {} por {}.",
+            settlement.name, definition.display_name, reason
+        );
         settlement
             .recent_constructions
             .push(HistoricalConstructionSeed {
-                establishment_type_id: establishment_type_id.to_string(),
-                target_territory_key: target_territory_key.to_string(),
+                establishment_type_id: definition.id.clone(),
+                target_territory_key: territory_key.to_string(),
                 completed: true,
-                summary: summary.to_string(),
-                reason: reason.to_string(),
+                summary: summary.clone(),
+                reason: reason.clone(),
             });
         settlement.ledger.push(HistoricalLedgerEvent {
             kind: HistoricalEventKind::Construction,
             year,
-            summary: summary.to_string(),
-            importance: 9,
+            summary,
+            importance: (6 + score / 12).clamp(6, 12),
             tags: vec![
                 "construcao".to_string(),
-                establishment_type_id.to_string(),
-                target_territory_key.to_string(),
+                definition.id.clone(),
+                territory_key.to_string(),
             ],
         });
+        if let Some(territory) = settlement
+            .territory_states
+            .iter_mut()
+            .find(|state| state.key == territory_key)
+        {
+            territory.stability = (territory.stability + 3).clamp(0, 100);
+            territory.productivity = (territory.productivity + 4).clamp(0, 100);
+        }
     }
-    let commerce_gain = (total_grain / 8) + (total_wood / 10) + (total_ore / 10);
+}
+
+fn simulate_historical_commerce(
+    settlement: &mut HistoricalSettlement,
+    year: i32,
+    metrics: &HistoricalProductionMetrics,
+) {
+    let commerce_gain = (metrics.total_grain / 8)
+        + (metrics.total_wood / 10)
+        + (metrics.total_ore / 10)
+        + (metrics.tool_capacity / 3)
+        + (metrics.prestige_goods / 2);
     settlement.polity.treasury += commerce_gain;
     if commerce_gain >= 6 {
         settlement.ledger.push(HistoricalLedgerEvent {
@@ -830,6 +999,340 @@ fn simulate_summer(settlement: &mut HistoricalSettlement, year: i32, rng: &mut S
             tags: vec!["comercio".to_string(), "tributo".to_string()],
         });
     }
+}
+
+fn territory_value(
+    settlement: &HistoricalSettlement,
+    key: &str,
+    getter: impl Fn(&HistoricalTerritoryState) -> i32,
+    default: i32,
+) -> i32 {
+    settlement
+        .territory_states
+        .iter()
+        .find(|state| state.key == key)
+        .map(getter)
+        .unwrap_or(default)
+}
+
+fn recipe_by_id<'a>(catalog: &'a EconomyCatalog, recipe_id: &str) -> Option<&'a RecipeDef> {
+    catalog.recipes.iter().find(|recipe| recipe.id == recipe_id)
+}
+
+fn resource_has_affordance(
+    catalog: &EconomyCatalog,
+    resource_id: &str,
+    affordance: ItemAffordanceKind,
+) -> bool {
+    catalog
+        .resources
+        .iter()
+        .find(|resource| resource.id == resource_id)
+        .is_some_and(|resource| {
+            resource
+                .affordances
+                .iter()
+                .any(|entry| entry.kind == affordance)
+                || resource.tags.iter().any(|tag| match affordance {
+                    ItemAffordanceKind::Food => tag == "food",
+                    ItemAffordanceKind::Fuel => tag == "fuel",
+                    ItemAffordanceKind::Tool => tag == "tool" || tag == "capital",
+                    ItemAffordanceKind::ConstructionMaterial => tag == "construction_material",
+                    ItemAffordanceKind::Weapon => tag == "weapon",
+                    ItemAffordanceKind::Armor => tag == "armor",
+                    ItemAffordanceKind::Clothing => tag == "clothing",
+                    ItemAffordanceKind::Jewelry => tag == "jewelry",
+                    ItemAffordanceKind::Prestige => tag == "prestige",
+                    ItemAffordanceKind::Currency => tag == "currency",
+                    ItemAffordanceKind::TradeGood => tag == "trade_good",
+                    ItemAffordanceKind::ImprovisedWeapon => tag == "improvised_weapon",
+                })
+        })
+}
+
+fn consume_recipe_inputs(
+    settlement: &mut HistoricalSettlement,
+    recipe: &RecipeDef,
+    runs: i32,
+) -> i32 {
+    let mut shortage = 0;
+    for input in &recipe.inputs {
+        shortage +=
+            consume_settlement_resource(settlement, &input.resource_id, input.amount * runs);
+    }
+    for capital in &recipe.capital_requirements {
+        let available = settlement_resource_amount(settlement, &capital.resource_id);
+        if available < capital.amount {
+            shortage += capital.amount - available;
+        }
+    }
+    shortage
+}
+
+fn settlement_resource_amount(settlement: &HistoricalSettlement, resource_id: &str) -> i32 {
+    match resource_id {
+        "graos" => settlement
+            .households
+            .iter()
+            .map(|household| household.grain)
+            .sum(),
+        "lenha" | "madeira" => settlement
+            .households
+            .iter()
+            .map(|household| household.wood)
+            .sum(),
+        "metal_bruto" | "pedra" | "cobre" | "prata" => settlement
+            .households
+            .iter()
+            .map(|household| household.ore)
+            .sum(),
+        "moedas" => settlement
+            .households
+            .iter()
+            .map(|household| household.wealth)
+            .sum(),
+        _ => settlement
+            .households
+            .iter()
+            .map(|household| household.wealth / 2)
+            .sum(),
+    }
+}
+
+fn consume_settlement_resource(
+    settlement: &mut HistoricalSettlement,
+    resource_id: &str,
+    mut amount: i32,
+) -> i32 {
+    if amount <= 0 {
+        return 0;
+    }
+    for household in &mut settlement.households {
+        let storage = match resource_id {
+            "graos" => &mut household.grain,
+            "lenha" | "madeira" => &mut household.wood,
+            "metal_bruto" | "pedra" | "cobre" | "prata" => &mut household.ore,
+            "moedas" => &mut household.wealth,
+            _ => &mut household.wealth,
+        };
+        let taken = (*storage).min(amount);
+        *storage -= taken;
+        amount -= taken;
+        if amount <= 0 {
+            break;
+        }
+    }
+    amount.max(0)
+}
+
+fn apply_historical_resource_output(
+    settlement: &mut HistoricalSettlement,
+    catalog: &EconomyCatalog,
+    resource_id: &str,
+    amount: i32,
+) {
+    if amount <= 0 || settlement.households.is_empty() {
+        return;
+    }
+    let share = (amount / settlement.households.len().max(1) as i32).max(1);
+    for household in &mut settlement.households {
+        match resource_id {
+            "graos" => household.grain += share,
+            "lenha" | "madeira" => household.wood += share,
+            "metal_bruto" | "pedra" | "cobre" | "prata" => household.ore += share,
+            "moedas" => household.wealth += share,
+            _ => {
+                let base_price = catalog
+                    .resources
+                    .iter()
+                    .find(|resource| resource.id == resource_id)
+                    .map(|resource| resource.base_price)
+                    .unwrap_or(3);
+                household.wealth += (share * base_price / 4).max(1);
+            }
+        }
+    }
+}
+
+fn materializer_supports_establishment(establishment_type_id: &str) -> bool {
+    matches!(
+        establishment_type_id,
+        "fazenda"
+            | "lenhal"
+            | "pedreira"
+            | "forja"
+            | "padaria"
+            | "taverna"
+            | "posto_guarda"
+            | "solar"
+    )
+}
+
+fn target_territory_for_establishment(definition: &EstablishmentTypeDef) -> &'static str {
+    match definition.spatial_archetype_id.as_str() {
+        "fazenda" => "campos",
+        "lenhal" => "lenhal",
+        "pedreira" => "pedreira",
+        "posto_guarda" | "solar" => "civico",
+        _ => "vila_central",
+    }
+}
+
+fn historical_construction_score(
+    settlement: &HistoricalSettlement,
+    catalog: &EconomyCatalog,
+    definition: &EstablishmentTypeDef,
+    metrics: &HistoricalProductionMetrics,
+) -> i32 {
+    let mut score = 0;
+    let avg_rage = settlement
+        .households
+        .iter()
+        .map(|household| household.rage)
+        .sum::<i32>()
+        / settlement.households.len().max(1) as i32;
+    let max_wealth = settlement
+        .households
+        .iter()
+        .map(|household| household.wealth + household.prestige)
+        .max()
+        .unwrap_or(0);
+    let population = settlement
+        .people
+        .iter()
+        .filter(|person| person.alive)
+        .count() as i32;
+
+    if definition.public_service {
+        score += avg_rage / 2 + settlement.polity.treasury / 8 + population / 2;
+        if definition.id == "posto_guarda" {
+            score += metrics.security_need + (50 - settlement.polity.military_readiness).max(0) / 2;
+        }
+        if definition.id == "solar" {
+            score += max_wealth / 3 + settlement.polity.treasury / 10;
+        }
+    }
+
+    for recipe_id in &definition.production_recipe_ids {
+        let Some(recipe) = recipe_by_id(catalog, recipe_id) else {
+            continue;
+        };
+        if resource_has_affordance(
+            catalog,
+            &recipe.output_resource_id,
+            ItemAffordanceKind::Food,
+        ) {
+            score += (metrics.food_demand - metrics.produced_food_units).max(0) / 2;
+            score += population / 3;
+        }
+        if resource_has_affordance(
+            catalog,
+            &recipe.output_resource_id,
+            ItemAffordanceKind::Tool,
+        ) || resource_has_affordance(
+            catalog,
+            &recipe.output_resource_id,
+            ItemAffordanceKind::Weapon,
+        ) || resource_has_affordance(
+            catalog,
+            &recipe.output_resource_id,
+            ItemAffordanceKind::Armor,
+        ) {
+            score += (35 - settlement.polity.military_readiness).max(0) + metrics.avg_craft / 4;
+        }
+        if resource_has_affordance(
+            catalog,
+            &recipe.output_resource_id,
+            ItemAffordanceKind::ConstructionMaterial,
+        ) {
+            score += (45 - metrics.construction_capacity).max(0) / 2;
+        }
+        if resource_has_affordance(
+            catalog,
+            &recipe.output_resource_id,
+            ItemAffordanceKind::Prestige,
+        ) || resource_has_affordance(
+            catalog,
+            &recipe.output_resource_id,
+            ItemAffordanceKind::Clothing,
+        ) || resource_has_affordance(
+            catalog,
+            &recipe.output_resource_id,
+            ItemAffordanceKind::Jewelry,
+        ) {
+            score += max_wealth / 5 + metrics.avg_craft / 5;
+        }
+    }
+
+    if let Some(recipe_id) = &definition.construction_recipe_id {
+        if let Some(construction) = catalog
+            .construction_recipes
+            .iter()
+            .find(|recipe| recipe.id == *recipe_id)
+        {
+            let material_need: i32 = construction
+                .materials
+                .iter()
+                .map(|input| input.amount)
+                .sum();
+            score += (metrics.construction_capacity - material_need).clamp(-20, 35);
+            score += (metrics.adult_count * 2 - construction.labor_cost / 5).clamp(-20, 25);
+        }
+    }
+    score
+}
+
+fn historical_construction_reason(
+    settlement: &HistoricalSettlement,
+    catalog: &EconomyCatalog,
+    definition: &EstablishmentTypeDef,
+    metrics: &HistoricalProductionMetrics,
+    score: i32,
+) -> String {
+    if definition.public_service {
+        return if definition.id == "posto_guarda" {
+            "inseguranca, tensao social e necessidade de coercao".to_string()
+        } else {
+            "consolidacao de poder, riqueza e autoridade local".to_string()
+        };
+    }
+    if definition.production_recipe_ids.iter().any(|recipe_id| {
+        recipe_by_id(catalog, recipe_id).is_some_and(|recipe| {
+            resource_has_affordance(
+                catalog,
+                &recipe.output_resource_id,
+                ItemAffordanceKind::Food,
+            )
+        })
+    }) && metrics.produced_food_units < metrics.food_demand
+    {
+        return "deficit alimentar persistente".to_string();
+    }
+    if definition.production_recipe_ids.iter().any(|recipe_id| {
+        recipe_by_id(catalog, recipe_id).is_some_and(|recipe| {
+            resource_has_affordance(
+                catalog,
+                &recipe.output_resource_id,
+                ItemAffordanceKind::Tool,
+            ) || resource_has_affordance(
+                catalog,
+                &recipe.output_resource_id,
+                ItemAffordanceKind::Weapon,
+            )
+        })
+    }) {
+        return "capacidade artesanal, defesa e demanda por ferramentas".to_string();
+    }
+    let dominant_household = settlement
+        .households
+        .iter()
+        .max_by_key(|household| household.wealth + household.prestige)
+        .map(|household| household.name.clone())
+        .unwrap_or_else(|| "uma linhagem local".to_string());
+    format!(
+        "pressao economica historica de score {} liderada por {}",
+        score, dominant_household
+    )
 }
 
 fn simulate_autumn(settlement: &mut HistoricalSettlement, year: i32, rng: &mut StdRng) {
@@ -905,6 +1408,8 @@ fn simulate_autumn(settlement: &mut HistoricalSettlement, year: i32, rng: &mut S
         if paid < tax_due {
             household.feudal_arrears += tax_due - paid;
             household.rage += 6 + (tax_due - paid);
+            household.cultural_pressure =
+                (household.cultural_pressure + 2 + tax_due - paid).clamp(0, 100);
         } else {
             household.feudal_arrears = (household.feudal_arrears - 1).max(0);
         }
@@ -913,6 +1418,8 @@ fn simulate_autumn(settlement: &mut HistoricalSettlement, year: i32, rng: &mut S
             household.hardship += shortage;
             household.rage += shortage * 2;
             household.legitimacy = (household.legitimacy - shortage).max(-40);
+            household.trauma_memory = (household.trauma_memory + shortage * 2).clamp(0, 100);
+            household.cultural_pressure = (household.cultural_pressure + shortage).clamp(0, 100);
             settlement.ledger.push(HistoricalLedgerEvent {
                 kind: HistoricalEventKind::Scarcity,
                 year,
@@ -1098,6 +1605,12 @@ fn simulate_winter(world: &mut HistoricalWorldState, year: i32, rng: &mut StdRng
     for settlement in &mut world.settlements {
         let old_leader = settlement.leader_person_id;
         let mut deaths = Vec::new();
+        let minimum_living_population = (settlement.households.len() as i32 * 3).max(8);
+        let mut living_remaining = settlement
+            .people
+            .iter()
+            .filter(|person| person.alive)
+            .count() as i32;
         for person in &mut settlement.people {
             if !person.alive {
                 continue;
@@ -1117,10 +1630,13 @@ fn simulate_winter(world: &mut HistoricalWorldState, year: i32, rng: &mut StdRng
             };
             death_chance += (household.hardship as f64 * 0.008).clamp(0.0, 0.25);
             death_chance += (person.trauma as f64 * 0.0015).clamp(0.0, 0.08);
-            if rng.random_bool(death_chance.clamp(0.0, 0.85)) {
+            if living_remaining > minimum_living_population
+                && rng.random_bool(death_chance.clamp(0.0, 0.85))
+            {
                 person.alive = false;
                 person.death_year = Some(year);
                 deaths.push(person.id);
+                living_remaining -= 1;
             } else if household.hardship > 0 {
                 person.trauma = (person.trauma + household.hardship).clamp(0, 100);
             }
@@ -1283,6 +1799,11 @@ fn simulate_winter(world: &mut HistoricalWorldState, year: i32, rng: &mut StdRng
                     proven: true,
                     punitive: true,
                 });
+                for household in &mut settlement.households {
+                    household.trauma_memory = (household.trauma_memory + 6).clamp(0, 100);
+                    household.cultural_pressure = (household.cultural_pressure + 5).clamp(0, 100);
+                    household.legitimacy = (household.legitimacy - 4).clamp(-80, 100);
+                }
                 settlement.ledger.push(HistoricalLedgerEvent {
                     kind: HistoricalEventKind::CrimeAndJustice,
                     year,
@@ -1543,6 +2064,28 @@ fn apply_war_demands(
             settlement.name, stage
         )
     };
+    let war_pressure = match stage {
+        WarStage::Mobilization => 2,
+        WarStage::Raids => 5,
+        WarStage::Siege => 8,
+        WarStage::DecisiveBattle => 12,
+        WarStage::Occupation => 7,
+    };
+    for household in &mut settlement.households {
+        household.war_exposure = (household.war_exposure + war_pressure).clamp(0, 100);
+        household.trauma_memory = (household.trauma_memory + war_pressure / 2).clamp(0, 100);
+        household.rage = (household.rage + war_pressure / 3).clamp(0, 100);
+        if matches!(stage, WarStage::Siege | WarStage::DecisiveBattle) {
+            household.hardship += 1;
+            household.legitimacy = (household.legitimacy - 2).clamp(-80, 100);
+        }
+    }
+    for territory in &mut settlement.territory_states {
+        territory.war_exposure = (territory.war_exposure + war_pressure).clamp(0, 100);
+        territory.security = (territory.security - war_pressure / 2).clamp(0, 100);
+        territory.stability = (territory.stability - war_pressure / 3).clamp(0, 100);
+    }
+
     settlement
         .recent_military_demands
         .push(HistoricalMilitaryDemandSeed {
@@ -1628,6 +2171,103 @@ fn apply_war_demands(
     });
 }
 
+fn simulate_cultural_memory(world: &mut HistoricalWorldState, year: i32) {
+    for settlement in &mut world.settlements {
+        let avg_cultural_pressure = settlement
+            .households
+            .iter()
+            .map(|household| {
+                household.cultural_pressure
+                    + household.trauma_memory / 2
+                    + household.war_exposure / 3
+            })
+            .sum::<i32>()
+            / settlement.households.len().max(1) as i32;
+        if avg_cultural_pressure < 12 {
+            continue;
+        }
+        let strongest_household = settlement
+            .households
+            .iter()
+            .max_by_key(|household| {
+                household.cultural_pressure + household.trauma_memory + household.prestige
+            })
+            .map(|household| household.name.clone())
+            .unwrap_or_else(|| "uma casa esquecida".to_string());
+        let (kind, tag, moral) = if settlement
+            .recent_insurrection
+            .as_ref()
+            .is_some_and(|insurrection| insurrection.popular_support > insurrection.repression)
+        {
+            (
+                CulturalStoryKind::Martirio,
+                "revolta",
+                "Quando a ordem pesa demais, ate os quietos erguem a voz.",
+            )
+        } else if settlement
+            .recent_military_demands
+            .iter()
+            .any(|demand| matches!(demand.stage, WarStage::Siege | WarStage::DecisiveBattle))
+        {
+            (
+                CulturalStoryKind::CantoDeGuerra,
+                "guerra",
+                "A guerra exige pao, ferro e memoria.",
+            )
+        } else if settlement
+            .recent_justice_cases
+            .iter()
+            .any(|case| case.punitive)
+        {
+            (
+                CulturalStoryKind::AdvertenciaMoral,
+                "justica",
+                "Punicao sem confianca vira medo herdado.",
+            )
+        } else {
+            (
+                CulturalStoryKind::HistoriaFamiliar,
+                "linhagem",
+                "Toda casa guarda aquilo que a vila tenta esquecer.",
+            )
+        };
+        if avg_cultural_pressure >= 20 {
+            settlement.story_seeds.push(HistoricalStorySeed {
+                title: format!(
+                    "A memoria de {} em {}",
+                    strongest_household, settlement.name
+                ),
+                summary: format!(
+                    "A pressao acumulada de {} preservou historias de {}, medo e orgulho.",
+                    strongest_household, tag
+                ),
+                moral: moral.to_string(),
+                kind,
+                tags: vec![tag.to_string(), "memoria_cultural".to_string()],
+                cited_names: Vec::new(),
+                origin_generation: 1,
+            });
+        }
+        for territory in &mut settlement.territory_states {
+            territory.cultural_pressure =
+                (territory.cultural_pressure + avg_cultural_pressure / 4).clamp(0, 100);
+        }
+        settlement.ledger.push(HistoricalLedgerEvent {
+            kind: HistoricalEventKind::CulturalTransmission,
+            year,
+            summary: format!(
+                "Historias de {} circularam em {} e fixaram memoria cultural.",
+                strongest_household, settlement.name
+            ),
+            importance: (4 + avg_cultural_pressure / 8).clamp(4, 10),
+            tags: vec!["cultura".to_string(), tag.to_string()],
+        });
+        for household in &mut settlement.households {
+            household.cultural_pressure = (household.cultural_pressure * 3 / 4).clamp(0, 100);
+        }
+    }
+}
+
 fn finalize_settlement_roles(settlement: &mut HistoricalSettlement) {
     let current_year = settlement
         .people
@@ -1708,12 +2348,43 @@ fn build_summary(
                 })
                 .map(|household| {
                     format!(
-                        "{} domina {} com riqueza={} e rank={}",
-                        household.name, settlement.name, household.wealth, household.social_rank
+                        "{} domina {} com riqueza={} e rank={} e prestigio={}",
+                        household.name,
+                        settlement.name,
+                        household.wealth,
+                        household.social_rank,
+                        household.prestige
                     )
                 })
         })
         .collect::<Vec<_>>();
+    let mut dominant_households = world
+        .settlements
+        .iter()
+        .flat_map(|settlement| {
+            settlement.households.iter().map(move |household| {
+                (
+                    household.wealth + household.social_rank + household.prestige
+                        - household.feudal_arrears * 2,
+                    format!(
+                        "{} de {}: poder={}, trauma={}, divida={}",
+                        household.name,
+                        settlement.name,
+                        household.wealth + household.social_rank + household.prestige,
+                        household.trauma_memory,
+                        household.feudal_arrears
+                    ),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    dominant_households.sort_by_key(|(score, _)| -*score);
+    let dominant_households = dominant_households
+        .into_iter()
+        .take(6)
+        .map(|(_, summary)| summary)
+        .collect::<Vec<_>>();
+
     let mut major_conflicts = world
         .wars
         .iter()
@@ -1723,8 +2394,18 @@ fn build_summary(
         if let Some(succession) = &settlement.recent_succession {
             major_conflicts.push(succession.summary.clone());
         }
+        if let Some(insurrection) = &settlement.recent_insurrection {
+            major_conflicts.push(insurrection.summary.clone());
+        }
     }
-    major_conflicts.truncate(6);
+    major_conflicts.truncate(8);
+    let recent_wars = world
+        .wars
+        .iter()
+        .rev()
+        .take(6)
+        .map(|war| war.summary.clone())
+        .collect::<Vec<_>>();
     let major_foundations = world
         .settlements
         .iter()
@@ -1732,6 +2413,62 @@ fn build_summary(
         .map(|story| story.title.clone())
         .take(6)
         .collect::<Vec<_>>();
+    let mut dominant_stories = world
+        .settlements
+        .iter()
+        .flat_map(|settlement| settlement.story_seeds.iter())
+        .map(|story| {
+            (
+                story.tags.len() as i32 + story.origin_generation as i32,
+                story.title.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    dominant_stories.sort_by_key(|(score, _)| -*score);
+    let dominant_stories = dominant_stories
+        .into_iter()
+        .take(8)
+        .map(|(_, title)| title)
+        .collect::<Vec<_>>();
+    let recent_crises = world
+        .settlements
+        .iter()
+        .flat_map(|settlement| {
+            settlement.recent_pressures.iter().map(move |pressure| {
+                format!(
+                    "{}: {} intensidade {} ({})",
+                    settlement.name, pressure.agenda_tag, pressure.intensity, pressure.reason
+                )
+            })
+        })
+        .take(8)
+        .collect::<Vec<_>>();
+    let active_decrees = world
+        .settlements
+        .iter()
+        .flat_map(|settlement| {
+            settlement.recent_decrees.iter().map(move |decree| {
+                format!(
+                    "{}: {} legitimidade {} coercao {}",
+                    settlement.name, decree.agenda_tag, decree.legitimacy, decree.enforcement
+                )
+            })
+        })
+        .take(8)
+        .collect::<Vec<_>>();
+    let territory_count = world
+        .settlements
+        .iter()
+        .map(|settlement| settlement.territory_states.len())
+        .sum::<usize>()
+        .max(1) as i32;
+    let average_territorial_stability = world
+        .settlements
+        .iter()
+        .flat_map(|settlement| settlement.territory_states.iter())
+        .map(|territory| territory.stability)
+        .sum::<i32>()
+        / territory_count;
     HistoricalBootstrapSummary {
         years_simulated: world.years_simulated,
         founding_households: founding_households * world.settlements.len(),
@@ -1740,6 +2477,12 @@ fn build_summary(
         major_dynasties,
         major_conflicts,
         major_foundations,
+        recent_crises,
+        active_decrees,
+        dominant_stories,
+        average_territorial_stability,
+        dominant_households,
+        recent_wars,
     }
 }
 

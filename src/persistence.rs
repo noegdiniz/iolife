@@ -1,5 +1,5 @@
 use crate::sim_core::Simulation;
-use crate::world_model::{AgentMemory, SimulationSnapshot, WorldEvent};
+use crate::world_model::{AgentMemory, SNAPSHOT_SCHEMA_VERSION, SimulationSnapshot, WorldEvent};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use rusqlite::{Connection, params};
@@ -121,9 +121,9 @@ impl Persistence {
                 .ok_or_else(|| {
                     anyhow::anyhow!("legacy snapshot without spatial grid is not supported")
                 })?;
-            if schema_version != 22 {
+            if schema_version != u64::from(SNAPSHOT_SCHEMA_VERSION) {
                 return Err(anyhow::anyhow!(
-                    "unsupported snapshot schema_version={schema_version}; expected 22"
+                    "unsupported snapshot schema_version={schema_version}; expected {SNAPSHOT_SCHEMA_VERSION}"
                 ));
             }
             let snapshot = serde_json::from_value(value)

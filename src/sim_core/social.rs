@@ -1,4 +1,5 @@
 use super::*;
+use crate::world_model::MeetingParticipantResponse;
 // Conversation protocol, relationship updates and social memory systems.
 
 impl Simulation {
@@ -530,95 +531,305 @@ impl Simulation {
 
     pub(super) fn open_conversation(
         &mut self,
-        initiator_id: u64,
-        partner_id: u64,
+        participant_ids: Vec<u64>,
         move_kind: SocialMove,
         reason: &str,
     ) -> Result<bool> {
-        if !self.agents_adjacent(initiator_id, partner_id)? {
-            self.push_event(WorldEvent {
-                day: self.day,
-                tick: self.tick_of_day,
-                actor: initiator_id,
-                target: Some(partner_id),
-                kind: EventKind::Blocking,
-                summary: "A conversa falha por falta de proximidade fisica.".to_string(),
-                impact_tags: vec!["social".to_string(), "distancia".to_string()],
-            });
+        let mut deduped = Vec::new();
+        for agent_id in participant_ids {
+            if !deduped.contains(&agent_id) {
+                deduped.push(agent_id);
+            }
+        }
+        if !(2..=5).contains(&deduped.len()) {
             return Ok(false);
         }
-        if self.agent_conversation_id(initiator_id)?.is_some()
-            || self.agent_conversation_id(partner_id)?.is_some()
-        {
+        if !self.participants_share_room_and_radius(&deduped)? {
+            if let Some(&initiator_id) = deduped.first() {
+                self.push_event(WorldEvent {
+                    day: self.day,
+                    tick: self.tick_of_day,
+                    actor: initiator_id,
+                    target: deduped.get(1).copied(),
+                    kind: EventKind::Blocking,
+                    summary: "A conversa falha por falta de proximidade fisica do grupo."
+                        .to_string(),
+                    impact_tags: vec![
+                        "social".to_string(),
+                        "distancia".to_string(),
+                        "grupo".to_string(),
+                    ],
+                });
+            }
             return Ok(false);
         }
-        if self.agent_social_cooldown_until(initiator_id)? > self.total_ticks
-            || self.agent_social_cooldown_until(partner_id)? > self.total_ticks
-        {
-            return Ok(false);
+        for &agent_id in &deduped {
+            if self.agent_conversation_id(agent_id)?.is_some() {
+                return Ok(false);
+            }
+            if self.agent_social_cooldown_until(agent_id)? > self.total_ticks {
+                return Ok(false);
+            }
         }
 
         let conversation_id = self.next_conversation_id;
         self.next_conversation_id += 1;
-        let initiator_name = self.agent_name(initiator_id)?;
-        let partner_name = self.agent_name(partner_id)?;
+        let initiator_id = deduped[0];
+        let participant_names = deduped
+            .iter()
+            .map(|agent_id| self.agent_name(*agent_id))
+            .collect::<Result<Vec<_>>>()?;
         let opening_reason = format!("{}: {}", move_kind.as_str(), reason);
         self.conversations.push(ConversationState {
             id: conversation_id,
-            participants: [initiator_id, partner_id],
+            participant_ids: deduped.clone(),
             initiator_id,
             current_speaker_id: initiator_id,
+            last_speaker_id: None,
+            turn_order_cursor: 0,
             started_at_tick: self.total_ticks,
             turn_count: 0,
             max_turns: MAX_CONVERSATION_TURNS,
-            opening_reason: opening_reason.clone(),
-            summary: format!("{initiator_name} inicia uma conversa com {partner_name}."),
+            opening_reason,
+            summary: format!(
+                "{} inicia uma conversa em grupo com {}.",
+                participant_names[0],
+                participant_names
+                    .iter()
+                    .skip(1)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             recent_turns: Vec::new(),
-            participant_states: vec![
-                ConversationParticipantState {
-                    agent_id: initiator_id,
-                    social_goal: social_goal_from_move(move_kind).to_string(),
+            participant_states: deduped
+                .iter()
+                .enumerate()
+                .map(|(index, agent_id)| ConversationParticipantState {
+                    agent_id: *agent_id,
+                    social_goal: if index == 0 {
+                        social_goal_from_move(move_kind).to_string()
+                    } else {
+                        "entender a intencao do grupo".to_string()
+                    },
                     last_speech_act: None,
                     last_emotion: None,
-                },
-                ConversationParticipantState {
-                    agent_id: partner_id,
-                    social_goal: "entender a intencao do outro".to_string(),
-                    last_speech_act: None,
-                    last_emotion: None,
-                },
-            ],
+                    engaged: true,
+                    wants_to_continue: true,
+                    last_addressed_tick: None,
+                })
+                .collect(),
             status: ConversationStatus::Active,
             outcome: ConversationOutcome::Ongoing,
             end_reason: None,
         });
 
-        self.bind_agent_to_conversation(
-            initiator_id,
-            conversation_id,
-            partner_id,
-            format!("abre conversa para {}", move_kind.as_str()),
-        )?;
-        self.bind_agent_to_conversation(
-            partner_id,
-            conversation_id,
-            initiator_id,
-            "aceita conversa".to_string(),
-        )?;
+        for &agent_id in &deduped {
+            let others = deduped
+                .iter()
+                .copied()
+                .filter(|other_id| *other_id != agent_id)
+                .collect::<Vec<_>>();
+            self.bind_agent_to_conversation(
+                agent_id,
+                conversation_id,
+                &others,
+                if agent_id == initiator_id {
+                    format!("abre conversa para {}", move_kind.as_str())
+                } else {
+                    "aceita conversa".to_string()
+                },
+            )?;
+        }
         self.push_event(WorldEvent {
             day: self.day,
             tick: self.tick_of_day,
             actor: initiator_id,
-            target: Some(partner_id),
+            target: deduped.get(1).copied(),
             kind: EventKind::ConversationStarted,
-            summary: format!("{initiator_name} inicia conversa com {partner_name}: {reason}."),
+            summary: format!(
+                "{} inicia conversa em grupo ({} agentes): {}.",
+                participant_names[0],
+                deduped.len(),
+                reason
+            ),
             impact_tags: vec![
                 "social".to_string(),
                 "conversa".to_string(),
+                "grupo".to_string(),
                 move_kind.as_str().to_string(),
             ],
         });
         Ok(true)
+    }
+
+    fn participants_share_room_and_radius(&mut self, participant_ids: &[u64]) -> Result<bool> {
+        if participant_ids.len() < 2 {
+            return Ok(false);
+        }
+        let anchor = participant_ids[0];
+        let anchor_position = self.debug_agent_position(anchor)?;
+        let anchor_room_id = self.tile_at(anchor_position).and_then(|tile| tile.room_id);
+        for &agent_id in participant_ids.iter().skip(1) {
+            let position = self.debug_agent_position(agent_id)?;
+            let room_id = self.tile_at(position).and_then(|tile| tile.room_id);
+            if room_id != anchor_room_id || anchor_position.manhattan(position) > 2 {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn prune_conversation_membership(
+        &mut self,
+        conversation_id: ConversationId,
+    ) -> Result<Option<ConversationState>> {
+        let Some(snapshot) = self.conversation_state(conversation_id) else {
+            return Ok(None);
+        };
+        if snapshot.status != ConversationStatus::Active {
+            return Ok(None);
+        }
+        let anchor_id = if snapshot
+            .participant_ids
+            .contains(&snapshot.current_speaker_id)
+        {
+            snapshot.current_speaker_id
+        } else if let Some(&first) = snapshot.participant_ids.first() {
+            first
+        } else {
+            return Ok(None);
+        };
+        let anchor_position = self.debug_agent_position(anchor_id)?;
+        let anchor_room_id = self.tile_at(anchor_position).and_then(|tile| tile.room_id);
+        let mut removed = Vec::new();
+        for &agent_id in &snapshot.participant_ids {
+            let state = self.agent_state(agent_id)?;
+            let position = self.debug_agent_position(agent_id)?;
+            let room_id = self.tile_at(position).and_then(|tile| tile.room_id);
+            let spatial_ok = room_id == anchor_room_id && anchor_position.manhattan(position) <= 2;
+            let need_ok = state.hunger < 95 && state.energy > 5 && state.health > 15;
+            if !(spatial_ok && need_ok) {
+                removed.push(agent_id);
+            }
+        }
+        if !removed.is_empty() {
+            if let Some(conversation) = self.conversation_state_mut(conversation_id) {
+                conversation
+                    .participant_ids
+                    .retain(|agent_id| !removed.contains(agent_id));
+                conversation
+                    .participant_states
+                    .retain(|participant| !removed.contains(&participant.agent_id));
+                if !conversation
+                    .participant_ids
+                    .contains(&conversation.current_speaker_id)
+                {
+                    if let Some(next) = conversation.participant_ids.first().copied() {
+                        conversation.current_speaker_id = next;
+                    }
+                }
+                if conversation.turn_order_cursor >= conversation.participant_ids.len() {
+                    conversation.turn_order_cursor = 0;
+                }
+            }
+            for &agent_id in &removed {
+                self.release_agent_from_conversation(
+                    agent_id,
+                    "deixa a conversa em grupo".to_string(),
+                )?;
+            }
+        }
+        let Some(updated) = self.conversation_state(conversation_id) else {
+            return Ok(None);
+        };
+        if updated.participant_ids.len() < 2 {
+            self.end_conversation(
+                conversation_id,
+                ConversationStatus::Interrupted,
+                ConversationOutcome::DistanceBreak,
+                "o grupo perdeu massa critica para continuar a conversa".to_string(),
+            )?;
+            return Ok(None);
+        }
+        Ok(Some(updated))
+    }
+
+    fn select_conversation_primary_target(
+        &self,
+        conversation: &ConversationState,
+        speaker_id: u64,
+    ) -> Option<u64> {
+        if let Some(last_turn) = conversation.recent_turns.last() {
+            for &agent_id in &last_turn.addressed_agent_ids {
+                if conversation.participant_ids.contains(&agent_id) && agent_id != speaker_id {
+                    return Some(agent_id);
+                }
+            }
+        }
+        let start_index = conversation
+            .participant_ids
+            .iter()
+            .position(|agent_id| *agent_id == speaker_id)
+            .unwrap_or(0);
+        for offset in 1..=conversation.participant_ids.len() {
+            let candidate = conversation.participant_ids
+                [(start_index + offset) % conversation.participant_ids.len()];
+            if candidate != speaker_id {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    fn select_next_group_speaker(
+        &self,
+        conversation: &ConversationState,
+        speaker_id: u64,
+        addressed_agent_ids: &[u64],
+    ) -> u64 {
+        for &agent_id in addressed_agent_ids {
+            if conversation.participant_ids.contains(&agent_id) && agent_id != speaker_id {
+                return agent_id;
+            }
+        }
+        let start_index = conversation
+            .participant_ids
+            .iter()
+            .position(|agent_id| *agent_id == speaker_id)
+            .unwrap_or(
+                conversation
+                    .turn_order_cursor
+                    .min(conversation.participant_ids.len().saturating_sub(1)),
+            );
+        for offset in 1..=conversation.participant_ids.len() {
+            let candidate = conversation.participant_ids
+                [(start_index + offset) % conversation.participant_ids.len()];
+            if candidate != speaker_id {
+                return candidate;
+            }
+        }
+        speaker_id
+    }
+
+    fn softened_group_delta(delta: &RelationDelta) -> RelationDelta {
+        fn soften(value: i32) -> i32 {
+            if value == 0 {
+                0
+            } else if value > 0 {
+                ((value + 1) / 2).max(1)
+            } else {
+                -(((-value) + 1) / 2).max(1)
+            }
+        }
+        RelationDelta {
+            trust: soften(delta.trust),
+            friendship: soften(delta.friendship),
+            resentment: soften(delta.resentment),
+            attraction: soften(delta.attraction),
+            moral_debt: soften(delta.moral_debt),
+            reputation: soften(delta.reputation),
+        }
     }
 
     pub(super) fn process_active_conversations(&mut self, llm: &dyn LlmAdapter) -> Result<()> {
@@ -630,7 +841,7 @@ impl Simulation {
             .collect::<Vec<_>>();
         let mut prepared_turns = Vec::new();
         for conversation_id in active_ids {
-            let Some(conversation) = self.conversation_state(conversation_id) else {
+            let Some(conversation) = self.prune_conversation_membership(conversation_id)? else {
                 continue;
             };
             if conversation.status != ConversationStatus::Active {
@@ -644,13 +855,21 @@ impl Simulation {
             }
 
             let speaker_id = conversation.current_speaker_id;
-            let listener_id = other_participant(&conversation.participants, speaker_id);
+            let primary_target_id = self
+                .select_conversation_primary_target(&conversation, speaker_id)
+                .or_else(|| {
+                    conversation
+                        .participant_ids
+                        .iter()
+                        .copied()
+                        .find(|agent_id| *agent_id != speaker_id)
+                });
             let input =
-                self.build_conversation_turn_input(&conversation, speaker_id, listener_id)?;
+                self.build_conversation_turn_input(&conversation, speaker_id, primary_target_id)?;
             prepared_turns.push(PreparedConversationTurn {
                 conversation_id,
                 speaker_id,
-                listener_id,
+                primary_target_id,
                 input,
             });
         }
@@ -665,7 +884,7 @@ impl Simulation {
                     self.apply_conversation_turn_output(
                         result.conversation_id,
                         result.speaker_id,
-                        result.listener_id,
+                        result.primary_target_id,
                         result.output,
                     )?;
                 }
@@ -673,7 +892,7 @@ impl Simulation {
                     self.handle_transient_conversation_failure(
                         result.conversation_id,
                         result.speaker_id,
-                        result.listener_id,
+                        result.primary_target_id.unwrap_or(result.speaker_id),
                         &result.error,
                     )?;
                 }
@@ -686,15 +905,22 @@ impl Simulation {
         &mut self,
         conversation: &ConversationState,
     ) -> Result<Option<(ConversationStatus, ConversationOutcome, String)>> {
-        let [agent_a, agent_b] = conversation.participants;
-        if !self.agents_adjacent(agent_a, agent_b)? {
+        let participant_ids = conversation.participant_ids.clone();
+        if participant_ids.len() < 2 {
+            return Ok(Some((
+                ConversationStatus::Interrupted,
+                ConversationOutcome::DistanceBreak,
+                "a conversa perdeu participantes demais".to_string(),
+            )));
+        }
+        if !self.participants_share_room_and_radius(&participant_ids)? {
             return Ok(Some((
                 ConversationStatus::Interrupted,
                 ConversationOutcome::DistanceBreak,
                 "os participantes perderam adjacencia".to_string(),
             )));
         }
-        for agent_id in conversation.participants {
+        for agent_id in conversation.participant_ids.iter().copied() {
             let state = self.agent_state(agent_id)?;
             if state.hunger >= 95 || state.energy <= 5 || state.health <= 15 {
                 return Ok(Some((
@@ -714,10 +940,18 @@ impl Simulation {
         &mut self,
         conversation: &ConversationState,
         speaker_id: u64,
-        listener_id: u64,
+        primary_target_id: Option<u64>,
     ) -> Result<ConversationTurnInput> {
         let speaker_entity = self.find_agent_entity(speaker_id)?;
-        let listener_entity = self.find_agent_entity(listener_id)?;
+        let primary_target_id = primary_target_id
+            .or_else(|| {
+                conversation
+                    .participant_ids
+                    .iter()
+                    .copied()
+                    .find(|agent_id| *agent_id != speaker_id)
+            })
+            .ok_or_else(|| anyhow!("conversation without target"))?;
         let (
             speaker_name,
             speaker_role,
@@ -759,36 +993,17 @@ impl Simulation {
                     .clone(),
             )
         };
-        let (listener_name, listener_role, listener_state) = {
-            let entry = self.world.entity(listener_entity);
-            (
-                entry
-                    .get::<AgentCore>()
-                    .ok_or_else(|| anyhow!("missing agent core"))?
-                    .name
-                    .clone(),
-                entry
-                    .get::<AgentCore>()
-                    .ok_or_else(|| anyhow!("missing agent core"))?
-                    .role_id
-                    .clone(),
-                entry
-                    .get::<StateComponent>()
-                    .ok_or_else(|| anyhow!("missing state component"))?
-                    .0
-                    .clone(),
-            )
-        };
         let recent_events =
             self.recent_events_for(speaker_id, speaker_position, self.recent_event_limit);
-        let recent_memories = retrieve_relational_memories(&speaker_memories, listener_id, 5);
-        let tile = self.tile_at(speaker_position);
-        let current_building = tile
-            .and_then(|entry| entry.building_id)
-            .and_then(|id| self.building_name(id));
-        let current_room = tile
-            .and_then(|entry| entry.room_id)
-            .and_then(|id| self.room_name(id));
+        let recent_memories = retrieve_relational_memories(&speaker_memories, primary_target_id, 5);
+        let tile_building_id = self
+            .tile_at(speaker_position)
+            .and_then(|entry| entry.building_id);
+        let tile_room_id = self
+            .tile_at(speaker_position)
+            .and_then(|entry| entry.room_id);
+        let current_building = tile_building_id.and_then(|id| self.building_name(id));
+        let current_room = tile_room_id.and_then(|id| self.room_name(id));
         let agent_name_map = self.agent_name_map();
         let recent_turns = conversation
             .recent_turns
@@ -805,7 +1020,6 @@ impl Simulation {
                 )
             })
             .collect::<Vec<_>>();
-        let relation = self.relation_between(speaker_id, listener_id);
         let speaker_psychological_state = self.psychological_state_for_agent(speaker_id)?;
         let speaker_psychology = self.build_psychological_context_for_values(
             speaker_id,
@@ -817,27 +1031,79 @@ impl Simulation {
             "conversa_ativa",
             &speaker_psychological_state,
         );
-        let listener_memories = self.agent_memories(listener_id)?;
-        let listener_recent_events =
-            self.recent_events_for(listener_id, speaker_position, self.recent_event_limit);
-        let listener_relevant_memories =
-            retrieve_relational_memories(&listener_memories, speaker_id, 5);
-        let listener_profile = self.agent_profile(listener_id)?;
-        let listener_psychological_state = self.psychological_state_for_agent(listener_id)?;
-        let listener_psychology = self.build_psychological_context_for_values(
-            listener_id,
-            &listener_profile,
-            &listener_state,
-            &listener_memories,
-            &listener_recent_events,
-            &listener_relevant_memories,
-            "observando_conversa",
-            &listener_psychological_state,
-        );
-        let relational_context =
-            self.build_relational_history(speaker_id, listener_id, &relation, &speaker_memories);
         let speaker_injury = self.agent_injury(speaker_id)?;
         let reactive_summary = self.current_reactive_psychology_summary(speaker_id)?;
+
+        let other_participants = conversation
+            .participant_ids
+            .iter()
+            .copied()
+            .filter(|agent_id| *agent_id != speaker_id)
+            .collect::<Vec<_>>();
+        let mut participant_inputs = Vec::new();
+        for participant_id in &other_participants {
+            let participant_entity = self.find_agent_entity(*participant_id)?;
+            let (participant_name, participant_role, participant_state) = {
+                let entry = self.world.entity(participant_entity);
+                (
+                    entry
+                        .get::<AgentCore>()
+                        .ok_or_else(|| anyhow!("missing agent core"))?
+                        .name
+                        .clone(),
+                    entry
+                        .get::<AgentCore>()
+                        .ok_or_else(|| anyhow!("missing agent core"))?
+                        .role_id
+                        .clone(),
+                    entry
+                        .get::<StateComponent>()
+                        .ok_or_else(|| anyhow!("missing state component"))?
+                        .0
+                        .clone(),
+                )
+            };
+            let relation = self.relation_between(speaker_id, *participant_id);
+            let participant_memories = self.agent_memories(*participant_id)?;
+            let participant_recent_events =
+                self.recent_events_for(*participant_id, speaker_position, self.recent_event_limit);
+            let participant_relevant_memories =
+                retrieve_relational_memories(&participant_memories, speaker_id, 5);
+            let participant_profile = self.agent_profile(*participant_id)?;
+            let participant_psychological_state =
+                self.psychological_state_for_agent(*participant_id)?;
+            let participant_psychology = self.build_psychological_context_for_values(
+                *participant_id,
+                &participant_profile,
+                &participant_state,
+                &participant_memories,
+                &participant_recent_events,
+                &participant_relevant_memories,
+                "observando_conversa",
+                &participant_psychological_state,
+            );
+            participant_inputs.push(ConversationObservedAgentInput {
+                id: *participant_id,
+                name: participant_name,
+                role: self.role_display_name(&participant_role),
+                state: participant_state,
+                relation,
+                perceived_status: self.visible_prestige_summary(*participant_id),
+                visible_equipment_summary: self.visible_equipment_summary(*participant_id),
+                psychological_summary: participant_psychology,
+                distance_tiles: speaker_position
+                    .manhattan(self.debug_agent_position(*participant_id)?)
+                    as u32,
+            });
+        }
+
+        let primary_relation = self.relation_between(speaker_id, primary_target_id);
+        let relational_context = self.build_relational_history(
+            speaker_id,
+            primary_target_id,
+            &primary_relation,
+            &speaker_memories,
+        );
 
         Ok(ConversationTurnInput {
             speaker_id,
@@ -865,15 +1131,16 @@ impl Simulation {
             humiliation_risk_summary: reactive_summary.humiliation_risk_summary.clone(),
             deference_or_revenge_summary: reactive_summary.deference_or_revenge_summary.clone(),
             audience_summary: reactive_summary.audience_summary.clone(),
-            listener: ConversationObservedAgentInput {
-                id: listener_id,
-                name: listener_name,
-                role: self.role_display_name(&listener_role),
-                state: listener_state,
-                relation,
-                perceived_status: self.visible_prestige_summary(listener_id),
-                visible_equipment_summary: self.visible_equipment_summary(listener_id),
-                psychological_summary: listener_psychology,
+            participants: participant_inputs,
+            audience_size: other_participants.len().saturating_sub(1),
+            is_group_conversation: conversation.participant_ids.len() > 2,
+            public_pressure_summary: if conversation.participant_ids.len() > 2 {
+                format!(
+                    "conversa publica em grupo de {} agentes na mesma sala",
+                    conversation.participant_ids.len()
+                )
+            } else {
+                "sem plateia relevante".to_string()
             },
             context: ConversationContextInput {
                 conversation_id: conversation.id,
@@ -881,6 +1148,14 @@ impl Simulation {
                 current_area: self.area_name(speaker_position),
                 current_building,
                 current_room,
+                current_room_place_id: tile_room_id.map(|id| format!("room:{}", id)),
+                participant_ids: conversation.participant_ids.clone(),
+                participant_names: conversation
+                    .participant_ids
+                    .iter()
+                    .filter_map(|agent_id| agent_name_map.get(agent_id).cloned())
+                    .collect(),
+                group_size: conversation.participant_ids.len(),
                 max_turns: conversation.max_turns,
                 turn_count: conversation.turn_count,
                 turns_remaining: conversation
@@ -899,6 +1174,16 @@ impl Simulation {
                 .into_iter()
                 .rev()
                 .collect(),
+            recent_speakers: conversation
+                .recent_turns
+                .iter()
+                .map(|turn| turn.speaker_id)
+                .collect(),
+            recent_targets: conversation
+                .recent_turns
+                .iter()
+                .flat_map(|turn| turn.addressed_agent_ids.iter().copied())
+                .collect(),
             chaos_pressure: self.agent_chaos_pressure(speaker_id).unwrap_or(0),
             personality_traits: speaker_profile.traits.clone(),
             trauma_traits: speaker_profile.trauma_traits.clone(),
@@ -908,8 +1193,9 @@ impl Simulation {
                 .filter(|s| s.known_by.contains(&speaker_id))
                 .map(|s| format!("ID: {} - {} Detalhes: {}", s.id, s.summary, s.details))
                 .collect(),
-            information_context: self.build_information_context(speaker_id, Some(listener_id)),
-            cultural_context: self.build_cultural_context(speaker_id, Some(listener_id)),
+            information_context: self
+                .build_information_context(speaker_id, Some(primary_target_id)),
+            cultural_context: self.build_cultural_context(speaker_id, Some(primary_target_id)),
             body_parts: speaker_injury.body_parts.clone(),
         })
     }
@@ -918,14 +1204,49 @@ impl Simulation {
         &mut self,
         conversation_id: ConversationId,
         speaker_id: u64,
-        listener_id: u64,
+        primary_target_id: Option<u64>,
         output: crate::agent_mind::ConversationTurnOutput,
     ) -> Result<()> {
+        let conversation_snapshot = self
+            .conversation_state(conversation_id)
+            .ok_or_else(|| anyhow!("conversation {conversation_id} not found"))?;
         let speaker_name = self.agent_name(speaker_id)?;
-        let listener_name = self.agent_name(listener_id)?;
+
+        let mut addressed_agent_ids = Vec::new();
+        for agent_id in &output.addressed_agent_ids {
+            if *agent_id != speaker_id
+                && conversation_snapshot.participant_ids.contains(agent_id)
+                && !addressed_agent_ids.contains(agent_id)
+            {
+                addressed_agent_ids.push(*agent_id);
+            }
+        }
+        if addressed_agent_ids.is_empty() {
+            if let Some(target_id) = primary_target_id.filter(|agent_id| *agent_id != speaker_id) {
+                addressed_agent_ids.push(target_id);
+            } else if let Some(target_id) =
+                self.select_conversation_primary_target(&conversation_snapshot, speaker_id)
+            {
+                addressed_agent_ids.push(target_id);
+            }
+        }
+        if addressed_agent_ids.is_empty() {
+            return Ok(());
+        }
+        let primary_target_id = addressed_agent_ids[0];
+        let addressed_names = addressed_agent_ids
+            .iter()
+            .map(|agent_id| self.agent_name(*agent_id))
+            .collect::<Result<Vec<_>>>()?;
+        let audience_ids = conversation_snapshot
+            .participant_ids
+            .iter()
+            .copied()
+            .filter(|agent_id| *agent_id != speaker_id && !addressed_agent_ids.contains(agent_id))
+            .collect::<Vec<_>>();
         let turn = ConversationTurn {
             speaker_id,
-            listener_id,
+            addressed_agent_ids: addressed_agent_ids.clone(),
             tick: self.total_ticks,
             utterance: output.utterance.clone(),
             speech_act: output.speech_act.clone(),
@@ -933,154 +1254,52 @@ impl Simulation {
             tone: output.tone.clone(),
         };
 
-        self.apply_relation_delta(speaker_id, listener_id, &output.relation_delta_hint)?;
-        self.apply_relation_delta(
-            listener_id,
-            speaker_id,
-            &invert_delta(&output.relation_delta_hint),
-        )?;
-        self.apply_conversation_effects(
-            speaker_id,
-            listener_id,
-            &output.speech_act,
-            &output.emotion,
-            output.risk_shift.unwrap_or(0),
-            &output.belief_updates,
-        )?;
-
-        // Propagação do Edital do Rei / Telefone Sem Fio
-        let mut editais_para_passar = Vec::new();
-        let editais_ativos = self.active_edict_tags();
-
-        if !editais_ativos.is_empty() {
-            let speaker_role = self.agent_role_id(speaker_id)?;
-            let speaker_memories = self.agent_memories(speaker_id)?;
-            let listener_memories = self.agent_memories(listener_id)?;
-
-            for edital in editais_ativos {
-                let speaker_sabe = speaker_role == "lider_local"
-                    || speaker_role == "guarda"
-                    || speaker_memories.iter().any(|m| m.tags.contains(&edital));
-
-                if speaker_sabe {
-                    let listener_sabe = listener_memories.iter().any(|m| m.tags.contains(&edital));
-                    if !listener_sabe {
-                        editais_para_passar.push(edital);
-                    }
-                }
-            }
+        for &target_id in &addressed_agent_ids {
+            self.apply_relation_delta(speaker_id, target_id, &output.relation_delta_hint)?;
+            self.apply_relation_delta(
+                target_id,
+                speaker_id,
+                &invert_delta(&output.relation_delta_hint),
+            )?;
+            self.apply_conversation_effects(
+                speaker_id,
+                target_id,
+                &output.speech_act,
+                &output.emotion,
+                output.risk_shift.unwrap_or(0),
+                &output.belief_updates,
+            )?;
         }
-
-        for edital in editais_para_passar {
-            let edital_desc = match edital.as_str() {
-                "trabalho_forcado_campos" => "Trabalho Forcado nos Campos",
-                "racionamento_estrito" => "Racionamento Estrito de Graos",
-                "imposto_guerra" => "Imposto de Guerra Dobrado",
-                "proibicao_tavernas" => "Proibicao de Tavernas",
-                "confisco_metais" => "Confisco Geral de Metais",
-                _ => edital.as_str(),
-            };
-
+        let audience_delta = Self::softened_group_delta(&output.relation_delta_hint);
+        for &audience_id in &audience_ids {
+            self.apply_relation_delta(speaker_id, audience_id, &audience_delta)?;
+            self.apply_relation_delta(audience_id, speaker_id, &invert_delta(&audience_delta))?;
             self.add_memory(
-                listener_id,
-                MemoryKind::Fact,
+                audience_id,
+                MemoryKind::Impression,
                 format!(
-                    "Ouvi de {} que o Rei decretou o edital: {}",
-                    speaker_name, edital_desc
+                    "{} falou para {} diante de mim: {}",
+                    speaker_name,
+                    addressed_names.join(", "),
+                    output.speech_act
                 ),
-                vec!["edital_rei".to_string(), edital.clone()],
-                5,
+                vec![
+                    "social".to_string(),
+                    "conversa".to_string(),
+                    "plateia".to_string(),
+                ],
+                4,
                 vec![speaker_id],
             )?;
-
-            self.push_event(WorldEvent {
-                day: self.day,
-                tick: self.tick_of_day,
-                actor: speaker_id,
-                target: Some(listener_id),
-                kind: EventKind::SocialBond,
-                summary: format!(
-                    "{} espalhou a noticia do edital '{}' para {}",
-                    speaker_name, edital, listener_name
-                ),
-                impact_tags: vec![
-                    "edital_rei".to_string(),
-                    "telefone_sem_fio".to_string(),
-                    edital.clone(),
-                ],
-            });
-
-            // Avaliar resistência psicológica imediatamente no listener ao saber da notícia!
-            self.apply_edict_psychological_resistance(listener_id, &edital)?;
         }
 
-        // Conspiração do Mercado Negro
-        let speaker_role = self.agent_role_id(speaker_id)?;
-        let listener_role = self.agent_role_id(listener_id)?;
-
-        let comum = speaker_role != "lider_local"
-            && speaker_role != "guarda"
-            && listener_role != "lider_local"
-            && listener_role != "guarda";
-
-        if comum {
-            let speaker_state = self.agent_state(speaker_id)?;
-            let listener_state = self.agent_state(listener_id)?;
-            let speaker_memories = self.agent_memories(speaker_id)?;
-
-            let speaker_conhece = speaker_memories
-                .iter()
-                .any(|m| m.tags.contains(&"edital_rei".to_string()));
-            let estressados = speaker_state.stress >= 50 || listener_state.stress >= 50;
-
-            if speaker_conhece && estressados {
-                let speaker_tem_mn = speaker_memories
-                    .iter()
-                    .any(|m| m.tags.contains(&"mercado_negro".to_string()));
-                let listener_memories = self.agent_memories(listener_id)?;
-                let listener_tem_mn = listener_memories
-                    .iter()
-                    .any(|m| m.tags.contains(&"mercado_negro".to_string()));
-
-                if !speaker_tem_mn || !listener_tem_mn {
-                    if !speaker_tem_mn {
-                        self.add_memory(
-                            speaker_id,
-                            MemoryKind::Fact,
-                            "Nos decidimos conspirar contra as leis do Rei e planejar o contrabando.".to_string(),
-                            vec!["mercado_negro".to_string(), "conspiracao".to_string()],
-                            8,
-                            vec![listener_id],
-                        )?;
-                    }
-                    if !listener_tem_mn {
-                        self.add_memory(
-                            listener_id,
-                            MemoryKind::Fact,
-                            "Nos decidimos conspirar contra as leis do Rei e planejar o contrabando.".to_string(),
-                            vec!["mercado_negro".to_string(), "conspiracao".to_string()],
-                            8,
-                            vec![speaker_id],
-                        )?;
-                    }
-
-                    self.push_event(WorldEvent {
-                        day: self.day,
-                        tick: self.tick_of_day,
-                        actor: speaker_id,
-                        target: Some(listener_id),
-                        kind: EventKind::SocialBond,
-                        summary: format!(
-                            "{} e {} sussurraram e conspiraram sobre o mercado negro na taverna",
-                            speaker_name, listener_name
-                        ),
-                        impact_tags: vec!["mercado_negro".to_string(), "conspiracao".to_string()],
-                    });
-                }
-            }
-        }
-
-        let (should_end, end_status, end_outcome, end_reason) = {
+        let current_total_ticks = self.total_ticks;
+        let (should_end, end_status, end_outcome, end_reason, next_speaker_id) = {
+            let next_speaker_id = self.select_next_group_speaker(
+                &conversation_snapshot,
+                speaker_id,
+                &addressed_agent_ids,
+            );
             let conversation = self
                 .conversation_state_mut(conversation_id)
                 .ok_or_else(|| anyhow!("conversation {conversation_id} not found"))?;
@@ -1089,6 +1308,7 @@ impl Simulation {
                 &conversation.summary,
                 &format!("{speaker_name}: {}", output.utterance),
             );
+            conversation.last_speaker_id = Some(speaker_id);
             conversation.recent_turns.push(turn);
             if conversation.recent_turns.len() > CONVERSATION_RECENT_TURNS_LIMIT {
                 let overflow = conversation.recent_turns.len() - CONVERSATION_RECENT_TURNS_LIMIT;
@@ -1101,8 +1321,16 @@ impl Simulation {
             {
                 participant.last_speech_act = Some(output.speech_act.clone());
                 participant.last_emotion = Some(output.emotion.clone());
+                participant.engaged = true;
+                participant.wants_to_continue = output.intent_to_continue;
                 if let Some(goal) = output.belief_updates.first() {
                     participant.social_goal = goal.clone();
+                }
+            }
+            for participant in conversation.participant_states.iter_mut() {
+                if addressed_agent_ids.contains(&participant.agent_id) {
+                    participant.last_addressed_tick = Some(current_total_ticks);
+                    participant.engaged = true;
                 }
             }
 
@@ -1119,7 +1347,12 @@ impl Simulation {
                     "a conversa atingiu o limite de turnos".to_string(),
                 ))
             } else {
-                conversation.current_speaker_id = listener_id;
+                conversation.current_speaker_id = next_speaker_id;
+                conversation.turn_order_cursor = conversation
+                    .participant_ids
+                    .iter()
+                    .position(|agent_id| *agent_id == next_speaker_id)
+                    .unwrap_or(0);
                 None
             };
             (
@@ -1133,24 +1366,45 @@ impl Simulation {
                     .map(|tuple| tuple.1.clone())
                     .unwrap_or(ConversationOutcome::Ongoing),
                 should_end.map(|tuple| tuple.2).unwrap_or_default(),
+                next_speaker_id,
             )
         };
 
         self.set_last_social_act(speaker_id, output.speech_act.clone())?;
-        self.set_last_social_act(listener_id, format!("ouve {}", output.speech_act))?;
+        for &target_id in &addressed_agent_ids {
+            self.set_last_social_act(target_id, format!("ouve {}", output.speech_act))?;
+        }
+        for &audience_id in &audience_ids {
+            self.set_last_social_act(audience_id, format!("assiste {}", output.speech_act))?;
+        }
         self.push_event(WorldEvent {
             day: self.day,
             tick: self.tick_of_day,
             actor: speaker_id,
-            target: Some(listener_id),
+            target: Some(primary_target_id),
             kind: EventKind::ConversationTurn,
-            summary: format!(
-                "{speaker_name} fala com {listener_name}: {}",
-                output.utterance
-            ),
+            summary: if audience_ids.is_empty() {
+                format!(
+                    "{speaker_name} fala com {}: {}",
+                    addressed_names.join(", "),
+                    output.utterance
+                )
+            } else {
+                format!(
+                    "{speaker_name} fala para {} diante de {} ouvinte(s): {}",
+                    addressed_names.join(", "),
+                    audience_ids.len(),
+                    output.utterance
+                )
+            },
             impact_tags: vec![
                 "social".to_string(),
                 "conversa".to_string(),
+                if audience_ids.is_empty() {
+                    "dupla".to_string()
+                } else {
+                    "grupo".to_string()
+                },
                 output.speech_act.clone(),
             ],
         });
@@ -1165,23 +1419,25 @@ impl Simulation {
             self.execute_dialogue_make_promise(speaker_id, promise)?;
         }
         if let Some(ref rumor) = output.spread_rumor {
-            self.execute_dialogue_spread_rumor(speaker_id, listener_id, rumor)?;
+            self.execute_dialogue_spread_rumor(speaker_id, primary_target_id, rumor)?;
         }
         if let Some(ref story) = output.shared_story {
-            self.execute_dialogue_share_story(speaker_id, listener_id, story)?;
+            self.execute_dialogue_share_story(speaker_id, primary_target_id, story)?;
         }
         if let Some(ref escrow) = output.escrow_deposit {
             self.execute_dialogue_escrow_deposit(speaker_id, escrow)?;
         }
         if let Some(ref meeting) = output.propose_meeting {
-            self.execute_dialogue_propose_meeting(speaker_id, listener_id, meeting)?;
+            self.execute_dialogue_propose_meeting(speaker_id, primary_target_id, meeting)?;
         }
         if let Some(ref response) = output.meeting_response {
             self.execute_dialogue_meeting_response(speaker_id, response)?;
         }
+        self.apply_faction_recruitment(speaker_id, primary_target_id)?;
 
-        self.apply_faction_recruitment(speaker_id, listener_id)?;
-
+        if !should_end {
+            let _ = next_speaker_id;
+        }
         if should_end {
             self.end_conversation(conversation_id, end_status, end_outcome, end_reason)?;
         }
@@ -1204,25 +1460,44 @@ impl Simulation {
                 .find(|meeting| meeting.id == meeting_id)
                 .cloned()
             {
-                if !self.conversation_between_active(meeting.proposer_id, meeting.invitee_id) {
+                let tracked_participants = self.meeting_confirmed_participants(&meeting);
+                let still_active = tracked_participants.iter().skip(1).any(|agent_id| {
+                    self.conversation_between_active(meeting.proposer_id, *agent_id)
+                });
+                if !still_active {
                     self.set_meeting_status(meeting_id, ScheduledMeetingStatus::Completed, None)?;
                 }
             }
         }
 
-        let accepted = self
+        let pending = self
             .scheduled_meetings
             .iter()
-            .filter(|meeting| meeting.status == ScheduledMeetingStatus::Accepted)
+            .filter(|meeting| {
+                matches!(
+                    meeting.status,
+                    ScheduledMeetingStatus::Proposed | ScheduledMeetingStatus::Accepted
+                )
+            })
             .cloned()
             .collect::<Vec<_>>();
-        for meeting in accepted {
+        for meeting in pending {
+            let confirmed_participants = self.meeting_confirmed_participants(&meeting);
+            if confirmed_participants.len() < 2 {
+                let all_answered = meeting.responses.len() >= meeting.invitee_ids.len();
+                if all_answered {
+                    self.set_meeting_status(meeting.id, ScheduledMeetingStatus::Rejected, None)?;
+                }
+                continue;
+            }
+
             let due_soon = meeting.scheduled_day == now_day
                 && meeting.scheduled_tick >= now_tick
                 && meeting.scheduled_tick.saturating_sub(now_tick) <= 30;
             if due_soon {
-                self.queue_meeting_travel_task(meeting.proposer_id, &meeting.place_id)?;
-                self.queue_meeting_travel_task(meeting.invitee_id, &meeting.place_id)?;
+                for &agent_id in &confirmed_participants {
+                    self.queue_meeting_travel_task(agent_id, &meeting.place_id)?;
+                }
             }
 
             let due = meeting.scheduled_day < now_day
@@ -1230,16 +1505,19 @@ impl Simulation {
             if !due {
                 continue;
             }
-            if self.participant_near_place(meeting.proposer_id, &meeting.place_id)?
-                && self.participant_near_place(meeting.invitee_id, &meeting.place_id)?
-                && self.agents_adjacent(meeting.proposer_id, meeting.invitee_id)?
+
+            let mut present = Vec::new();
+            for &agent_id in &confirmed_participants {
+                if self.participant_near_place(agent_id, &meeting.place_id)? {
+                    present.push(agent_id);
+                }
+            }
+            let proposer_present = present.contains(&meeting.proposer_id);
+            if proposer_present
+                && present.len() >= 2
+                && self.participants_share_room_and_radius(&present)?
             {
-                if self.open_conversation(
-                    meeting.proposer_id,
-                    meeting.invitee_id,
-                    SocialMove::Chat,
-                    "encontro_marcado",
-                )? {
+                if self.open_conversation(present.clone(), SocialMove::Chat, "encontro_marcado")? {
                     self.set_meeting_status(meeting.id, ScheduledMeetingStatus::Active, None)?;
                 }
             } else if meeting.scheduled_day < now_day
@@ -1257,7 +1535,17 @@ impl Simulation {
         listener_id: u64,
         meeting: &ProposedMeeting,
     ) -> Result<()> {
-        if meeting.invitee_id != listener_id || self.place_by_id(&meeting.place_id).is_none() {
+        let mut invitee_ids = Vec::new();
+        for invitee_id in &meeting.invitee_ids {
+            if *invitee_id != speaker_id && !invitee_ids.contains(invitee_id) {
+                invitee_ids.push(*invitee_id);
+            }
+        }
+        if invitee_ids.is_empty()
+            || !invitee_ids.contains(&listener_id)
+            || invitee_ids.len() > 4
+            || self.place_by_id(&meeting.place_id).is_none()
+        {
             self.push_event(WorldEvent {
                 day: self.day,
                 tick: self.tick_of_day,
@@ -1265,12 +1553,17 @@ impl Simulation {
                 target: Some(listener_id),
                 kind: EventKind::CognitionFailure,
                 summary: format!(
-                    "Proposta de encontro ignorada por contrato invalido: place_id={} invitee_id={}",
-                    meeting.place_id, meeting.invitee_id
+                    "Proposta de encontro ignorada por contrato invalido: place_id={} invitees={:?}",
+                    meeting.place_id, invitee_ids
                 ),
                 impact_tags: vec!["encontro".to_string(), "place_id_invalido".to_string()],
             });
             return Ok(());
+        }
+        for invitee_id in &invitee_ids {
+            if self.find_agent_entity(*invitee_id).is_err() {
+                return Ok(());
+            }
         }
         let Some(scheduled_tick) = self.parse_scheduled_time_to_tick(&meeting.scheduled_time)
         else {
@@ -1296,53 +1589,66 @@ impl Simulation {
         self.scheduled_meetings.push(ScheduledMeeting {
             id,
             proposer_id: speaker_id,
-            invitee_id: listener_id,
+            invitee_ids: invitee_ids.clone(),
             place_id: meeting.place_id.clone(),
             scheduled_day: meeting.scheduled_day,
             scheduled_tick,
             purpose: meeting.purpose.clone(),
             status: ScheduledMeetingStatus::Proposed,
             created_tick: self.total_ticks,
-            response_tick: None,
+            responses: Vec::new(),
         });
         let speaker_name = self.agent_name(speaker_id)?;
-        let listener_name = self.agent_name(listener_id)?;
         let place_name = self
             .place_by_id(&meeting.place_id)
             .map(|place| place.display_name)
             .unwrap_or_else(|| meeting.place_id.clone());
-        self.add_memory(
-            listener_id,
-            MemoryKind::Fact,
-            format!(
-                "{} marcou um encontro comigo em {} no Dia {} as {}: {}",
-                speaker_name,
-                place_name,
-                meeting.scheduled_day,
-                meeting.scheduled_time,
-                meeting.purpose
-            ),
-            vec!["encontro".to_string(), "agenda_social".to_string()],
-            5,
-            vec![speaker_id],
-        )?;
+        for &invitee_id in &invitee_ids {
+            self.add_memory(
+                invitee_id,
+                MemoryKind::Fact,
+                format!(
+                    "{} marcou um encontro comigo em {} no Dia {} as {}: {}",
+                    speaker_name,
+                    place_name,
+                    meeting.scheduled_day,
+                    meeting.scheduled_time,
+                    meeting.purpose
+                ),
+                vec!["encontro".to_string(), "agenda_social".to_string()],
+                5,
+                vec![speaker_id],
+            )?;
+        }
+        let invitee_names = invitee_ids
+            .iter()
+            .map(|agent_id| self.agent_name(*agent_id))
+            .collect::<Result<Vec<_>>>()?;
         self.push_event(WorldEvent {
             day: self.day,
             tick: self.tick_of_day,
             actor: speaker_id,
-            target: Some(listener_id),
+            target: invitee_ids.first().copied(),
             kind: EventKind::Meeting,
             summary: format!(
-                "{} propos encontro #{} com {} em {} no Dia {} tick {}: {}",
+                "{} propos encontro em grupo #{} com {} em {} no Dia {} tick {}: {}",
                 speaker_name,
                 id,
-                listener_name,
+                invitee_names.join(", "),
                 place_name,
                 meeting.scheduled_day,
                 scheduled_tick,
                 meeting.purpose
             ),
-            impact_tags: vec!["encontro".to_string(), "proposto".to_string()],
+            impact_tags: vec![
+                "encontro".to_string(),
+                "proposto".to_string(),
+                if invitee_ids.len() > 1 {
+                    "grupo".to_string()
+                } else {
+                    "dupla".to_string()
+                },
+            ],
         });
         Ok(())
     }
@@ -1352,7 +1658,7 @@ impl Simulation {
         responder_id: u64,
         response: &MeetingResponse,
     ) -> Result<()> {
-        let Some(meeting) = self
+        let Some(meeting_snapshot) = self
             .scheduled_meetings
             .iter()
             .find(|meeting| meeting.id == response.meeting_id)
@@ -1360,26 +1666,68 @@ impl Simulation {
         else {
             return Ok(());
         };
-        if meeting.invitee_id != responder_id || meeting.status != ScheduledMeetingStatus::Proposed
+        if !meeting_snapshot.invitee_ids.contains(&responder_id)
+            || !matches!(
+                meeting_snapshot.status,
+                ScheduledMeetingStatus::Proposed | ScheduledMeetingStatus::Accepted
+            )
         {
             return Ok(());
         }
-        let new_status = if response.accept {
+
+        if let Some(meeting) = self
+            .scheduled_meetings
+            .iter_mut()
+            .find(|meeting| meeting.id == response.meeting_id)
+        {
+            if let Some(existing) = meeting
+                .responses
+                .iter_mut()
+                .find(|entry| entry.agent_id == responder_id)
+            {
+                existing.accept = response.accept;
+                existing.reason = response.reason.clone();
+                existing.response_tick = self.total_ticks;
+            } else {
+                meeting.responses.push(MeetingParticipantResponse {
+                    agent_id: responder_id,
+                    accept: response.accept,
+                    reason: response.reason.clone(),
+                    response_tick: self.total_ticks,
+                });
+            }
+        }
+
+        let updated_meeting = self
+            .scheduled_meetings
+            .iter()
+            .find(|meeting| meeting.id == response.meeting_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("meeting disappeared"))?;
+        let accepted_count = updated_meeting
+            .responses
+            .iter()
+            .filter(|entry| entry.accept)
+            .count();
+        let responded_count = updated_meeting.responses.len();
+        let new_status = if accepted_count > 0 {
             ScheduledMeetingStatus::Accepted
-        } else {
+        } else if responded_count >= updated_meeting.invitee_ids.len() {
             ScheduledMeetingStatus::Rejected
+        } else {
+            ScheduledMeetingStatus::Proposed
         };
-        self.set_meeting_status(meeting.id, new_status, Some(self.total_ticks))?;
+        self.set_meeting_status(updated_meeting.id, new_status, Some(self.total_ticks))?;
         if response.accept {
-            self.queue_meeting_travel_task(meeting.proposer_id, &meeting.place_id)?;
-            self.queue_meeting_travel_task(meeting.invitee_id, &meeting.place_id)?;
+            self.queue_meeting_travel_task(updated_meeting.proposer_id, &updated_meeting.place_id)?;
+            self.queue_meeting_travel_task(responder_id, &updated_meeting.place_id)?;
         }
         let responder_name = self.agent_name(responder_id)?;
         self.push_event(WorldEvent {
             day: self.day,
             tick: self.tick_of_day,
             actor: responder_id,
-            target: Some(meeting.proposer_id),
+            target: Some(updated_meeting.proposer_id),
             kind: EventKind::Meeting,
             summary: format!(
                 "{} {} encontro #{}: {}",
@@ -1389,7 +1737,7 @@ impl Simulation {
                 } else {
                     "recusou"
                 },
-                meeting.id,
+                updated_meeting.id,
                 response.reason
             ),
             impact_tags: vec![
@@ -1418,6 +1766,45 @@ impl Simulation {
 
     fn meeting_time_is_future(&self, scheduled_day: u32, scheduled_tick: u32) -> bool {
         scheduled_day > self.day || (scheduled_day == self.day && scheduled_tick > self.tick_of_day)
+    }
+
+    fn meeting_confirmed_participants(&self, meeting: &ScheduledMeeting) -> Vec<u64> {
+        let mut participants = vec![meeting.proposer_id];
+        let accepted = meeting
+            .responses
+            .iter()
+            .filter(|response| response.accept)
+            .map(|response| response.agent_id)
+            .collect::<Vec<_>>();
+        if accepted.is_empty() {
+            if meeting.invitee_ids.len() == 1
+                && matches!(
+                    meeting.status,
+                    ScheduledMeetingStatus::Accepted
+                        | ScheduledMeetingStatus::Active
+                        | ScheduledMeetingStatus::Completed
+                )
+            {
+                participants.push(meeting.invitee_ids[0]);
+            }
+        } else {
+            for agent_id in accepted {
+                if meeting.invitee_ids.contains(&agent_id) && !participants.contains(&agent_id) {
+                    participants.push(agent_id);
+                }
+            }
+        }
+        participants
+    }
+
+    fn meeting_all_participants(&self, meeting: &ScheduledMeeting) -> Vec<u64> {
+        let mut participants = vec![meeting.proposer_id];
+        for &agent_id in &meeting.invitee_ids {
+            if !participants.contains(&agent_id) {
+                participants.push(agent_id);
+            }
+        }
+        participants
     }
 
     fn queue_meeting_travel_task(&mut self, agent_id: u64, place_id: &str) -> Result<()> {
@@ -1454,8 +1841,8 @@ impl Simulation {
     fn conversation_between_active(&self, a: u64, b: u64) -> bool {
         self.conversations.iter().any(|conversation| {
             conversation.status == ConversationStatus::Active
-                && conversation.participants.contains(&a)
-                && conversation.participants.contains(&b)
+                && conversation.participant_ids.contains(&a)
+                && conversation.participant_ids.contains(&b)
         })
     }
 
@@ -1474,17 +1861,17 @@ impl Simulation {
         };
         meeting.status = status;
         if response_tick.is_some() {
-            meeting.response_tick = response_tick;
+            let _ = response_tick;
         }
         let actor = meeting.proposer_id;
-        let target = meeting.invitee_id;
+        let target = meeting.invitee_ids.first().copied();
         let id = meeting.id;
         let status_label = format!("{:?}", meeting.status);
         self.push_event(WorldEvent {
             day: self.day,
             tick: self.tick_of_day,
             actor,
-            target: Some(target),
+            target,
             kind: EventKind::Meeting,
             summary: format!("Encontro #{} agora esta {}", id, status_label),
             impact_tags: vec!["encontro".to_string(), status_label],
@@ -1502,40 +1889,39 @@ impl Simulation {
             return Ok(());
         };
         self.set_meeting_status(meeting_id, ScheduledMeetingStatus::Missed, None)?;
-        self.add_memory(
-            meeting.proposer_id,
-            MemoryKind::Failure,
-            format!(
-                "O encontro #{} foi perdido: {}",
-                meeting.id, meeting.purpose
-            ),
-            vec!["encontro".to_string(), "perdido".to_string()],
-            6,
-            vec![meeting.invitee_id],
-        )?;
-        self.add_memory(
-            meeting.invitee_id,
-            MemoryKind::Failure,
-            format!(
-                "O encontro #{} foi perdido: {}",
-                meeting.id, meeting.purpose
-            ),
-            vec!["encontro".to_string(), "perdido".to_string()],
-            6,
-            vec![meeting.proposer_id],
-        )?;
-        self.apply_relation_delta(
-            meeting.proposer_id,
-            meeting.invitee_id,
-            &RelationDelta {
-                trust: -1,
-                friendship: 0,
-                resentment: 1,
-                attraction: 0,
-                moral_debt: 0,
-                reputation: -1,
-            },
-        )?;
+        let participants = self.meeting_all_participants(&meeting);
+        for &agent_id in &participants {
+            let others = participants
+                .iter()
+                .copied()
+                .filter(|other_id| *other_id != agent_id)
+                .collect::<Vec<_>>();
+            self.add_memory(
+                agent_id,
+                MemoryKind::Failure,
+                format!(
+                    "O encontro #{} foi perdido: {}",
+                    meeting.id, meeting.purpose
+                ),
+                vec!["encontro".to_string(), "perdido".to_string()],
+                6,
+                others,
+            )?;
+        }
+        for &invitee_id in &meeting.invitee_ids {
+            self.apply_relation_delta(
+                meeting.proposer_id,
+                invitee_id,
+                &RelationDelta {
+                    trust: -1,
+                    friendship: 0,
+                    resentment: 1,
+                    attraction: 0,
+                    moral_debt: 0,
+                    reputation: -1,
+                },
+            )?;
+        }
         Ok(())
     }
 
@@ -3048,17 +3434,19 @@ impl Simulation {
             conversation.status = status.clone();
             conversation.outcome = outcome.clone();
             conversation.end_reason = Some(reason.clone());
-            (conversation.participants, conversation.summary.clone())
+            (
+                conversation.participant_ids.clone(),
+                conversation.summary.clone(),
+            )
         };
 
-        let [agent_a, agent_b] = participants;
+        let _ = participants.as_slice();
 
         // Refund any active escrows between the participants of this conversation
         let mut refunded_escrows = Vec::new();
         self.active_escrows.retain(|escrow| {
-            let matches_participants = (escrow.depositor_id == agent_a
-                && escrow.target_agent_id == agent_b)
-                || (escrow.depositor_id == agent_b && escrow.target_agent_id == agent_a);
+            let matches_participants = participants.contains(&escrow.depositor_id)
+                && participants.contains(&escrow.target_agent_id);
             if matches_participants {
                 refunded_escrows.push(escrow.clone());
                 false
@@ -3103,7 +3491,12 @@ impl Simulation {
             });
         }
 
-        for (agent_id, other_id) in [(agent_a, agent_b), (agent_b, agent_a)] {
+        for agent_id in participants.iter().copied() {
+            let other_id = participants
+                .iter()
+                .copied()
+                .find(|other_id| *other_id != agent_id)
+                .unwrap_or(agent_id);
             let other_name = self.agent_name(other_id)?;
             self.release_agent_from_conversation(agent_id, reason.clone())?;
             self.add_memory(
@@ -3119,17 +3512,20 @@ impl Simulation {
                 vec![other_id],
             )?;
         }
-        let agent_a_name = self.agent_name(agent_a)?;
-        let agent_b_name = self.agent_name(agent_b)?;
+        let agent_names = participants
+            .iter()
+            .filter_map(|agent_id| self.agent_name(*agent_id).ok())
+            .collect::<Vec<_>>();
         self.push_event(WorldEvent {
             day: self.day,
             tick: self.tick_of_day,
-            actor: agent_a,
-            target: Some(agent_b),
+            actor: *participants.first().unwrap_or(&0),
+            target: participants.get(1).copied(),
             kind: EventKind::ConversationEnded,
             summary: format!(
-                "Conversa entre {} e {} termina: {}.",
-                agent_a_name, agent_b_name, reason
+                "Conversa entre {} termina: {}.",
+                agent_names.join(", "),
+                reason
             ),
             impact_tags: vec![
                 "social".to_string(),
@@ -3186,7 +3582,7 @@ impl Simulation {
         &mut self,
         agent_id: u64,
         conversation_id: ConversationId,
-        partner_id: u64,
+        participant_ids: &[u64],
         social_act: String,
     ) -> Result<()> {
         self.clear_intent_navigation(agent_id)?;
@@ -3196,7 +3592,7 @@ impl Simulation {
             .get_mut::<ConversationComponent>()
             .ok_or_else(|| anyhow!("missing conversation component"))?;
         conversation.active_conversation_id = Some(conversation_id);
-        conversation.conversation_partner_id = Some(partner_id);
+        conversation.conversation_participant_ids = participant_ids.to_vec();
         conversation.last_social_act = Some(social_act);
         Ok(())
     }
@@ -3212,7 +3608,7 @@ impl Simulation {
             .get_mut::<ConversationComponent>()
             .ok_or_else(|| anyhow!("missing conversation component"))?;
         conversation.active_conversation_id = None;
-        conversation.conversation_partner_id = None;
+        conversation.conversation_participant_ids.clear();
         conversation.last_social_act = Some(social_act);
         conversation.social_cooldown_until = self.total_ticks + 2;
         Ok(())
@@ -3669,6 +4065,7 @@ impl Simulation {
                         ConversationComponent::default(),
                         EconomicActivityComponent::default(),
                         TraumaTrackerComponent::default(),
+                        UtilityControlComponent::default(),
                     ),
                 ));
 

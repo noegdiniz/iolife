@@ -321,9 +321,11 @@ fn render_agent_detail(frame: &mut Frame<'_>, area: Rect, view: Option<&AgentVie
         format!(
             "Conversa ativa: #{}\nParceiro: {}\nTurnos: {}\nFalando agora: {}\nUltimo ato social: {}\nResumo: {}",
             conversation_id,
-            view.conversation_partner_name
-                .clone()
-                .unwrap_or_else(|| "desconhecido".to_string()),
+            if view.conversation_participant_names.is_empty() {
+                "desconhecido".to_string()
+            } else {
+                view.conversation_participant_names.join(", ")
+            },
             view.conversation_turn_count.unwrap_or(0),
             if view.speaking_now { "sim" } else { "nao" },
             view.last_social_act

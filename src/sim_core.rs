@@ -31,12 +31,12 @@ use crate::world_model::{
     PoliticalIssueStatus, PoliticalPressure, Polity, PolityId, PostedPrice, PowerCenter,
     PowerCenterId, PromiseCondition, PsychologicalState, RationingPolicy, RefinementLevel,
     RelationDelta, ResourceKind, ResourceStack, Role, RoomId, RoomSpec, Rumor, RumorBelief,
-    ScarcityMetric, ScheduledMeeting, ScheduledMeetingId, ScheduledMeetingStatus, Secret,
-    SecretKind, SentenceKind, SimplifiedTask, SimulationSnapshot, SocialMove, SpatialSnapshot,
-    StoryBelief, StoryStatus, StoryVersion, SuccessionCrisis, SuccessionCrisisId,
-    SuccessionCrisisStatus, Territory, TerritoryId, TileCoord, TileKind, TileSpec, TraumaTracker,
-    VillageEconomy, WarId, WarStage, WarState, WarStatus, WorldEvent, WorldPlaceKind,
-    WorldPlaceRef,
+    SNAPSHOT_SCHEMA_VERSION, ScarcityMetric, ScheduledMeeting, ScheduledMeetingId,
+    ScheduledMeetingStatus, Secret, SecretKind, SentenceKind, SimplifiedTask, SimulationSnapshot,
+    SocialMove, SpatialSnapshot, StoryBelief, StoryStatus, StoryVersion, SuccessionCrisis,
+    SuccessionCrisisId, SuccessionCrisisStatus, Territory, TerritoryId, TileCoord, TileKind,
+    TileSpec, TraumaTracker, VillageEconomy, WarId, WarStage, WarState, WarStatus, WorldEvent,
+    WorldPlaceKind, WorldPlaceRef,
 };
 use anyhow::{Result, anyhow};
 use bevy_ecs::prelude::*;
@@ -63,7 +63,6 @@ use helpers::{
 pub use tick::tick_interval_ms;
 use utility_ai::UtilityControlComponent;
 
-const SNAPSHOT_SCHEMA_VERSION: u32 = 24;
 pub const SIMULATED_MINUTES_PER_TICK: u32 = 1;
 pub const DEFAULT_TICKS_PER_DAY: u32 = 24 * 60 / SIMULATED_MINUTES_PER_TICK;
 pub const DEFAULT_TICKS_PER_SECOND: u32 = 1;
@@ -203,7 +202,7 @@ pub struct LineageComponent {
 #[derive(Component, Clone, Default)]
 pub struct ConversationComponent {
     pub active_conversation_id: Option<ConversationId>,
-    pub conversation_partner_id: Option<u64>,
+    pub conversation_participant_ids: Vec<u64>,
     pub last_social_act: Option<String>,
     pub social_cooldown_until: u64,
 }
@@ -302,7 +301,7 @@ pub struct AgentView {
     pub recent_memories: Vec<AgentMemory>,
     pub relations: Vec<(u64, AgentRelation)>,
     pub active_conversation_id: Option<ConversationId>,
-    pub conversation_partner_name: Option<String>,
+    pub conversation_participant_names: Vec<String>,
     pub conversation_turn_count: Option<u32>,
     pub conversation_summary: Option<String>,
     pub speaking_now: bool,
@@ -565,7 +564,7 @@ impl Simulation {
                     },
                     ConversationComponent {
                         active_conversation_id: agent.active_conversation_id,
-                        conversation_partner_id: agent.conversation_partner_id,
+                        conversation_participant_ids: agent.conversation_participant_ids,
                         last_social_act: agent.last_social_act,
                         social_cooldown_until: agent.social_cooldown_until,
                     },
@@ -881,7 +880,7 @@ impl Simulation {
                 current_building_id: self.tile_at(position.0).and_then(|tile| tile.building_id),
                 current_room_id: self.tile_at(position.0).and_then(|tile| tile.room_id),
                 active_conversation_id: conversation.active_conversation_id,
-                conversation_partner_id: conversation.conversation_partner_id,
+                conversation_participant_ids: conversation.conversation_participant_ids.clone(),
                 last_social_act: conversation.last_social_act.clone(),
                 social_cooldown_until: conversation.social_cooldown_until,
                 last_intent: intent.0.clone(),

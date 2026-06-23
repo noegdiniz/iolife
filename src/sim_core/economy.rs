@@ -5544,6 +5544,7 @@ impl Simulation {
                 ConversationComponent::default(),
                 EconomicActivityComponent::default(),
                 TraumaTrackerComponent::default(),
+                UtilityControlComponent::default(),
             ),
         ));
 
@@ -5613,6 +5614,7 @@ impl Simulation {
                 ConversationComponent::default(),
                 EconomicActivityComponent::default(),
                 TraumaTrackerComponent::default(),
+                UtilityControlComponent::default(),
             ),
         ));
 

@@ -976,7 +976,7 @@ impl Simulation {
             .iter()
             .filter(|conversation| {
                 conversation.status == ConversationStatus::Active
-                    && conversation.participants.contains(&agent_id)
+                    && conversation.participant_ids.contains(&agent_id)
             })
             .map(|conversation| conversation.id)
             .collect::<Vec<_>>();
