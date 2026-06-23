@@ -5,11 +5,10 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0"
+bevy = { version = "0.17", default-features = false, features = ["bevy_window", "bevy_render", "bevy_sprite", "bevy_core_pipeline", "bevy_asset", "bevy_winit", "bevy_ui", "bevy_text", "default_font", "multi_threaded"] }
 bevy_ecs = "0.17"
 chrono = { version = "0.4", features = ["serde"] }
-crossterm = "0.29"
 rand = "0.9"
-ratatui = "0.29"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }

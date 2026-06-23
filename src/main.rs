@@ -1,10 +1,10 @@
 use anyhow::Result;
 use medieval_village_llm::cli::{CliCommand, RunMode, parse_cli_args, usage};
+use medieval_village_llm::gui::run_gui;
 use medieval_village_llm::headless::run_headless;
 use medieval_village_llm::llm_adapter::adapter_from_env;
 use medieval_village_llm::persistence::Persistence;
 use medieval_village_llm::sim_core::Simulation;
-use medieval_village_llm::tui::run_tui;
 use std::env;
 
 fn main() -> Result<()> {
@@ -28,7 +28,7 @@ fn main() -> Result<()> {
     };
     let llm = adapter_from_env()?;
     match options.mode {
-        RunMode::Tui => run_tui(simulation, llm, persistence),
+        RunMode::Gui => run_gui(simulation, llm, persistence),
         RunMode::Headless(config) => run_headless(simulation, llm, persistence, config),
     }
 }

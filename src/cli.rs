@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunMode {
-    Tui,
+    Gui,
     Headless(HeadlessConfig),
 }
 
@@ -41,7 +41,7 @@ where
         match arg.as_str() {
             "--help" | "-h" => return Ok(CliCommand::Help),
             "--headless" => headless_enabled = true,
-            "--tui" => headless_enabled = false,
+            "--gui" => headless_enabled = false,
             "--new" => force_new = true,
             "--map" => headless.render_map = true,
             "--db" => {
@@ -137,7 +137,7 @@ where
     let mode = if headless_enabled {
         RunMode::Headless(headless)
     } else {
-        RunMode::Tui
+        RunMode::Gui
     };
 
     Ok(CliCommand::Run(CliOptions {
@@ -153,8 +153,8 @@ pub fn usage() -> &'static str {
         "Uso:\n",
         "  medieval_village_llm [--headless] [opcoes]\n\n",
         "Modos:\n",
-        "  --headless              roda sem TUI, imprimindo relatorios no stdout\n",
-        "  --tui                   forca o modo interativo (padrao)\n\n",
+        "  --gui                   interface grafica 2D pixel art (padrao)\n",
+        "  --headless              modo console, imprime relatorios no stdout\n\n",
         "Bootstrap:\n",
         "  --new                   ignora save existente e cria uma vila nova\n",
         "  --db PATH               sobrescreve VILLAGE_DB_PATH\n",
@@ -263,7 +263,7 @@ mod tests {
                 assert_eq!(headless.ticks_per_second, 3);
                 assert!(headless.render_map);
             }
-            RunMode::Tui => panic!("expected headless mode"),
+            RunMode::Gui => panic!("expected headless mode"),
         }
     }
 
@@ -310,7 +310,7 @@ mod tests {
         };
         match options.mode {
             RunMode::Headless(headless) => assert_eq!(headless.save_every_ticks, None),
-            RunMode::Tui => panic!("expected headless mode"),
+            RunMode::Gui => panic!("expected headless mode"),
         }
     }
 }
