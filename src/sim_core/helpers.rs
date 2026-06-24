@@ -812,17 +812,6 @@ impl Simulation {
     ) -> Vec<&crate::world_model::RecipeDef> {
         self.recipes_for_establishment_type(&establishment.establishment_type_id)
     }
-
-    pub(super) fn market_quote(
-        &self,
-        resource_id: &str,
-    ) -> Option<&crate::world_model::ExternalMarketQuote> {
-        self.village_economy
-            .external_quotes
-            .iter()
-            .find(|quote| quote.resource_id == resource_id)
-    }
-
     pub(super) fn stock_target_amount(
         &self,
         establishment: &EstablishmentEconomy,
@@ -937,6 +926,7 @@ impl Simulation {
         Ok(())
     }
 
+    #[allow(deprecated)]
     pub fn find_agent_entity(&self, agent_id: u64) -> Result<Entity> {
         self.world
             .iter_entities()

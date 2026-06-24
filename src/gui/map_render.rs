@@ -3,6 +3,7 @@ use super::coords::{TILE_PX, map_size_px};
 use super::palette;
 use super::runtime::GuiRuntimeState;
 use crate::world_model::TileKind;
+use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
@@ -25,7 +26,7 @@ struct MapState {
 
 fn setup(
     mut commands: Commands,
-    sim: Res<GameState>,
+    sim: NonSend<GameState>,
     mut images: ResMut<Assets<Image>>,
     mut state: ResMut<MapState>,
 ) {
@@ -51,7 +52,7 @@ fn setup(
 }
 
 fn redraw_if_dirty(
-    sim: Res<GameState>,
+    sim: NonSend<GameState>,
     state: Res<MapState>,
     mut runtime: ResMut<GuiRuntimeState>,
     mut images: ResMut<Assets<Image>>,
@@ -78,8 +79,9 @@ fn build_map_image(sim: &GameState, gw: u32, gh: u32) -> Image {
         },
         TextureDimension::D2,
         &[0u8, 0, 0, 255],
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
     );
-    image.texture_descriptor.format = TextureFormat::Rgba8UnormSrgb;
     paint_tiles(&mut image, sim, gw, gh);
     image
 }

@@ -50,7 +50,7 @@ impl GuiRuntimeState {
 
 fn advance_simulation(
     time: Res<Time>,
-    mut game: ResMut<GameState>,
+    mut game: NonSendMut<GameState>,
     mut runtime: ResMut<GuiRuntimeState>,
 ) {
     let interval_ms = tick_interval_ms(runtime.ticks_per_second) as f32;

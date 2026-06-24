@@ -300,13 +300,45 @@ impl Simulation {
             let next_plan = output.long_term_plan.trim();
             plan_changed = !next_plan.is_empty() && previous_plan != next_plan;
             psychological.0.long_term_plan = next_plan.to_string();
+            if let Some(fixation) = output
+                .melancholic_fixation
+                .as_ref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+            {
+                psychological.0.melancholic_fixation = Some(fixation.to_string());
+                psychological
+                    .0
+                    .notes
+                    .push(format!("Fixacao melancolica: {}", fixation));
+            }
+            if let Some(contradiction) = output
+                .inner_contradiction_update
+                .as_ref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+            {
+                psychological
+                    .0
+                    .inner_contradictions
+                    .push(crate::world_model::InnerContradiction {
+                        desire: contradiction.to_string(),
+                        fear: "falhar diante do proprio simbolo interno".to_string(),
+                        compromise: next_plan.to_string(),
+                        pressure: 24,
+                    });
+                psychological
+                    .0
+                    .notes
+                    .push(format!("Contradicao interna: {}", contradiction));
+            }
             if plan_changed {
                 psychological.0.last_updated_day = self.day;
                 let plan_note = format!("Plano atualizado: {}", psychological.0.long_term_plan);
                 psychological.0.notes.push(plan_note);
-                psychological.0.clamp_all();
                 new_long_term_plan = psychological.0.long_term_plan.clone();
             }
+            psychological.0.clamp_all();
         }
 
         if let Some(mut intent_comp) = entity_mut.get_mut::<IntentComponent>() {
@@ -1019,6 +1051,43 @@ impl Simulation {
                 recent_events,
                 psychological_state,
             ),
+            personal_symbols: psychological_state
+                .personal_symbols
+                .iter()
+                .take(4)
+                .map(|symbol| {
+                    format!(
+                        "{}: {} ({}, intensidade {})",
+                        symbol.meaning, symbol.text, symbol.emotion, symbol.intensity
+                    )
+                })
+                .collect(),
+            coping_patterns: psychological_state
+                .coping_patterns
+                .iter()
+                .take(4)
+                .map(|pattern| {
+                    format!(
+                        "{:?} quando {}: {} (forca {})",
+                        pattern.kind, pattern.trigger, pattern.behavior_hint, pattern.strength
+                    )
+                })
+                .collect(),
+            persistent_inner_contradictions: psychological_state
+                .inner_contradictions
+                .iter()
+                .take(3)
+                .map(|contradiction| {
+                    format!(
+                        "quer {}, teme {}, tenta {} (pressao {})",
+                        contradiction.desire,
+                        contradiction.fear,
+                        contradiction.compromise,
+                        contradiction.pressure
+                    )
+                })
+                .collect(),
+            melancholic_fixation: psychological_state.melancholic_fixation.clone(),
         }
     }
 
@@ -1543,9 +1612,41 @@ impl Simulation {
                 Self::total_resource_amount(&establishment.stock, ResourceKind::Graos.id())
             })
             .sum();
-        let external_grain_offer = self
-            .market_quote(ResourceKind::Graos.id())
-            .map(|quote| format!("graos externos por {} moedas", quote.buy_price));
+        let external_grain_offer = None;
+        let food_assessment = self.food_crisis_assessment_for_household(context.household_id);
+        let food_chain_status = if food_assessment.food_supply_emergency {
+            format!(
+                "cadeia alimentar sob emergencia: graos={}, comida_pronta={}, processadores_parados={}",
+                food_assessment.village_grain_units,
+                food_assessment.village_ready_food_units,
+                food_assessment.stalled_food_processors
+            )
+        } else {
+            format!(
+                "cadeia alimentar estavel: graos={}, comida_pronta={}",
+                food_assessment.village_grain_units, food_assessment.village_ready_food_units
+            )
+        };
+        let household_food_supply_days = format!(
+            "{}.{:01} dia(s) de comida do lar contra minimo {}",
+            food_assessment.household_food_supply_days_tenths / 10,
+            food_assessment.household_food_supply_days_tenths % 10,
+            food_assessment.household_minimum_food_units
+        );
+        let material_food_source_status = if food_assessment.material_food_source_count == 0 {
+            "sem fornecedor material com estoque; compra nao cria oferta".to_string()
+        } else if food_assessment.inter_village_food_source_count > 0 {
+            format!(
+                "{} fornecedor(es) material(is), {} em outra vila/assentamento",
+                food_assessment.material_food_source_count,
+                food_assessment.inter_village_food_source_count
+            )
+        } else {
+            format!(
+                "{} fornecedor(es) material(is) local(is)",
+                food_assessment.material_food_source_count
+            )
+        };
 
         EconomicContextInput {
             household_name: household
@@ -1580,6 +1681,12 @@ impl Simulation {
             scarcity_signals,
             grain_availability: format!("graos disponiveis localmente: {grain_availability_total}"),
             external_grain_offer,
+            food_chain_status,
+            household_food_supply_days,
+            material_food_source_status,
+            social_food_access_status: food_assessment.access_summary,
+            rationing_political_cost: food_assessment.political_cost_summary,
+            food_bottlenecks: food_assessment.bottlenecks,
             public_treasury_status,
             war_supply_status,
             open_tasks,

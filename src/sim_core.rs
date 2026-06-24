@@ -14,29 +14,30 @@ use crate::world_model::{
     AgentSnapshot, AgentState, AuthorityOffice, AuthorityOfficeId, BuildingId, BuildingSpec,
     CaravanState, CombatId, CombatOutcome, CombatState, CombatStatus, ConstructionProject,
     ConstructionStatus, ConversationId, ConversationOutcome, ConversationParticipantState,
-    ConversationState, ConversationStatus, ConversationTurn, CraftProficiencyState, Creature,
-    CrimeCase, CrimeCaseId, CrimeCaseStatus, CrimeType, CropStage, CropState, CulturalStory,
-    CulturalStoryId, CulturalStoryKind, CulturalTradition, EconomicNode, EconomicTask,
-    EconomicTaskClass, EconomicTaskId, EconomicTaskKind, EconomicTaskPhase, EconomyCatalog,
-    EquipmentSlot, EscrowAccount, EstablishmentEconomy, EstablishmentId, EstateHolding,
-    EstateHoldingId, EventKind, FactionObjective, FeudalContract, FeudalContractId,
+    ConversationState, ConversationStatus, ConversationTurn, CopingPattern, CopingPatternKind,
+    CraftProficiencyState, Creature, CrimeCase, CrimeCaseId, CrimeCaseStatus, CrimeType, CropStage,
+    CropState, CulturalStory, CulturalStoryId, CulturalStoryKind, CulturalTradition, EconomicNode,
+    EconomicTask, EconomicTaskClass, EconomicTaskId, EconomicTaskKind, EconomicTaskPhase,
+    EconomyCatalog, EquipmentSlot, EscrowAccount, EstablishmentEconomy, EstablishmentId,
+    EstateHolding, EstateHoldingId, EventKind, FactionObjective, FeudalContract, FeudalContractId,
     FeudalContractStatus, FeudalRank, FeudalTitle, FeudalTitleId, FixtureId, FixtureKind,
     FixtureSpec, ForeignRelation, ForeignRelationId, HistoricalBootstrapSummary, HouseholdEconomy,
-    HuntingQuest, InjuryState, InstitutionalPerception, InsurrectionId, InsurrectionStage,
-    InsurrectionState, InsurrectionStatus, IntentKind, ItemAffordanceKind, ItemClass, ItemInstance,
-    ItemInstanceId, JusticeSeverity, LocalNorms, LocationKind, MemoryKind, MilitaryDemand,
-    MilitaryDemandId, MilitaryDemandStatus, PendingPaymentClaim, PolicyAct, PolicyActId,
-    PolicyActStatus, PolicyAuthority, PolicyDomain, PolicyEffect, PolicyFavor, PolicyScope,
-    PolicyTarget, PoliticalFaction, PoliticalFactionId, PoliticalIssue, PoliticalIssueId,
-    PoliticalIssueStatus, PoliticalPressure, Polity, PolityId, PostedPrice, PowerCenter,
-    PowerCenterId, PromiseCondition, PsychologicalState, RationingPolicy, RefinementLevel,
-    RelationDelta, ResourceKind, ResourceStack, Role, RoomId, RoomSpec, Rumor, RumorBelief,
-    SNAPSHOT_SCHEMA_VERSION, ScarcityMetric, ScheduledMeeting, ScheduledMeetingId,
-    ScheduledMeetingStatus, Secret, SecretKind, SentenceKind, SimplifiedTask, SimulationSnapshot,
-    SocialMove, SpatialSnapshot, StoryBelief, StoryStatus, StoryVersion, SuccessionCrisis,
-    SuccessionCrisisId, SuccessionCrisisStatus, Territory, TerritoryId, TileCoord, TileKind,
-    TileSpec, TraumaTracker, VillageEconomy, WarId, WarStage, WarState, WarStatus, WorldEvent,
-    WorldPlaceKind, WorldPlaceRef,
+    HuntingQuest, InjuryState, InnerContradiction, InstitutionalPerception, InsurrectionId,
+    InsurrectionStage, InsurrectionState, InsurrectionStatus, IntentKind, ItemAffordanceKind,
+    ItemClass, ItemInstance, ItemInstanceId, JusticeSeverity, LocalNorms, LocationKind, MemoryKind,
+    MilitaryDemand, MilitaryDemandId, MilitaryDemandStatus, PendingPaymentClaim, PersonalSymbol,
+    PersonalSymbolTargetKind, PolicyAct, PolicyActId, PolicyActStatus, PolicyAuthority,
+    PolicyDomain, PolicyEffect, PolicyFavor, PolicyScope, PolicyTarget, PoliticalFaction,
+    PoliticalFactionId, PoliticalIssue, PoliticalIssueId, PoliticalIssueStatus, PoliticalPressure,
+    Polity, PolityId, PostedPrice, PowerCenter, PowerCenterId, PromiseCondition,
+    PsychologicalState, RationingPolicy, RefinementLevel, RelationDelta, ResourceKind,
+    ResourceStack, Role, RoomId, RoomSpec, Rumor, RumorBelief, SNAPSHOT_SCHEMA_VERSION,
+    ScarcityMetric, ScheduledMeeting, ScheduledMeetingId, ScheduledMeetingStatus, Secret,
+    SecretKind, SentenceKind, SimplifiedTask, SimulationSnapshot, SocialMove, SpatialSnapshot,
+    StoryBelief, StoryStatus, StoryVersion, SuccessionCrisis, SuccessionCrisisId,
+    SuccessionCrisisStatus, Territory, TerritoryId, TileCoord, TileKind, TileSpec, TraumaTracker,
+    VillageEconomy, WarId, WarStage, WarState, WarStatus, WorldEvent, WorldPlaceKind,
+    WorldPlaceRef,
 };
 use anyhow::{Result, anyhow};
 use bevy_ecs::prelude::*;
@@ -441,7 +442,6 @@ pub struct Simulation {
     pub secrets: Vec<Secret>,
     pub caravans: Vec<CaravanState>,
     next_secret_id: u64,
-    next_caravan_id: u64,
     next_creature_id: u64,
     next_hunting_quest_id: u64,
     pub hunting_quests: Vec<HuntingQuest>,
@@ -454,9 +454,7 @@ pub struct Simulation {
     pub cultural_traditions: Vec<CulturalTradition>,
     pub scheduled_meetings: Vec<ScheduledMeeting>,
     pub active_escrows: Vec<EscrowAccount>,
-    next_promise_id: u64,
     next_rumor_id: u64,
-    next_escrow_id: u64,
 }
 
 impl Drop for Simulation {
@@ -732,7 +730,6 @@ impl Simulation {
             secrets: snapshot.secrets.clone(),
             caravans: snapshot.caravans.clone(),
             next_secret_id: snapshot.secrets.iter().map(|s| s.id).max().unwrap_or(0) + 1,
-            next_caravan_id: snapshot.caravans.iter().map(|c| c.id).max().unwrap_or(0) + 1,
             promises: snapshot.promises.clone(),
             policy_favors: snapshot.policy_favors.clone(),
             rumors: snapshot.rumors.clone(),
@@ -741,7 +738,6 @@ impl Simulation {
             cultural_traditions: snapshot.cultural_traditions.clone(),
             scheduled_meetings,
             active_escrows: snapshot.active_escrows.clone(),
-            next_promise_id: snapshot.promises.iter().map(|p| p.id).max().unwrap_or(0) + 1,
             next_rumor_id: snapshot.rumors.iter().map(|r| r.id).max().unwrap_or(0) + 1,
             next_cultural_story_id: snapshot.next_cultural_story_id.max(
                 snapshot
@@ -752,13 +748,6 @@ impl Simulation {
                     .unwrap_or(0)
                     + 1,
             ),
-            next_escrow_id: snapshot
-                .active_escrows
-                .iter()
-                .map(|e| e.id)
-                .max()
-                .unwrap_or(0)
-                + 1,
             next_creature_id: snapshot.next_creature_id.max(1),
             next_hunting_quest_id: snapshot.next_hunting_quest_id.max(1),
             hunting_quests: snapshot.hunting_quests.clone(),

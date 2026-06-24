@@ -44,6 +44,7 @@ where
             "--gui" => headless_enabled = false,
             "--new" => force_new = true,
             "--map" => headless.render_map = true,
+            "--calibrate-dramaturgy" => headless.calibrate_dramaturgy = true,
             "--db" => {
                 db_path = PathBuf::from(next_string(&mut args, "--db")?);
             }
@@ -73,6 +74,13 @@ where
             }
             "--ticks-per-second" => {
                 headless.ticks_per_second = next_parsed(&mut args, "--ticks-per-second")?;
+            }
+            "--calibration-days" => {
+                headless.calibration_days = next_parsed(&mut args, "--calibration-days")?;
+            }
+            "--calibration-json" => {
+                headless.calibration_json =
+                    Some(PathBuf::from(next_string(&mut args, "--calibration-json")?));
             }
             "--seed" => {
                 simulation.world_seed = next_parsed(&mut args, "--seed")?;
@@ -114,6 +122,9 @@ where
     }
     if headless.ticks_per_second == 0 {
         bail!("--ticks-per-second deve ser maior que zero");
+    }
+    if headless.calibration_days == 0 {
+        bail!("--calibration-days deve ser maior que zero");
     }
     if simulation.max_agents == 0 {
         bail!("--agents deve ser maior que zero");
@@ -175,6 +186,9 @@ pub fn usage() -> &'static str {
         "  --event-tail N          quantos eventos recentes mostrar por relatorio\n",
         "  --ticks-per-second N    ritmo real da simulacao no headless (padrao: 1)\n",
         "  --map                   inclui o mapa ASCII completo nos relatorios\n",
+        "  --calibrate-dramaturgy  imprime relatorio de coerencia dramaturgica ao encerrar\n",
+        "  --calibration-days N    dias usados como horizonte esperado da calibracao\n",
+        "  --calibration-json PATH grava relatorio dramaturgico JSON\n",
         "  --help                  mostra esta ajuda\n",
     )
 }
@@ -220,6 +234,11 @@ mod tests {
             "4".to_string(),
             "--ticks-per-second".to_string(),
             "3".to_string(),
+            "--calibrate-dramaturgy".to_string(),
+            "--calibration-days".to_string(),
+            "5".to_string(),
+            "--calibration-json".to_string(),
+            "dramaturgy.json".to_string(),
             "--map".to_string(),
             "--seed".to_string(),
             "77".to_string(),
@@ -261,6 +280,12 @@ mod tests {
                 assert_eq!(headless.summary_every_ticks, 6);
                 assert_eq!(headless.event_tail, 4);
                 assert_eq!(headless.ticks_per_second, 3);
+                assert!(headless.calibrate_dramaturgy);
+                assert_eq!(headless.calibration_days, 5);
+                assert_eq!(
+                    headless.calibration_json.as_deref(),
+                    Some(std::path::Path::new("dramaturgy.json"))
+                );
                 assert!(headless.render_map);
             }
             RunMode::Gui => panic!("expected headless mode"),

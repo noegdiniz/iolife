@@ -79,7 +79,7 @@ fn setup_ui(mut commands: Commands) {
 }
 
 fn refresh_ui(
-    mut game: ResMut<GameState>,
+    mut game: NonSendMut<GameState>,
     runtime: Res<GuiRuntimeState>,
     mut top_q: Query<
         &mut Text,
@@ -106,14 +106,14 @@ fn refresh_ui(
         ),
     >,
 ) {
-    if let Ok(mut text) = top_q.get_single_mut() {
-        **text = top_bar_text(&game, &runtime);
+    if let Ok(mut text) = top_q.single_mut() {
+        **text = top_bar_text(&*game, &runtime);
     }
-    if let Ok(mut text) = side_q.get_single_mut() {
-        **text = side_panel_text(&mut game);
+    if let Ok(mut text) = side_q.single_mut() {
+        **text = side_panel_text(&mut *game);
     }
-    if let Ok(mut text) = timeline_q.get_single_mut() {
-        **text = timeline_text(&mut game);
+    if let Ok(mut text) = timeline_q.single_mut() {
+        **text = timeline_text(&mut *game);
     }
 }
 

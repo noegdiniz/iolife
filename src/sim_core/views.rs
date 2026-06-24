@@ -508,13 +508,13 @@ impl Simulation {
             });
         }
         places.push(WorldPlaceRef {
-            place_id: "special:external_market".to_string(),
-            display_name: "Mercado Externo".to_string(),
+            place_id: "special:inter_village_trade".to_string(),
+            display_name: "Rota de comercio inter-vilas".to_string(),
             kind: WorldPlaceKind::Special,
             semantic_tags: vec![
-                "mercado_externo".to_string(),
+                "comercio_inter_vilas".to_string(),
                 "comercio".to_string(),
-                "fora_da_vila".to_string(),
+                "entre_vilas".to_string(),
             ],
             building_id: None,
             room_id: None,
@@ -532,8 +532,8 @@ impl Simulation {
     }
 
     pub(super) fn place_target_coord(&self, place_id: &str) -> Option<TileCoord> {
-        if place_id == "special:external_market" {
-            return Some(self.village_economy.external_market_coord);
+        if place_id == "special:inter_village_trade" {
+            return Some(self.village_economy.inter_village_trade_coord);
         }
         let place = self.place_by_id(place_id)?;
         if let Some(fixture_id) = place.fixture_id {

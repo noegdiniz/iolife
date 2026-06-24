@@ -1719,6 +1719,85 @@ impl Simulation {
             }
             _ => {}
         }
+        match (event_kind, role) {
+            (EventKind::Violence, "victim") => {
+                self.add_personal_symbol(
+                    agent_id,
+                    PersonalSymbolTargetKind::Event,
+                    None,
+                    "violencia sofrida",
+                    "o mundo pode ferir sem aviso",
+                    "medo",
+                    28,
+                    None,
+                )?;
+                self.add_coping_pattern(
+                    agent_id,
+                    CopingPatternKind::Withdrawal,
+                    "violencia",
+                    "buscar abrigo antes de confiar no espaco publico",
+                    18,
+                )?;
+            }
+            (EventKind::Theft, "victim") => {
+                self.add_personal_symbol(
+                    agent_id,
+                    PersonalSymbolTargetKind::Event,
+                    None,
+                    "roubo sofrido",
+                    "posses pequenas carregam dignidade",
+                    "desconfianca",
+                    22,
+                    None,
+                )?;
+                self.add_coping_pattern(
+                    agent_id,
+                    CopingPatternKind::Hoarding,
+                    "perda material",
+                    "guardar recursos e desconfiar de pedidos generosos",
+                    18,
+                )?;
+            }
+            (EventKind::Death, "witness") => {
+                self.add_personal_symbol(
+                    agent_id,
+                    PersonalSymbolTargetKind::Event,
+                    None,
+                    "morte testemunhada",
+                    "a vida pode acabar diante dos olhos",
+                    "luto",
+                    35,
+                    None,
+                )?;
+                self.add_coping_pattern(
+                    agent_id,
+                    CopingPatternKind::RitualReturn,
+                    "luto",
+                    "voltar a um lugar silencioso para ordenar a perda",
+                    24,
+                )?;
+            }
+            (EventKind::Punishment, "victim") => {
+                self.add_personal_symbol(
+                    agent_id,
+                    PersonalSymbolTargetKind::Event,
+                    None,
+                    "punicao publica",
+                    "autoridade pode virar vergonha",
+                    "humilhacao",
+                    30,
+                    None,
+                )?;
+                self.add_coping_pattern(
+                    agent_id,
+                    CopingPatternKind::Confrontation,
+                    "punicao injusta",
+                    "guardar a ofensa ate poder desafiar sem morrer",
+                    20,
+                )?;
+            }
+            _ => {}
+        }
         Ok(())
     }
 

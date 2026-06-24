@@ -35,18 +35,6 @@ impl Simulation {
             .iter()
             .find(|act| act.agenda_tag == agenda_tag && self.policy_act_is_active(act))
     }
-
-    pub(super) fn active_edict_tags(&self) -> Vec<String> {
-        self.policy_acts
-            .iter()
-            .filter(|act| {
-                self.policy_act_is_active(act)
-                    && matches!(act.authority, PolicyAuthority::LocalLeader)
-            })
-            .map(|act| act.agenda_tag.clone())
-            .collect()
-    }
-
     pub(super) fn active_tax_multiplier_percent(&self) -> i32 {
         self.active_policy_effects()
             .into_iter()
@@ -3808,7 +3796,6 @@ impl Simulation {
                 if let Some(obj) = faction.objective {
                     let current_pos = self.debug_agent_position(agent_id)?;
                     let mut target_coord = None;
-                    let mut target_agent_id = None;
 
                     match obj {
                         FactionObjective::FoodRiot {
@@ -3834,7 +3821,6 @@ impl Simulation {
                             }
                         }
                         FactionObjective::DeposeLeader { leader_agent_id } => {
-                            target_agent_id = Some(leader_agent_id);
                             if let Ok(l_pos) = self.debug_agent_position(leader_agent_id) {
                                 target_coord = Some(l_pos);
                             }
@@ -3842,7 +3828,6 @@ impl Simulation {
                         FactionObjective::VigilanteJustice {
                             suspect_agent_id, ..
                         } => {
-                            target_agent_id = Some(suspect_agent_id);
                             if let Ok(s_pos) = self.debug_agent_position(suspect_agent_id) {
                                 target_coord = Some(s_pos);
                             }
@@ -3854,9 +3839,7 @@ impl Simulation {
                         let is_at_target = current_pos == dest || current_pos.manhattan(dest) <= 1;
 
                         if is_at_target {
-                            let mut intent_kind = IntentKind::Trabalhar;
-
-                            match obj {
+                            let (intent_kind, target_agent_id) = match obj {
                                 FactionObjective::FoodRiot { .. } => {
                                     let mut guard_to_fight = None;
                                     for (other_id, role_id) in self.agent_role_pairs() {
@@ -3871,11 +3854,9 @@ impl Simulation {
                                         }
                                     }
                                     if let Some(guard_id) = guard_to_fight {
-                                        intent_kind = IntentKind::Agredir;
-                                        target_agent_id = Some(guard_id);
+                                        (IntentKind::Agredir, Some(guard_id))
                                     } else {
-                                        intent_kind = IntentKind::Trabalhar;
-                                        target_agent_id = None;
+                                        (IntentKind::Trabalhar, None)
                                     }
                                 }
                                 FactionObjective::TaxBoycott { .. } => {
@@ -3892,25 +3873,18 @@ impl Simulation {
                                         }
                                     }
                                     if let Some(guard_id) = guard_to_fight {
-                                        intent_kind = IntentKind::Agredir;
-                                        target_agent_id = Some(guard_id);
+                                        (IntentKind::Agredir, Some(guard_id))
                                     } else {
-                                        intent_kind = IntentKind::Refletir;
-                                        target_agent_id = None;
+                                        (IntentKind::Refletir, None)
                                     }
                                 }
                                 FactionObjective::DeposeLeader { leader_agent_id } => {
-                                    intent_kind = IntentKind::Agredir;
-                                    target_agent_id = Some(leader_agent_id);
+                                    (IntentKind::Agredir, Some(leader_agent_id))
                                 }
                                 FactionObjective::VigilanteJustice {
                                     suspect_agent_id, ..
-                                } => {
-                                    intent_kind = IntentKind::Agredir;
-                                    target_agent_id = Some(suspect_agent_id);
-                                }
-                            }
-
+                                } => (IntentKind::Agredir, Some(suspect_agent_id)),
+                            };
                             let mut entity_mut = self.world.entity_mut(entity);
                             entity_mut.get_mut::<IntentComponent>().unwrap().0 =
                                 Some(AgentIntent {

@@ -1,8 +1,8 @@
 use crate::world_model::{
-    ConstructionRecipeDef, EconomyCatalog, EquipmentSlot, EstablishmentTypeDef, ExternalMarketRule,
-    ItemAffordanceDef, ItemAffordanceKind, ItemClass, ItemCombatStats, LocationKind,
-    OwnerPolicyDef, RecipeDef, RecipeInputDef, RefinementScalingDef, ResourceDef, ResourceKind,
-    ResourceStack, Role, RoleDef, SeedAgentDef, SpatialArchetypeDef,
+    ConstructionRecipeDef, EconomyCatalog, EquipmentSlot, EstablishmentTypeDef, ItemAffordanceDef,
+    ItemAffordanceKind, ItemClass, ItemCombatStats, LocationKind, OwnerPolicyDef, RecipeDef,
+    RecipeInputDef, RefinementScalingDef, ResourceDef, ResourceKind, ResourceStack, Role, RoleDef,
+    SeedAgentDef, SpatialArchetypeDef,
 };
 use anyhow::{Result, anyhow};
 use std::collections::HashSet;
@@ -1284,38 +1284,6 @@ pub fn default_economy_catalog() -> EconomyCatalog {
                 &["mesa", "estoque"],
             ),
         ],
-        external_market_rules: vec![
-            quote(ResourceKind::Lenha.id(), 3, 1),
-            quote(ResourceKind::Madeira.id(), 6, 3),
-            quote(ResourceKind::Pedra.id(), 5, 2),
-            quote(ResourceKind::MetalBruto.id(), 7, 4),
-            quote(ResourceKind::Graos.id(), 3, 1),
-            quote(ResourceKind::Pao.id(), 5, 2),
-            quote(ResourceKind::Caldo.id(), 6, 2),
-            quote(ResourceKind::Ferramentas.id(), 10, 6),
-            quote("tecido", 6, 3),
-            quote("couro", 7, 4),
-            quote("cobre", 7, 4),
-            quote("prata", 10, 6),
-            quote("faca", 12, 7),
-            quote("clava", 10, 5),
-            quote("espada_curta", 22, 13),
-            quote("machado", 18, 10),
-            quote("lanca_simples", 16, 9),
-            quote("gambesao", 18, 10),
-            quote("couro_reforcado", 20, 12),
-            quote("cota_malha_simples", 32, 20),
-            quote("capacete_simples", 15, 8),
-            quote("escudo", 18, 10),
-            quote("tunica_simples", 10, 5),
-            quote("tunica_boa", 15, 8),
-            quote("manto", 18, 10),
-            quote("vestido_refinado", 24, 14),
-            quote("anel_cobre", 16, 9),
-            quote("anel_prata", 24, 15),
-            quote("broche", 22, 13),
-            quote("colar_simples", 20, 12),
-        ],
         seeded_agents: vec![
             seed_agent(1, "Alda", Role::Farmer.id()),
             seed_agent(2, "Breno", Role::Blacksmith.id()),
@@ -1564,14 +1532,6 @@ pub fn validate_catalog(catalog: &EconomyCatalog) -> Result<()> {
             OwnerPolicyDef::Civic => {}
         }
     }
-    for quote in &catalog.external_market_rules {
-        if !resource_ids.contains(quote.resource_id.as_str()) {
-            return Err(anyhow!(
-                "external market rule references unknown resource `{}`",
-                quote.resource_id
-            ));
-        }
-    }
     for agent in &catalog.seeded_agents {
         if !role_ids.contains(agent.role_id.as_str()) {
             return Err(anyhow!(
@@ -1600,8 +1560,8 @@ fn resource(
     tags: &[&str],
     base_price: i32,
     consumption_priority: i32,
-    can_buy_external: bool,
-    can_sell_external: bool,
+    can_import_between_villages: bool,
+    can_export_between_villages: bool,
 ) -> ResourceDef {
     ResourceDef {
         id: id.to_string(),
@@ -1610,8 +1570,8 @@ fn resource(
         affordances: infer_affordances(tags),
         base_price,
         consumption_priority,
-        can_buy_external,
-        can_sell_external,
+        can_import_between_villages,
+        can_export_between_villages,
         item_class: None,
         equip_slot_preferences: Vec::new(),
         base_durability: 0,
@@ -1635,8 +1595,8 @@ fn equipment_resource(
     base_combat_stats: ItemCombatStats,
     refinement_scaling: RefinementScalingDef,
     material_tags: &[&str],
-    can_buy_external: bool,
-    can_sell_external: bool,
+    can_import_between_villages: bool,
+    can_export_between_villages: bool,
 ) -> ResourceDef {
     let mut resource = resource(
         id,
@@ -1644,8 +1604,8 @@ fn equipment_resource(
         tags,
         base_price,
         400,
-        can_buy_external,
-        can_sell_external,
+        can_import_between_villages,
+        can_export_between_villages,
     );
     resource.item_class = Some(item_class);
     resource.equip_slot_preferences = equip_slot_preferences.to_vec();
@@ -1784,14 +1744,6 @@ fn recipe(
         labor_cost,
         tool_wear,
         priority,
-    }
-}
-
-fn quote(resource_id: &str, buy_price: i32, sell_price: i32) -> ExternalMarketRule {
-    ExternalMarketRule {
-        resource_id: resource_id.to_string(),
-        buy_price,
-        sell_price,
     }
 }
 

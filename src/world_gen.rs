@@ -63,7 +63,6 @@ struct RoleLayoutSlot {
     role_id: &'static str,
     work_building_id: BuildingId,
     home_slot_index: usize,
-    bed: TileCoord,
 }
 
 #[derive(Clone)]
@@ -295,156 +294,6 @@ impl SpatialBuilder {
             rooms: self.rooms,
             fixtures: self.fixtures,
         }
-    }
-}
-
-const NAMES_POOL: &[&str] = &[
-    "Alda",
-    "Breno",
-    "Celia",
-    "Dario",
-    "Elina",
-    "Faro",
-    "Gisa",
-    "Helmo",
-    "Iria",
-    "Joran",
-    "Kelda",
-    "Lute",
-    "Martim",
-    "Nuno",
-    "Olga",
-    "Pedro",
-    "Quelia",
-    "Rui",
-    "Sancha",
-    "Tomas",
-    "Ugo",
-    "Vasco",
-    "Ximena",
-    "Zaria",
-    "Afonso",
-    "Beatriz",
-    "Constanca",
-    "Duarte",
-    "Estevao",
-    "Filipa",
-    "Goncalo",
-    "Henrique",
-    "Ines",
-    "Joao",
-    "Leonor",
-    "Manuel",
-    "Mafalda",
-    "Orlandina",
-    "Pinto",
-    "Rodrigo",
-    "Sancho",
-    "Teresa",
-    "Vicente",
-    "Vera",
-];
-
-const TRAITS_POOL: &[&[&str]] = &[
-    &["observador", "teimoso"],
-    &["generoso", "cauteloso"],
-    &["trabalhador", "orgulhoso"],
-    &["curioso", "desconfiado"],
-    &["impulsivo", "ambicioso"],
-    &["astuto", "ressentido"],
-    &["covarde", "oportunista"],
-    &["violento", "leal"],
-];
-
-const VALUES_POOL: &[&[&str]] = &[
-    &["honra", "sobrevivencia"],
-    &["familia", "comunidade"],
-    &["riqueza", "justica"],
-    &["poder", "vinganca"],
-    &["liberdade", "prazer"],
-];
-
-const FEARS_POOL: &[&[&str]] = &[
-    &["escassez", "humilhacao"],
-    &["solidao", "doenca"],
-    &["violencia", "fracasso"],
-    &["traicao", "irrelevancia"],
-    &["aprisionamento", "impotencia"],
-];
-
-const DESIRES_POOL: &[&[&str]] = &[
-    &["seguranca para a familia"],
-    &["acumular riqueza"],
-    &["conquistar respeito"],
-    &["viver sem ser controlado"],
-    &["vingar injusticas passadas"],
-];
-
-const TOLERANCE_POOL: &[&str] = &[
-    "mente por protecao",
-    "rouba se com fome extrema",
-    "aceita violencia quando provocado",
-    "tolera suborno por necessidade",
-    "ignora crimes de aliados",
-];
-
-const STYLE_POOL: &[&str] = &[
-    "prudente",
-    "agressivo",
-    "manipulador",
-    "submisso",
-    "confrontador",
-    "sedutor",
-    "isolado",
-];
-
-fn initial_institutional_perception(role_id: &str, values: &[&str]) -> InstitutionalPerception {
-    let mut perception = InstitutionalPerception::default();
-    if role_id == "lider_local" {
-        perception.leader_legitimacy += 30;
-        perception.justice_legitimacy += 15;
-        perception.tax_legitimacy += 10;
-        perception.guard_trust += 20;
-        perception.war_support += 8;
-        perception.perceived_fairness += 10;
-    } else if role_id == "guarda" {
-        perception.leader_legitimacy += 18;
-        perception.justice_legitimacy += 20;
-        perception.guard_trust += 25;
-        perception.war_support += 12;
-        perception.fear_of_authority += 6;
-    }
-    if values
-        .iter()
-        .any(|value| matches!(*value, "honra" | "ordem" | "justica"))
-    {
-        perception.leader_legitimacy += 8;
-        perception.justice_legitimacy += 8;
-        perception.guard_trust += 5;
-    }
-    if values
-        .iter()
-        .any(|value| matches!(*value, "sobrevivencia" | "familia"))
-    {
-        perception.tax_legitimacy -= 4;
-        perception.rationing_legitimacy += 4;
-    }
-    perception.notes.push(format!(
-        "percepcao institucional inicial baseada no papel {}",
-        role_id
-    ));
-    perception.clamp_all();
-    perception
-}
-
-fn merge_stack(stacks: &mut Vec<ResourceStack>, stack: ResourceStack) {
-    if let Some(existing) = stacks
-        .iter_mut()
-        .find(|existing| existing.resource_id == stack.resource_id)
-    {
-        existing.amount += stack.amount;
-    } else {
-        stacks.push(stack);
     }
 }
 
@@ -1275,64 +1124,36 @@ fn generate_procedural_world(
                     role_id: "lider_local",
                     work_building_id: solar_id,
                     home_slot_index: 0,
-                    bed: TileCoord {
-                        x: cx - 19,
-                        y: cy - 14,
-                    },
                 },
                 RoleLayoutSlot {
                     role_id: "taverneiro",
                     work_building_id: taverna_id,
                     home_slot_index: 0,
-                    bed: TileCoord {
-                        x: cx - 17,
-                        y: cy - 14,
-                    },
                 },
                 RoleLayoutSlot {
                     role_id: "ferreiro",
                     work_building_id: forja_id,
                     home_slot_index: 0,
-                    bed: TileCoord {
-                        x: cx - 15,
-                        y: cy - 14,
-                    },
                 },
                 RoleLayoutSlot {
                     role_id: "padeiro",
                     work_building_id: padaria_id,
                     home_slot_index: 1,
-                    bed: TileCoord {
-                        x: cx - 9,
-                        y: cy - 14,
-                    },
                 },
                 RoleLayoutSlot {
                     role_id: "guarda",
                     work_building_id: guarda_id,
                     home_slot_index: 1,
-                    bed: TileCoord {
-                        x: cx - 7,
-                        y: cy - 14,
-                    },
                 },
                 RoleLayoutSlot {
                     role_id: "campones",
                     work_building_id: celeiro_id,
                     home_slot_index: 1,
-                    bed: TileCoord {
-                        x: cx - 5,
-                        y: cy - 14,
-                    },
                 },
                 RoleLayoutSlot {
                     role_id: "campones",
                     work_building_id: lenhal_id,
                     home_slot_index: 2,
-                    bed: TileCoord {
-                        x: cx + 5,
-                        y: cy - 14,
-                    },
                 },
             ],
             manor_id: solar_id,
@@ -1526,9 +1347,8 @@ impl Default for MaterializedBootstrap {
             village_economy: VillageEconomy {
                 public_treasury: 0,
                 daily_household_tax: 0,
-                external_market_coord: TileCoord::default(),
+                inter_village_trade_coord: TileCoord::default(),
                 base_prices: Vec::new(),
-                external_quotes: Vec::new(),
                 scarcity_metrics: Vec::new(),
             },
             territories: Vec::new(),
@@ -2284,22 +2104,13 @@ fn materialize_history(
                     .clamp(2, 8)
             })
             .unwrap_or(4),
-        external_market_coord: TileCoord { x: 2, y: 2 },
+        inter_village_trade_coord: TileCoord { x: 2, y: 2 },
         base_prices: catalog
             .resources
             .iter()
             .map(|resource| PostedPrice {
                 resource_id: resource.id.clone(),
                 unit_price: resource.base_price,
-            })
-            .collect(),
-        external_quotes: catalog
-            .external_market_rules
-            .iter()
-            .map(|rule| ExternalMarketQuote {
-                resource_id: rule.resource_id.clone(),
-                buy_price: rule.buy_price,
-                sell_price: rule.sell_price,
             })
             .collect(),
         scarcity_metrics: build_scarcity_metrics(&out.establishments, &out.households),
@@ -2747,9 +2558,12 @@ fn materialize_history(
                 id: out.next_policy_act_id,
                 agenda_tag: decree.agenda_tag.clone(),
                 summary: if decree.summary.is_empty() {
-                    summary
+                    format!("{} Valor proposto: {}.", summary, decree.proposed_value)
                 } else {
-                    decree.summary.clone()
+                    format!(
+                        "{} Valor proposto: {}.",
+                        decree.summary, decree.proposed_value
+                    )
                 },
                 issuer_agent_id,
                 issuer_polity_id: Some(polity_id),
@@ -3050,7 +2864,7 @@ fn materialize_history(
             winner_polity_id: None,
             started_day: 1,
             ended_day: None,
-            summary: war.summary.clone(),
+            summary: format!("{} Inicio: ano {}.", war.summary, war.started_year),
         });
         out.next_war_id += 1;
     }
@@ -3131,7 +2945,10 @@ fn materialize_history(
                         EventKind::FeudalSanction
                     }
                 },
-                summary: format!("{} | {}", layout.name, duty.summary),
+                summary: format!(
+                    "{} | {} Montante: {}.",
+                    layout.name, duty.summary, duty.amount
+                ),
                 impact_tags: vec!["pre_historia".to_string(), "dever_feudal".to_string()],
             });
         }
@@ -3142,7 +2959,10 @@ fn materialize_history(
                 actor: actor_id,
                 target: None,
                 kind: EventKind::Construction,
-                summary: format!("{} | {}", layout.name, construction.summary),
+                summary: format!(
+                    "{} | {} Territorio: {}.",
+                    layout.name, construction.summary, construction.target_territory_key
+                ),
                 impact_tags: vec![
                     "pre_historia".to_string(),
                     construction.establishment_type_id.clone(),
@@ -3208,8 +3028,12 @@ fn materialize_history(
                 actor: actor_id,
                 target: None,
                 kind: historical_event_kind_to_runtime(event.kind, &event.tags),
-                summary: format!("{} | {}", layout.name, event.summary),
-                impact_tags: event.tags.clone(),
+                summary: format!("{} | ano {} | {}", layout.name, event.year, event.summary),
+                impact_tags: {
+                    let mut tags = event.tags.clone();
+                    tags.push(format!("importancia_{}", event.importance));
+                    tags
+                },
             });
         }
         if let Some(succession) = &settlement.recent_succession {
@@ -3237,7 +3061,7 @@ fn materialize_history(
             actor: actor_id,
             target: None,
             kind: EventKind::InstitutionalDispute,
-            summary: war.summary.clone(),
+            summary: format!("{} Inicio: ano {}.", war.summary, war.started_year),
             impact_tags: vec!["guerra".to_string(), "pre_historia".to_string()],
         });
     }
@@ -3686,10 +3510,44 @@ fn build_psychology(
         last_public_humiliation_by: None,
         active_revenge_target: None,
         long_term_plan: String::new(),
+        personal_symbols: Vec::new(),
+        coping_patterns: Vec::new(),
+        inner_contradictions: Vec::new(),
+        melancholic_fixation: None,
         last_updated_day: day,
         notes: vec![format!("Herdou marcas de {}", role_focus(role_id))],
     };
     state.long_term_plan = derive_long_term_plan(role_id, household, settlement_name);
+    if household.trauma_memory >= 20 || person.trauma >= 30 {
+        state.personal_symbols.push(PersonalSymbol {
+            target_kind: PersonalSymbolTargetKind::Event,
+            target_id: None,
+            text: "memoria herdada de perda".to_string(),
+            meaning: "a historia da casa ainda pede cuidado".to_string(),
+            emotion: "melancolia".to_string(),
+            intensity: (household.trauma_memory + person.trauma / 2).clamp(10, 65),
+            origin_memory_id: None,
+        });
+        state.coping_patterns.push(CopingPattern {
+            kind: CopingPatternKind::RitualReturn,
+            trigger: "memoria familiar dolorosa".to_string(),
+            behavior_hint:
+                "procurar silencio, lugar seguro ou historia antiga quando a dor retorna"
+                    .to_string(),
+            strength: (household.trauma_memory / 2 + person.trauma / 3).clamp(8, 45),
+            last_triggered_tick: 0,
+        });
+    }
+    if household.hardship >= 8 || household.feudal_arrears >= 8 {
+        state.inner_contradictions.push(InnerContradiction {
+            desire: "manter dignidade familiar".to_string(),
+            fear: "ser esmagado por fome, divida ou autoridade".to_string(),
+            compromise: "aceitar rotina dura enquanto procura brecha de estabilidade".to_string(),
+            pressure: (household.hardship * 3 + household.feudal_arrears * 2).clamp(8, 60),
+        });
+        state.melancholic_fixation =
+            Some("a casa precisa sobreviver sem perder o nome".to_string());
+    }
     state.clamp_all();
     state
 }

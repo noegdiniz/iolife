@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Single source of truth for persisted snapshot compatibility.
-pub const SNAPSHOT_SCHEMA_VERSION: u32 = 26;
+pub const SNAPSHOT_SCHEMA_VERSION: u32 = 27;
 
 // ===== Identifiers =====
 
@@ -124,8 +124,8 @@ pub struct ResourceDef {
     pub affordances: Vec<ItemAffordanceDef>,
     pub base_price: i32,
     pub consumption_priority: i32,
-    pub can_buy_external: bool,
-    pub can_sell_external: bool,
+    pub can_import_between_villages: bool,
+    pub can_export_between_villages: bool,
     #[serde(default)]
     pub item_class: Option<ItemClass>,
     #[serde(default)]
@@ -361,13 +361,6 @@ pub struct EstablishmentTypeDef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExternalMarketRule {
-    pub resource_id: String,
-    pub buy_price: i32,
-    pub sell_price: i32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SeedAgentDef {
     pub id: u64,
     pub name: String,
@@ -384,7 +377,6 @@ pub struct EconomyCatalog {
     pub recipes: Vec<RecipeDef>,
     #[serde(default)]
     pub construction_recipes: Vec<ConstructionRecipeDef>,
-    pub external_market_rules: Vec<ExternalMarketRule>,
     pub seeded_agents: Vec<SeedAgentDef>,
 }
 
@@ -567,13 +559,6 @@ pub struct PostedPrice {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExternalMarketQuote {
-    pub resource_id: String,
-    pub buy_price: i32,
-    pub sell_price: i32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingPaymentClaim {
     pub payer_establishment_id: Option<EstablishmentId>,
     pub payer_label: String,
@@ -642,9 +627,8 @@ pub struct EstablishmentEconomy {
 pub struct VillageEconomy {
     pub public_treasury: i32,
     pub daily_household_tax: i32,
-    pub external_market_coord: TileCoord,
+    pub inter_village_trade_coord: TileCoord,
     pub base_prices: Vec<PostedPrice>,
-    pub external_quotes: Vec<ExternalMarketQuote>,
     pub scarcity_metrics: Vec<ScarcityMetric>,
 }
 
@@ -654,7 +638,6 @@ pub enum EconomicNode {
     Establishment(EstablishmentId),
     ConstructionProject(u64),
     MilitarySupply(WarId),
-    ExternalMarket,
     PublicTreasury,
 }
 
@@ -884,6 +867,57 @@ pub struct TraumaTracker {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PersonalSymbol {
+    pub target_kind: PersonalSymbolTargetKind,
+    pub target_id: Option<String>,
+    pub text: String,
+    pub meaning: String,
+    pub emotion: String,
+    pub intensity: i32,
+    pub origin_memory_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum PersonalSymbolTargetKind {
+    #[default]
+    Text,
+    Place,
+    Agent,
+    Item,
+    Story,
+    Event,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CopingPattern {
+    pub kind: CopingPatternKind,
+    pub trigger: String,
+    pub behavior_hint: String,
+    pub strength: i32,
+    pub last_triggered_tick: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum CopingPatternKind {
+    #[default]
+    Withdrawal,
+    StatusDisplay,
+    RitualReturn,
+    Storytelling,
+    Hoarding,
+    Confrontation,
+    Submission,
+    Caretaking,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InnerContradiction {
+    pub desire: String,
+    pub fear: String,
+    pub compromise: String,
+    pub pressure: i32,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PsychologicalState {
     pub grief: i32,
     pub humiliation: i32,
@@ -901,6 +935,14 @@ pub struct PsychologicalState {
     pub last_public_humiliation_by: Option<u64>,
     pub active_revenge_target: Option<u64>,
     pub long_term_plan: String,
+    #[serde(default)]
+    pub personal_symbols: Vec<PersonalSymbol>,
+    #[serde(default)]
+    pub coping_patterns: Vec<CopingPattern>,
+    #[serde(default)]
+    pub inner_contradictions: Vec<InnerContradiction>,
+    #[serde(default)]
+    pub melancholic_fixation: Option<String>,
     pub last_updated_day: u32,
     pub notes: Vec<String>,
 }
@@ -926,6 +968,24 @@ impl PsychologicalState {
         if self.revenge_drive == 0 {
             self.active_revenge_target = None;
         }
+        for symbol in &mut self.personal_symbols {
+            symbol.intensity = symbol.intensity.clamp(0, 100);
+        }
+        self.personal_symbols
+            .sort_by(|a, b| b.intensity.cmp(&a.intensity));
+        self.personal_symbols.truncate(8);
+        for pattern in &mut self.coping_patterns {
+            pattern.strength = pattern.strength.clamp(0, 100);
+        }
+        self.coping_patterns
+            .sort_by(|a, b| b.strength.cmp(&a.strength));
+        self.coping_patterns.truncate(6);
+        for contradiction in &mut self.inner_contradictions {
+            contradiction.pressure = contradiction.pressure.clamp(0, 100);
+        }
+        self.inner_contradictions
+            .sort_by(|a, b| b.pressure.cmp(&a.pressure));
+        self.inner_contradictions.truncate(5);
         if self.notes.len() > 20 {
             let keep_from = self.notes.len() - 20;
             self.notes.drain(0..keep_from);
@@ -954,6 +1014,18 @@ impl PsychologicalState {
         if delta.active_revenge_target.is_some() {
             self.active_revenge_target = delta.active_revenge_target;
         }
+        if !delta.long_term_plan.trim().is_empty() {
+            self.long_term_plan = delta.long_term_plan.trim().to_string();
+        }
+        self.personal_symbols
+            .extend(delta.personal_symbols.iter().cloned());
+        self.coping_patterns
+            .extend(delta.coping_patterns.iter().cloned());
+        self.inner_contradictions
+            .extend(delta.inner_contradictions.iter().cloned());
+        if delta.melancholic_fixation.is_some() {
+            self.melancholic_fixation = delta.melancholic_fixation.clone();
+        }
         self.last_updated_day = day;
         if !note.is_empty() {
             self.notes.push(note);
@@ -974,6 +1046,9 @@ impl PsychologicalState {
         self.revenge_drive = (self.revenge_drive - 1).max(0);
         self.submission_drive = (self.submission_drive - 1).max(0);
         self.dominance_drive = (self.dominance_drive - 1).max(0);
+        for contradiction in &mut self.inner_contradictions {
+            contradiction.pressure = (contradiction.pressure - 1).max(0);
+        }
         if self.revenge_drive == 0 {
             self.active_revenge_target = None;
         }
@@ -982,7 +1057,7 @@ impl PsychologicalState {
 
     pub fn summary(&self) -> String {
         format!(
-            "luto={} humilhacao={} medo={} orgulho={} trauma={} raiva={} esperanca={} culpa={} ansiedade_status={} vinganca={} submissao={} dominancia={}{}",
+            "luto={} humilhacao={} medo={} orgulho={} trauma={} raiva={} esperanca={} culpa={} ansiedade_status={} vinganca={} submissao={} dominancia={} simbolos={} coping={}{}{}",
             self.grief,
             self.humiliation,
             self.fear,
@@ -995,10 +1070,17 @@ impl PsychologicalState {
             self.revenge_drive,
             self.submission_drive,
             self.dominance_drive,
+            self.personal_symbols.len(),
+            self.coping_patterns.len(),
             if self.long_term_plan.is_empty() {
                 String::new()
             } else {
                 format!(" plano={}", self.long_term_plan)
+            },
+            if let Some(fixation) = self.melancholic_fixation.as_ref() {
+                format!(" fixacao={}", fixation)
+            } else {
+                String::new()
             }
         )
     }

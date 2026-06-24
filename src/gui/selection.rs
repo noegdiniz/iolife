@@ -17,19 +17,19 @@ fn select_agent_with_mouse(
     buttons: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_q: Query<(&Camera, &GlobalTransform), With<Camera>>,
-    mut game: ResMut<GameState>,
+    mut game: NonSendMut<GameState>,
 ) {
     if !buttons.just_pressed(MouseButton::Left) {
         return;
     }
 
-    let Ok(window) = windows.get_single() else {
+    let Ok(window) = windows.single() else {
         return;
     };
     let Some(cursor_position) = window.cursor_position() else {
         return;
     };
-    let Ok((camera, camera_transform)) = camera_q.get_single() else {
+    let Ok((camera, camera_transform)) = camera_q.single() else {
         return;
     };
     let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_position) else {
@@ -45,7 +45,7 @@ fn select_agent_with_mouse(
         return;
     };
 
-    if let Some(agent_id) = nearest_agent_to_tile(&mut game, tile) {
+    if let Some(agent_id) = nearest_agent_to_tile(&mut *game, tile) {
         game.selected_agent_id = Some(agent_id);
     }
 }

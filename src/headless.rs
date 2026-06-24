@@ -1,8 +1,10 @@
+use crate::dramaturgy_calibration::{DramaturgyCalibrationConfig, run_dramaturgy_calibration};
 use crate::llm_adapter::LlmAdapter;
 use crate::persistence::Persistence;
 use crate::sim_core::{AgentView, DEFAULT_TICKS_PER_SECOND, Simulation, tick_interval_ms};
 use anyhow::Result;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,6 +16,9 @@ pub struct HeadlessConfig {
     pub event_tail: usize,
     pub render_map: bool,
     pub ticks_per_second: u32,
+    pub calibrate_dramaturgy: bool,
+    pub calibration_days: u32,
+    pub calibration_json: Option<PathBuf>,
 }
 
 impl Default for HeadlessConfig {
@@ -26,6 +31,9 @@ impl Default for HeadlessConfig {
             event_tail: 8,
             render_map: false,
             ticks_per_second: DEFAULT_TICKS_PER_SECOND,
+            calibrate_dramaturgy: false,
+            calibration_days: 2,
+            calibration_json: None,
         }
     }
 }
@@ -42,9 +50,12 @@ pub fn run_headless(
     let stop_total_ticks = config
         .max_ticks
         .map(|ticks| started_total_ticks.saturating_add(ticks));
-    let stop_day = config
-        .max_days
-        .map(|days| started_day.saturating_add(days.max(1)));
+    let effective_max_days = config.max_days.or_else(|| {
+        config
+            .calibrate_dramaturgy
+            .then_some(config.calibration_days.max(1))
+    });
+    let stop_day = effective_max_days.map(|days| started_day.saturating_add(days.max(1)));
     let mut last_saved_day = sim.current_day();
     let mut ran_ticks = 0_u64;
 
@@ -93,6 +104,23 @@ pub fn run_headless(
 
     persistence.save(&mut sim, "shutdown")?;
     print_report(&mut sim, &config, "encerrado");
+    if config.calibrate_dramaturgy {
+        let report = run_dramaturgy_calibration(
+            &mut sim,
+            DramaturgyCalibrationConfig {
+                expected_days: config.calibration_days,
+                ..Default::default()
+            },
+        );
+        for line in report.summary_lines() {
+            println!("[headless] dramaturgia | {}", line);
+        }
+        if let Some(path) = &config.calibration_json {
+            let json = serde_json::to_string_pretty(&report)?;
+            std::fs::write(path, json)?;
+            println!("[headless] dramaturgia_json | {}", path.display());
+        }
+    }
     println!(
         "[headless] finalizado | ticks_executados={} | resumo={}",
         ran_ticks,

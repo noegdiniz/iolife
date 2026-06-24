@@ -44,8 +44,8 @@ pub(super) enum UtilityDirectiveKind {
     BuscarPrivacidade,
     ExibirStatus,
     SubmeterSe,
-    AfirmarAutoridade,
     PrepararVinganca,
+    RepetirRitual,
 }
 
 impl UtilityDirectiveKind {
@@ -66,8 +66,8 @@ impl UtilityDirectiveKind {
             Self::BuscarPrivacidade => "buscar_privacidade",
             Self::ExibirStatus => "exibir_status",
             Self::SubmeterSe => "submeter_se",
-            Self::AfirmarAutoridade => "afirmar_autoridade",
             Self::PrepararVinganca => "preparar_vinganca",
+            Self::RepetirRitual => "repetir_ritual",
         }
     }
 }
@@ -85,7 +85,6 @@ pub(super) struct UtilityDecision {
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct RealtimeUtilityContext {
-    pub position: TileCoord,
     pub hunger: i32,
     pub energy: i32,
     pub health: i32,
@@ -114,6 +113,16 @@ pub(super) struct RealtimeUtilityContext {
     pub recent_public_humiliation: bool,
     pub public_humiliation_by: Option<u64>,
     pub active_revenge_target: Option<u64>,
+    pub household_treasury: i32,
+    pub household_feudal_arrears: i32,
+    pub household_tribute_due: i32,
+    pub stalled_food_processors: usize,
+    pub material_food_source_count: usize,
+    pub food_supply_emergency: bool,
+    pub food_access_priority: u8,
+    pub feudal_power: i32,
+    pub has_direct_lord: bool,
+    pub is_authority_or_official: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -134,6 +143,7 @@ pub(super) struct UtilityScoreBreakdown {
     pub display_status: i32,
     pub submit: i32,
     pub prepare_revenge: i32,
+    pub symbolic_ritual: i32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -162,8 +172,6 @@ pub struct ActiveUtilityDirective {
     pub kind: String,
     pub intent: AgentIntent,
     pub score: i32,
-    pub thought: String,
-    pub reason: String,
     pub stance: String,
     pub focus_target: Option<u64>,
 }
@@ -235,6 +243,41 @@ impl Simulation {
                 (psychology.0.dominance_drive + (severity / 4).clamp(1, 10)).clamp(-100, 100);
         }
         psychology.0.clamp_all();
+        drop(psychology);
+        drop(entity_mut);
+        self.add_personal_symbol(
+            agent_id,
+            PersonalSymbolTargetKind::Event,
+            by_agent_id.map(|id| format!("agent:{id}")),
+            note.clone(),
+            "ferida de vergonha publica",
+            "vergonha",
+            severity.clamp(8, 40),
+            None,
+        )?;
+        self.add_inner_contradiction(
+            agent_id,
+            "preservar honra diante dos outros",
+            "ser visto como fraco ou ridiculo",
+            "recompor rosto antes de se expor de novo",
+            severity.clamp(8, 35),
+        )?;
+        let coping = if severity >= 12 {
+            CopingPatternKind::StatusDisplay
+        } else {
+            CopingPatternKind::Withdrawal
+        };
+        self.add_coping_pattern(
+            agent_id,
+            coping,
+            "humilhacao publica",
+            if coping == CopingPatternKind::StatusDisplay {
+                "ostentar compostura, roupa ou autoridade para recuperar rosto"
+            } else {
+                "buscar privacidade antes de falar de novo"
+            },
+            severity.clamp(6, 30),
+        )?;
         Ok(())
     }
 
@@ -259,9 +302,142 @@ impl Simulation {
             .ok_or_else(|| anyhow!("missing psychological state component"))?;
         psychology.0.active_revenge_target = Some(target_id);
         psychology.0.clamp_all();
+        drop(psychology);
+        drop(entity_mut);
+        self.add_personal_symbol(
+            agent_id,
+            PersonalSymbolTargetKind::Agent,
+            Some(format!("agent:{target_id}")),
+            note.clone(),
+            "alvo moral da vinganca",
+            "ressentimento frio",
+            severity.clamp(8, 45),
+            None,
+        )?;
+        self.add_inner_contradiction(
+            agent_id,
+            "restaurar equilibrio moral",
+            "pagar caro demais por vinganca",
+            "esperar janela plausivel antes de agir",
+            severity.clamp(8, 35),
+        )?;
         Ok(())
     }
 
+    pub(super) fn add_personal_symbol(
+        &mut self,
+        agent_id: u64,
+        target_kind: PersonalSymbolTargetKind,
+        target_id: Option<String>,
+        text: impl Into<String>,
+        meaning: impl Into<String>,
+        emotion: impl Into<String>,
+        intensity: i32,
+        origin_memory_id: Option<u64>,
+    ) -> Result<()> {
+        let text = text.into();
+        let meaning = meaning.into();
+        let emotion = emotion.into();
+        let entity = self.find_agent_entity(agent_id)?;
+        let mut entity_mut = self.world.entity_mut(entity);
+        let mut psychology = entity_mut
+            .get_mut::<PsychologicalStateComponent>()
+            .ok_or_else(|| anyhow!("missing psychological state component"))?;
+        if let Some(existing) = psychology.0.personal_symbols.iter_mut().find(|symbol| {
+            symbol.target_kind == target_kind
+                && symbol.target_id == target_id
+                && symbol.meaning == meaning
+        }) {
+            existing.intensity = (existing.intensity + intensity.max(1) / 2).clamp(0, 100);
+            existing.emotion = emotion;
+            existing.text = text;
+        } else {
+            psychology.0.personal_symbols.push(PersonalSymbol {
+                target_kind,
+                target_id,
+                text,
+                meaning,
+                emotion,
+                intensity: intensity.clamp(0, 100),
+                origin_memory_id,
+            });
+        }
+        psychology.0.clamp_all();
+        Ok(())
+    }
+
+    pub(super) fn add_coping_pattern(
+        &mut self,
+        agent_id: u64,
+        kind: CopingPatternKind,
+        trigger: impl Into<String>,
+        behavior_hint: impl Into<String>,
+        strength: i32,
+    ) -> Result<()> {
+        let trigger = trigger.into();
+        let behavior_hint = behavior_hint.into();
+        let entity = self.find_agent_entity(agent_id)?;
+        let mut entity_mut = self.world.entity_mut(entity);
+        let mut psychology = entity_mut
+            .get_mut::<PsychologicalStateComponent>()
+            .ok_or_else(|| anyhow!("missing psychological state component"))?;
+        if let Some(existing) = psychology
+            .0
+            .coping_patterns
+            .iter_mut()
+            .find(|pattern| pattern.kind == kind && pattern.trigger == trigger)
+        {
+            existing.strength = (existing.strength + strength.max(1) / 2).clamp(0, 100);
+            existing.behavior_hint = behavior_hint;
+            existing.last_triggered_tick = self.total_ticks;
+        } else {
+            psychology.0.coping_patterns.push(CopingPattern {
+                kind,
+                trigger,
+                behavior_hint,
+                strength: strength.clamp(0, 100),
+                last_triggered_tick: self.total_ticks,
+            });
+        }
+        psychology.0.clamp_all();
+        Ok(())
+    }
+
+    pub(super) fn add_inner_contradiction(
+        &mut self,
+        agent_id: u64,
+        desire: impl Into<String>,
+        fear: impl Into<String>,
+        compromise: impl Into<String>,
+        pressure: i32,
+    ) -> Result<()> {
+        let desire = desire.into();
+        let fear = fear.into();
+        let compromise = compromise.into();
+        let entity = self.find_agent_entity(agent_id)?;
+        let mut entity_mut = self.world.entity_mut(entity);
+        let mut psychology = entity_mut
+            .get_mut::<PsychologicalStateComponent>()
+            .ok_or_else(|| anyhow!("missing psychological state component"))?;
+        if let Some(existing) = psychology
+            .0
+            .inner_contradictions
+            .iter_mut()
+            .find(|contradiction| contradiction.desire == desire && contradiction.fear == fear)
+        {
+            existing.pressure = (existing.pressure + pressure.max(1) / 2).clamp(0, 100);
+            existing.compromise = compromise;
+        } else {
+            psychology.0.inner_contradictions.push(InnerContradiction {
+                desire,
+                fear,
+                compromise,
+                pressure: pressure.clamp(0, 100),
+            });
+        }
+        psychology.0.clamp_all();
+        Ok(())
+    }
     pub(super) fn refresh_realtime_utility_control(&mut self, agent_id: u64) -> Result<()> {
         let planner_intent = self.sync_intent_with_locked_task(agent_id)?;
         let planner_intent = if planner_intent.is_some() {
@@ -347,8 +523,6 @@ impl Simulation {
                 kind: decision.kind.as_str().to_string(),
                 intent: decision.intent.clone(),
                 score: decision.score,
-                thought: decision.thought.clone(),
-                reason: decision.reason.clone(),
                 stance: decision.stance.as_str().to_string(),
                 focus_target: decision.focus_target,
             });
@@ -500,6 +674,12 @@ impl Simulation {
             breakdown.prepare_revenge,
             stance,
         )?);
+        consider(self.symbolic_ritual_decision(
+            agent_id,
+            &context,
+            breakdown.symbolic_ritual,
+            stance,
+        )?);
 
         Ok(best.filter(|decision| decision.score >= 35))
     }
@@ -551,9 +731,16 @@ impl Simulation {
                 .total_ticks
                 .saturating_sub(psychological_state.last_public_humiliation_tick)
                 <= 240;
+        let food_assessment = self.food_crisis_assessment_for_household(household_id);
+        let feudal_power = self.feudal_power_for_agent(agent_id);
+        let has_feudal_title = self.active_feudal_title_for_holder(agent_id).is_some();
+        let has_direct_lord = household
+            .as_ref()
+            .and_then(|household| household.direct_lord_agent_id)
+            .is_some();
+        let is_authority_or_official = self.is_authority_role(&role_id) || has_feudal_title;
 
         Ok(RealtimeUtilityContext {
-            position,
             hunger: state.hunger,
             energy: state.energy,
             health: state.health,
@@ -582,13 +769,28 @@ impl Simulation {
             recent_public_humiliation,
             public_humiliation_by: psychological_state.last_public_humiliation_by,
             active_revenge_target: psychological_state.active_revenge_target,
+            household_treasury: food_assessment.household_treasury,
+            household_feudal_arrears: food_assessment.household_feudal_arrears,
+            household_tribute_due: food_assessment.household_tribute_due,
+            stalled_food_processors: food_assessment.stalled_food_processors,
+            material_food_source_count: food_assessment.material_food_source_count,
+            food_supply_emergency: food_assessment.food_supply_emergency,
+            food_access_priority: household_id
+                .map(|id| self.household_food_access_priority(id))
+                .unwrap_or(50),
+            feudal_power,
+            has_direct_lord,
+            is_authority_or_official,
         })
     }
 
     fn reactive_stance_for_context(&self, context: &RealtimeUtilityContext) -> ReactiveStance {
         let psych = &context.psychological_state;
         let threat_pressure = (100 - context.health).max(0) + context.pain + context.bleeding * 3;
-        if context.urgent_legal_target.is_some() && self.is_authority_role(&context.role_id) {
+        if (context.urgent_legal_target.is_some()
+            || (context.food_supply_emergency && context.is_authority_or_official))
+            && self.is_authority_role(&context.role_id)
+        {
             return ReactiveStance::InstitutionalAssertion;
         }
         if context.active_combat_target.is_some()
@@ -614,6 +816,12 @@ impl Simulation {
         }
         if psych.submission_drive + psych.fear >= psych.pride + psych.dominance_drive + 15 {
             return ReactiveStance::CowedCompliance;
+        }
+        if context.food_supply_emergency
+            && context.material_food_source_count == 0
+            && context.hunger + psych.anger + psych.revenge_drive >= psych.fear + 85
+        {
+            return ReactiveStance::PredatoryOpportunism;
         }
         if context.chaos_pressure >= 50 && psych.dominance_drive + psych.anger >= 35 {
             return ReactiveStance::PredatoryOpportunism;
@@ -752,6 +960,15 @@ impl Simulation {
         let chaos_bonus = (context.chaos_pressure / 8).max(0);
         let psych = &context.psychological_state;
         let stance = self.reactive_stance_for_context(context);
+        let poverty_pressure = if context.household_treasury <= 0 {
+            18
+        } else {
+            0
+        } + (12 - context.household_treasury).max(0).min(12);
+        let feudal_burden = (context.household_feudal_arrears + context.household_tribute_due)
+            .max(0)
+            .clamp(0, 30);
+        let access_bonus = (i32::from(context.food_access_priority) - 50) / 3;
         let mut scores = UtilityScoreBreakdown::default();
 
         if context.household_has_food {
@@ -761,7 +978,17 @@ impl Simulation {
             }
         }
         if context.hunger >= 55 && !context.household_has_food {
-            scores.buy_food = hunger_pressure + 30 + i32::from(context.food_crisis_level) * 5;
+            scores.buy_food = hunger_pressure
+                + 30
+                + i32::from(context.food_crisis_level) * 5
+                + poverty_pressure / 2
+                + access_bonus;
+            if context.food_supply_emergency {
+                scores.buy_food += 12;
+            }
+            if context.material_food_source_count == 0 {
+                scores.buy_food -= 28;
+            }
             if active_task
                 .as_ref()
                 .map(|task| task.kind == EconomicTaskKind::Comprar)
@@ -771,8 +998,10 @@ impl Simulation {
             }
         }
         if context.has_pending_payments {
-            scores.collect_payment =
-                40 + hunger_pressure / 2 + i32::from(context.food_crisis_level) * 3;
+            scores.collect_payment = 40
+                + hunger_pressure / 2
+                + i32::from(context.food_crisis_level) * 3
+                + poverty_pressure / 3;
         }
         if let Some(task) = active_task.as_ref()
             && task.lock_until_complete
@@ -788,9 +1017,19 @@ impl Simulation {
             ) {
                 scores.continue_vital_task += 15;
             }
+            if context.food_supply_emergency
+                && matches!(
+                    task.class,
+                    EconomicTaskClass::HouseholdFoodPurchase
+                        | EconomicTaskClass::FoodSupplyTransport
+                        | EconomicTaskClass::FoodProduction
+                )
+            {
+                scores.continue_vital_task += 20 + access_bonus.max(0);
+            }
         }
         if context.energy <= 25 {
-            scores.rest = fatigue_pressure + 45;
+            scores.rest = fatigue_pressure + 45 + context.stress.max(0) / 8;
         }
         if context.active_combat_target.is_some() {
             scores.fight = 70 + chaos_bonus + psych.dominance_drive.max(0) / 4;
@@ -806,6 +1045,20 @@ impl Simulation {
             scores.institutional_duty =
                 65 + context.fear_of_authority.max(0) / 4 + psych.pride.max(0) / 5;
         }
+        if context.food_supply_emergency && context.is_authority_or_official {
+            scores.institutional_duty += 35
+                + (context.feudal_power / 10).clamp(0, 15)
+                + if context.stalled_food_processors > 0 {
+                    8
+                } else {
+                    0
+                }
+                + if context.material_food_source_count == 0 {
+                    8
+                } else {
+                    0
+                };
+        }
         if context.recent_public_humiliation {
             scores.withdraw_social = psych.humiliation.max(0)
                 + psych.submission_drive.max(0) / 2
@@ -819,18 +1072,50 @@ impl Simulation {
                 45 + context.relevant_target_resentment.max(0) / 2 + psych.revenge_drive.max(0) / 3;
         }
         if context.witness_count > 0 && psych.status_anxiety >= 20 {
-            scores.display_status =
-                psych.status_anxiety + psych.pride.max(0) / 2 + psych.dominance_drive.max(0) / 3;
+            scores.display_status = psych.status_anxiety
+                + psych.pride.max(0) / 2
+                + psych.dominance_drive.max(0) / 3
+                + context.self_prestige_score.max(0) / 20;
         }
         if context.relevant_social_target.is_some() && context.legal_risk >= 10 {
             scores.submit = psych.submission_drive.max(0)
                 + psych.fear.max(0) / 2
-                + context.fear_of_authority.max(0) / 3;
+                + context.fear_of_authority.max(0) / 3
+                + context.relevant_target_trust.max(0) / 4;
+        }
+        if context.food_supply_emergency && feudal_burden > 0 && context.has_direct_lord {
+            scores.submit += feudal_burden / 2 + context.fear_of_authority.max(0) / 4;
+            scores.prepare_revenge += (feudal_burden + poverty_pressure) / 3;
         }
         if context.active_revenge_target.is_some() {
             scores.prepare_revenge =
                 35 + psych.revenge_drive.max(0) / 2 + context.relevant_target_resentment.max(0) / 2
                     - context.legal_risk / 4;
+        }
+        if context.food_supply_emergency
+            && context.material_food_source_count == 0
+            && poverty_pressure + hunger_pressure + psych.anger.max(0) >= 55
+        {
+            scores.prepare_revenge += 18;
+        }
+        if context.hunger < 70 && context.active_combat_target.is_none() && context.health > 40 {
+            let strongest_symbol = psych
+                .personal_symbols
+                .iter()
+                .map(|symbol| symbol.intensity)
+                .max()
+                .unwrap_or(0);
+            let strongest_coping = psych
+                .coping_patterns
+                .iter()
+                .map(|pattern| pattern.strength)
+                .max()
+                .unwrap_or(0);
+            let symbolic_affect = psych.grief.max(psych.guilt).max(psych.trauma) / 3;
+            scores.symbolic_ritual = (strongest_symbol / 2)
+                + (strongest_coping / 3)
+                + symbolic_affect
+                + psych.humiliation.max(0) / 5;
         }
         match stance {
             ReactiveStance::InstitutionalAssertion => {
@@ -922,7 +1207,7 @@ impl Simulation {
         score: i32,
         stance: ReactiveStance,
     ) -> Result<Option<UtilityDecision>> {
-        if score <= 0 || context.household_has_food {
+        if score <= 0 || context.household_has_food || context.material_food_source_count == 0 {
             return Ok(None);
         }
         Ok(Some(UtilityDecision {
@@ -1459,6 +1744,67 @@ impl Simulation {
         }))
     }
 
+    fn symbolic_ritual_decision(
+        &mut self,
+        _agent_id: u64,
+        context: &RealtimeUtilityContext,
+        score: i32,
+        stance: ReactiveStance,
+    ) -> Result<Option<UtilityDecision>> {
+        if score <= 0 || context.active_combat_target.is_some() || context.hunger >= 70 {
+            return Ok(None);
+        }
+        let Some(symbol) = context
+            .psychological_state
+            .personal_symbols
+            .iter()
+            .max_by_key(|symbol| symbol.intensity)
+        else {
+            return Ok(None);
+        };
+        if symbol.intensity < 35 {
+            return Ok(None);
+        }
+        let (kind, target_semantic) = if symbol.target_kind == PersonalSymbolTargetKind::Place {
+            (
+                IntentKind::Andar,
+                symbol
+                    .target_id
+                    .clone()
+                    .or_else(|| Some(symbol.text.clone())),
+            )
+        } else {
+            (IntentKind::Refletir, Some(symbol.text.clone()))
+        };
+        Ok(Some(UtilityDecision {
+            kind: UtilityDirectiveKind::RepetirRitual,
+            intent: AgentIntent {
+                kind,
+                target_agent: None,
+                target_semantic,
+                justification: format!(
+                    "Um simbolo pessoal ainda organiza minha dor: {}.",
+                    symbol.meaning
+                ),
+                dominant_emotion: symbol.emotion.clone(),
+                perceived_risk: 2,
+                belief_updates: vec![format!(
+                    "Repetir este gesto me ajuda a carregar {}.",
+                    symbol.meaning
+                )],
+                priority: 5,
+                social_move: None,
+            },
+            score,
+            thought: format!(
+                "Volto ao simbolo '{}' porque ele ainda pesa mais do que uma rotina vazia.",
+                symbol.text
+            ),
+            reason: format!("ritual simbolico ligado a {}", symbol.meaning),
+            stance,
+            focus_target: None,
+        }))
+    }
     fn active_combat_target(&self, agent_id: u64) -> Option<u64> {
         self.combats
             .iter()

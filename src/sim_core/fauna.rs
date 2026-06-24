@@ -1,12 +1,10 @@
 use super::*;
 use crate::world_model::{
-    AgentLifeStatus, BodyPartKind, CombatOutcome, CombatState, CombatStatus, Creature, EventKind,
-    HuntingQuest, InjuryState, MemoryKind, PartInjuryStatus, RelationDelta, ResourceKind,
-    ResourceStack, WorldEvent, default_body_parts,
+    AgentLifeStatus, BodyPartKind, CombatOutcome, CombatState, CombatStatus, EventKind,
+    HuntingQuest, InjuryState, MemoryKind, PartInjuryStatus, ResourceKind, ResourceStack,
+    WorldEvent, default_body_parts,
 };
 use anyhow::{Result, anyhow};
-use bevy_ecs::prelude::*;
-use std::collections::HashSet;
 
 impl Simulation {
     // Generates a dynamic compound name for magical creatures.
@@ -60,12 +58,14 @@ impl Simulation {
         }
     }
 
+    #[allow(deprecated)]
     pub fn is_creature(&self, id: u64) -> bool {
         self.world
             .iter_entities()
             .any(|e| e.get::<CreatureCore>().map(|c| c.id == id).unwrap_or(false))
     }
 
+    #[allow(deprecated)]
     pub fn find_creature_entity(&self, id: u64) -> Result<Entity> {
         self.world
             .iter_entities()
@@ -193,6 +193,7 @@ impl Simulation {
     }
 
     // Daily spawns up to 10 common creatures if biomes exist
+    #[allow(deprecated)]
     pub fn spawn_daily_common_creatures(&mut self) {
         let active_count = self
             .world
@@ -264,7 +265,7 @@ impl Simulation {
         let actor_name = self.agent_name(actor_id)?;
         let c_ent = self.find_creature_entity(target_creature_id)?;
 
-        let (creature_died, c_core, target_part) = {
+        let (creature_died, c_core, _target_part) = {
             let mut query = self.world.query::<(
                 &CreatureCore,
                 &mut CreatureStateComponent,
@@ -412,7 +413,7 @@ impl Simulation {
                 &mut LifeStatusComponent,
                 &AgentCore,
             )>();
-            let (mut a_state, mut a_injury, mut a_life, a_core) = query
+            let (mut a_state, mut a_injury, a_life, a_core) = query
                 .get_mut(&mut self.world, a_ent)
                 .map_err(|e| anyhow!("Failed to query components: {:?}", e))?;
 
@@ -801,7 +802,7 @@ impl Simulation {
             list
         };
 
-        for (c_id, c_name, pos, habitat_tid) in aggressive_creatures {
+        for (c_id, c_name, _pos, habitat_tid) in aggressive_creatures {
             if self
                 .hunting_quests
                 .iter()

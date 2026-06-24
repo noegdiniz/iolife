@@ -107,7 +107,6 @@ pub(crate) struct HistoricalWorldState {
 
 #[derive(Debug, Clone)]
 pub(crate) struct HistoricalSettlement {
-    pub id: usize,
     pub name: String,
     pub households: Vec<HistoricalHousehold>,
     pub people: Vec<HistoricalPerson>,
@@ -136,7 +135,6 @@ pub(crate) struct HistoricalSettlement {
 pub(crate) struct HistoricalHousehold {
     pub id: u64,
     pub name: String,
-    pub settlement_id: usize,
     pub member_ids: Vec<u64>,
     pub wealth: i32,
     pub grain: i32,
@@ -193,7 +191,6 @@ pub(crate) struct HistoricalTerritoryState {
 
 #[derive(Debug, Clone)]
 pub(crate) struct HistoricalPolityState {
-    pub id: u64,
     pub name: String,
     pub treasury: i32,
     pub military_readiness: i32,
@@ -327,7 +324,6 @@ pub(crate) fn simulate_world_history(
         } else {
             FALLBACK_VILLAGE_NAMES[(settlement_idx - 1) % FALLBACK_VILLAGE_NAMES.len()].to_string()
         };
-        let polity_id = settlement_idx as u64 + 1;
         let polity_name = format!("Dominio de {}", name);
         let mut households = Vec::new();
         let mut people = Vec::new();
@@ -437,7 +433,6 @@ pub(crate) fn simulate_world_history(
             households.push(HistoricalHousehold {
                 id: household_id,
                 name: household_name,
-                settlement_id: settlement_idx,
                 member_ids,
                 wealth: rng.random_range(45..=85),
                 grain: rng.random_range(18..=34),
@@ -456,7 +451,6 @@ pub(crate) fn simulate_world_history(
         }
 
         settlements.push(HistoricalSettlement {
-            id: settlement_idx,
             name: name.clone(),
             households,
             people,
@@ -484,7 +478,6 @@ pub(crate) fn simulate_world_history(
                 })
                 .collect(),
             polity: HistoricalPolityState {
-                id: polity_id,
                 name: polity_name,
                 treasury: 60,
                 military_readiness: 18,

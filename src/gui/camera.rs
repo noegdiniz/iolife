@@ -13,7 +13,7 @@ impl Plugin for CameraPlugin {
     }
 }
 
-fn spawn_camera(mut commands: Commands, game: Res<GameState>) {
+fn spawn_camera(mut commands: Commands, game: NonSend<GameState>) {
     let mut proj = OrthographicProjection::default_2d();
     proj.scale = 1.0 / INITIAL_ZOOM;
     let (r, g, b) = palette::BACKGROUND;
@@ -30,12 +30,14 @@ fn spawn_camera(mut commands: Commands, game: Res<GameState>) {
             )),
             ..default()
         },
-        proj,
+        Projection::Orthographic(proj),
         Transform::from_xyz(0.0, 0.0, 999.0).looking_at(Vec3::new(0.0, 0.0, 0.0), Vec3::Y),
         Name::new(format!("Camera mapa {}x{}", map_size.x, map_size.y)),
     ));
 }
 
-pub fn apply_zoom(projection: &mut OrthographicProjection, zoom: f32) {
-    projection.scale = 1.0 / zoom.clamp(0.5, 8.0);
+pub fn apply_zoom(projection: &mut Projection, zoom: f32) {
+    if let Projection::Orthographic(projection) = projection {
+        projection.scale = 1.0 / zoom.clamp(0.5, 8.0);
+    }
 }

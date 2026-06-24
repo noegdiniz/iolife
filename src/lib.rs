@@ -1,5 +1,6 @@
 pub mod agent_mind;
 pub mod cli;
+pub mod dramaturgy_calibration;
 pub mod economy_catalog;
 pub mod gui;
 pub mod headless;

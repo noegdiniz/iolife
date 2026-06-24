@@ -22,7 +22,6 @@ pub mod runtime;
 pub mod selection;
 pub mod ui;
 
-#[derive(Resource)]
 pub struct GameState {
     pub sim: Simulation,
     pub llm: Box<dyn LlmAdapter>,
@@ -30,7 +29,11 @@ pub struct GameState {
     pub selected_agent_id: Option<u64>,
 }
 
-pub fn run_gui(sim: Simulation, llm: Box<dyn LlmAdapter>, persistence: Persistence) -> Result<()> {
+pub fn run_gui(
+    mut sim: Simulation,
+    llm: Box<dyn LlmAdapter>,
+    persistence: Persistence,
+) -> Result<()> {
     let village_name = sim.village_name().to_string();
     let selected = sim.agent_views().first().map(|v| v.id);
 
@@ -39,7 +42,7 @@ pub fn run_gui(sim: Simulation, llm: Box<dyn LlmAdapter>, persistence: Persisten
             .set(WindowPlugin {
                 primary_window: Some(Window {
                     title: format!("Vila Medieval - {}", village_name),
-                    resolution: (1280.0, 800.0).into(),
+                    resolution: (1280, 800).into(),
                     ..default()
                 }),
                 ..default()
@@ -50,7 +53,7 @@ pub fn run_gui(sim: Simulation, llm: Box<dyn LlmAdapter>, persistence: Persisten
             BACKGROUND.1 as f32 / 255.0,
             BACKGROUND.2 as f32 / 255.0,
         )))
-        .insert_resource(GameState {
+        .insert_non_send_resource(GameState {
             sim,
             llm,
             persistence,

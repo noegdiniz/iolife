@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0"
-bevy = { version = "0.17", default-features = false, features = ["bevy_window", "bevy_render", "bevy_sprite", "bevy_core_pipeline", "bevy_asset", "bevy_winit", "bevy_ui", "bevy_text", "default_font", "multi_threaded"] }
+bevy = { version = "0.17", default-features = false, features = ["bevy_window", "bevy_render", "bevy_sprite", "bevy_core_pipeline", "bevy_asset", "bevy_winit", "bevy_ui", "bevy_text", "default_font", "x11", "multi_threaded"] }
 bevy_ecs = "0.17"
 chrono = { version = "0.4", features = ["serde"] }
 rand = "0.9"

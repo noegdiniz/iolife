@@ -56,6 +56,14 @@ pub struct PsychologicalContextInput {
     pub current_identity_tension: String,
     pub dominant_preoccupations: Vec<String>,
     pub recent_self_narrative: String,
+    #[serde(default)]
+    pub personal_symbols: Vec<String>,
+    #[serde(default)]
+    pub coping_patterns: Vec<String>,
+    #[serde(default)]
+    pub persistent_inner_contradictions: Vec<String>,
+    #[serde(default)]
+    pub melancholic_fixation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +97,18 @@ pub struct EconomicContextInput {
     pub scarcity_signals: Vec<String>,
     pub grain_availability: String,
     pub external_grain_offer: Option<String>,
+    #[serde(default)]
+    pub food_chain_status: String,
+    #[serde(default)]
+    pub household_food_supply_days: String,
+    #[serde(default)]
+    pub material_food_source_status: String,
+    #[serde(default)]
+    pub social_food_access_status: String,
+    #[serde(default)]
+    pub rationing_political_cost: String,
+    #[serde(default)]
+    pub food_bottlenecks: Vec<String>,
     pub public_treasury_status: String,
     pub war_supply_status: Vec<String>,
     pub open_tasks: Vec<EconomicOpportunityInput>,
@@ -249,6 +269,10 @@ pub struct ThinkMakerOutput {
     pub dominant_emotion: String,
     pub belief_updates: Vec<String>,
     pub long_term_plan: String,
+    #[serde(default)]
+    pub inner_contradiction_update: Option<String>,
+    #[serde(default)]
+    pub melancholic_fixation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -697,12 +721,16 @@ pub fn parse_think_maker_json(payload: &str) -> Result<ThinkMakerOutput> {
         required_string_field(object, "dominant_emotion").unwrap_or_else(|_| "contido".to_string());
     let belief_updates = parse_belief_updates(object.get("belief_updates"), &mut notes);
     let long_term_plan = required_string_field(object, "long_term_plan")?;
+    let inner_contradiction_update = optional_string_field(object, "inner_contradiction_update");
+    let melancholic_fixation = optional_string_field(object, "melancholic_fixation");
 
     Ok(ThinkMakerOutput {
         reflection,
         dominant_emotion,
         belief_updates,
         long_term_plan,
+        inner_contradiction_update,
+        melancholic_fixation,
     })
 }
 
@@ -800,6 +828,14 @@ fn required_string_field(object: &Map<String, Value>, field: &str) -> Result<Str
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .ok_or_else(|| anyhow!("decision payload field `{field}` must be a non-empty string"))
+}
+fn optional_string_field(object: &Map<String, Value>, field: &str) -> Option<String> {
+    object
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn required_textish_field(
@@ -1578,7 +1614,10 @@ fn parse_economic_transfer(
     })
 }
 
-fn parse_revealed_secret(value: Option<&Value>, notes: &mut Vec<String>) -> Option<RevealedSecret> {
+fn parse_revealed_secret(
+    value: Option<&Value>,
+    _notes: &mut Vec<String>,
+) -> Option<RevealedSecret> {
     let val = value?;
     if val.is_null() {
         return None;

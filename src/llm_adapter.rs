@@ -106,7 +106,9 @@ Use EXATAMENTE esta estrutura de chaves e tipos:
   "reflection": "string extremamente concisa resumindo o raciocinio e motivacao atual (no maximo 2 frases)",
   "dominant_emotion": "string indicando o sentimento atual (ex: alegre, cansado, focado, apreensivo, furioso, desesperado)",
   "belief_updates": ["array de strings contendo novas crencas ou metas curtas (seja extremamente conciso, max 2 frases por crenca)"],
-  "long_term_plan": "string curta descrevendo o plano estrategico persistente atual do agente"
+  "long_term_plan": "string curta descrevendo o plano estrategico persistente atual do agente",
+  "inner_contradiction_update": null ou "string curta opcional sobre tensao interna estavel",
+  "melancholic_fixation": null ou "string curta opcional sobre fixacao melancolica dominante"
 }
 
 Regras:
@@ -115,13 +117,16 @@ Regras:
 3. Seja extremamente conciso. No maximo 2 frases em reflection e em cada item de belief_updates.
 4. Estado Físico e Traumas: Seu pensamento ('reflection') deve ser condizente com a dor e as lesões em seu `body_parts`. Se foi mutilado (ex: olho perdido, membro decepado), reflita sobre isso sem censura ou filtros modernos, expressando dor medieval crua, ódio, medo ou desejo de vingança.
 5. `long_term_plan` deve SEMPRE existir. Ele e curto, concreto e estavel. Preserve continuidade com o plano anterior quando nada material mudou. So revise o plano se fome, trauma, guerra, promessa, oportunidade economica, crise feudal ou mudanca institucional realmente alterarem a direcao do agente.
+6. `inner_contradiction_update` e `melancholic_fixation` podem ser null. Use-os apenas quando o contexto revelar uma tensao intima ou fixacao simbolica duravel, nao como reflexao momentanea.
 
 Exemplo de Resposta Valida:
 {
   "reflection": "Estou com fome e preciso comer para continuar trabalhando.",
   "dominant_emotion": "apreensivo",
   "belief_updates": ["Preciso economizar moedas para tempos dificeis."],
-  "long_term_plan": "Juntar recursos sem arriscar minha posicao na vila."
+  "long_term_plan": "Juntar recursos sem arriscar minha posicao na vila.",
+  "inner_contradiction_update": "quer seguranca, mas teme parecer covarde",
+  "melancholic_fixation": null
 }"#;
 
 const CONVERSATION_TURN_PROMPT: &str = r#"Voce responde apenas pela mente de UM unico aldeao in uma conversa social medieval.
@@ -428,10 +433,10 @@ impl LlmAdapter for MockLlmAdapter {
         let food_place = place_with_tag("taverna")
             .or_else(|| place_with_tag("mesa"))
             .or_else(|| place_with_tag("social"))
-            .unwrap_or_else(|| "special:external_market".to_string());
+            .unwrap_or_else(|| "special:inter_village_trade".to_string());
         let work_place = place_with_tag("trabalho")
             .or_else(|| place_with_tag("oficina"))
-            .unwrap_or_else(|| "special:external_market".to_string());
+            .unwrap_or_else(|| "special:inter_village_trade".to_string());
         let walk_place = place_with_tag("praca")
             .or_else(|| {
                 input
@@ -439,7 +444,7 @@ impl LlmAdapter for MockLlmAdapter {
                     .first()
                     .map(|place| place.place_id.clone())
             })
-            .unwrap_or_else(|| "special:external_market".to_string());
+            .unwrap_or_else(|| "special:inter_village_trade".to_string());
 
         if input.state.hunger >= 65 {
             tasks.push(format!("Comer({food_place})"));
@@ -559,6 +564,8 @@ impl LlmAdapter for MockLlmAdapter {
                 "Consolidar minha posicao como {} sem perder estabilidade.",
                 input.decision_input.role
             ),
+            inner_contradiction_update: None,
+            melancholic_fixation: None,
         })
     }
 

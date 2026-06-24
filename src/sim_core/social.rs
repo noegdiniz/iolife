@@ -2042,7 +2042,7 @@ impl Simulation {
                 let mut query =
                     self.world
                         .query::<(Entity, &AgentCore, &PositionComponent, &LifeStatusComponent)>();
-                for (ent, core, pos, status) in query.iter(&self.world) {
+                for (_ent, core, pos, status) in query.iter(&self.world) {
                     if status.0 == AgentLifeStatus::Vivo
                         && core.id != sender_id
                         && core.id != recipient_id
@@ -2504,19 +2504,6 @@ impl Simulation {
                 + Self::total_resource_amount(&household.reserved_food, resource_id);
             if household_stock >= amount {
                 return Some("lastro na despensa do lar".to_string());
-            }
-            if self
-                .resource_def(resource_id)
-                .map(|resource| resource.can_buy_external)
-                .unwrap_or(false)
-            {
-                let unit_price = self
-                    .market_quote(resource_id)
-                    .map(|quote| quote.buy_price)
-                    .unwrap_or_else(|| self.base_price(resource_id) * 2);
-                if household.treasury >= unit_price * amount {
-                    return Some("lastro em caixa para compra externa".to_string());
-                }
             }
         }
 
@@ -3638,7 +3625,7 @@ impl Simulation {
                 &mut LineageComponent,
                 &LifeStatusComponent,
             )>();
-            for (entity, core, mut lineage, status) in query.iter_mut(&mut self.world) {
+            for (_entity, core, mut lineage, status) in query.iter_mut(&mut self.world) {
                 if status.0 == AgentLifeStatus::Vivo {
                     lineage.age += 6;
                     if lineage.age >= 18 && core.role_id == "crianca" {
@@ -3655,7 +3642,7 @@ impl Simulation {
                 }
             }
         }
-        for (agent_id, name) in deceased {
+        for (agent_id, _name) in deceased {
             self.mark_agent_dead(agent_id, "velhice")?;
         }
         for agent_id in grown_up_ids {
@@ -4156,7 +4143,7 @@ impl Simulation {
             &mut StateComponent,
             &mut TaskQueueComponent,
         )>();
-        for (entity, core, status, mut state, mut queue) in query.iter_mut(&mut self.world) {
+        for (_entity, core, status, state, mut queue) in query.iter_mut(&mut self.world) {
             if status.0 == AgentLifeStatus::Vivo && core.role_id == "crianca" {
                 if queue.0.is_empty() {
                     let mut tasks = Vec::new();

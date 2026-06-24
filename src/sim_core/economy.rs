@@ -10,6 +10,24 @@ pub(super) struct FoodSourceOffer {
     unit_price: i32,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(super) struct FoodCrisisAssessment {
+    pub household_minimum_food_units: i32,
+    pub household_food_supply_days_tenths: i32,
+    pub household_treasury: i32,
+    pub household_feudal_arrears: i32,
+    pub household_tribute_due: i32,
+    pub village_grain_units: i32,
+    pub village_ready_food_units: i32,
+    pub stalled_food_processors: usize,
+    pub material_food_source_count: usize,
+    pub inter_village_food_source_count: usize,
+    pub food_supply_emergency: bool,
+    pub bottlenecks: Vec<String>,
+    pub access_summary: String,
+    pub political_cost_summary: String,
+}
+
 impl Simulation {
     pub(super) fn apply_needs_decay(&mut self) {
         let mut death_candidates = Vec::new();
@@ -485,103 +503,6 @@ impl Simulation {
         Ok(self.household_has_ready_food_available(household_id)
             || self.household_has_reserved_food_available(household_id))
     }
-
-    pub(super) fn reroute_eat_intent_to_food_purchase(&mut self, agent_id: u64) -> Result<bool> {
-        if self.household_has_food_available(agent_id)? {
-            return Ok(false);
-        }
-        let Some(household_id) = self.household_id_for_agent(agent_id) else {
-            return Ok(false);
-        };
-        self.ensure_economic_tasks();
-        let purchase_hint = self
-            .best_food_source_for_household(household_id)
-            .map(|offer| format!("comida {}", offer.resource_id.as_str()))
-            .unwrap_or_else(|| "comida para a despensa".to_string());
-        let purchase_intent = AgentIntent {
-            kind: IntentKind::Comprar,
-            target_agent: None,
-            target_semantic: Some(purchase_hint.clone()),
-            justification:
-                "A despensa do lar esta vazia; primeiro preciso comprar comida para poder comer."
-                    .to_string(),
-            dominant_emotion: "urgencia".to_string(),
-            perceived_risk: 8,
-            belief_updates: vec![
-                "Sem repor alimento, a fome vai piorar imediatamente.".to_string(),
-            ],
-            priority: 10,
-            social_move: None,
-        };
-
-        self.bind_or_create_economic_task(agent_id, &purchase_intent)?;
-        let task_found = self
-            .active_economic_task_for_agent(agent_id)
-            .map(|task| task.kind == EconomicTaskKind::Comprar)
-            .unwrap_or(false);
-        let agent_name = self.agent_name(agent_id)?;
-
-        if task_found {
-            let entity = self.find_agent_entity(agent_id)?;
-            {
-                let mut entity_mut = self.world.entity_mut(entity);
-                entity_mut
-                    .get_mut::<IntentComponent>()
-                    .ok_or_else(|| anyhow!("missing intent component"))?
-                    .0 = Some(purchase_intent.clone());
-                entity_mut
-                    .get_mut::<ThoughtComponent>()
-                    .ok_or_else(|| anyhow!("missing thought component"))?
-                    .0 = "Despensa vazia: redirecionando para comprar alimento.".to_string();
-                entity_mut
-                    .get_mut::<DestinationComponent>()
-                    .ok_or_else(|| anyhow!("missing destination component"))?
-                    .0 = None;
-                entity_mut
-                    .get_mut::<DestinationLabelComponent>()
-                    .ok_or_else(|| anyhow!("missing destination label component"))?
-                    .0 = purchase_intent.target_semantic.clone();
-                entity_mut
-                    .get_mut::<PathComponent>()
-                    .ok_or_else(|| anyhow!("missing path component"))?
-                    .0
-                    .clear();
-            }
-
-            self.push_event(WorldEvent {
-                day: self.day,
-                tick: self.tick_of_day,
-                actor: agent_id,
-                target: None,
-                kind: EventKind::Commerce,
-                summary: format!(
-                    "{agent_name} encontra a despensa vazia e muda de comer para comprar alimento."
-                ),
-                impact_tags: vec![
-                    "fome".to_string(),
-                    "compra".to_string(),
-                    "despensa".to_string(),
-                ],
-            });
-        } else {
-            self.push_scarcity_event_deduped(
-                agent_id,
-                None,
-                format!(
-                    "{agent_name} tenta trocar comer por compra de alimento, mas nao encontra oferta viavel."
-                ),
-                vec![
-                    "fome".to_string(),
-                    "compra".to_string(),
-                    "despensa".to_string(),
-                    "falha_abastecimento".to_string(),
-                ],
-                15,
-            );
-        }
-        Ok(task_found)
-    }
-
     pub(super) fn try_rebind_household_food_intent(&mut self, agent_id: u64) -> Result<bool> {
         let Some(household_id) = self.household_id_for_agent(agent_id) else {
             return Ok(false);
@@ -676,7 +597,6 @@ impl Simulation {
                         .and_then(|building_id| self.building_by_id(building_id))
                         .map(|building| building.entrance)
                 }),
-            EconomicNode::ExternalMarket => Some(self.village_economy.external_market_coord),
             EconomicNode::PublicTreasury => self
                 .spatial
                 .buildings
@@ -737,7 +657,6 @@ impl Simulation {
                 .unwrap_or(0),
             EconomicNode::ConstructionProject(_) => 0,
             EconomicNode::MilitarySupply(_) => 0,
-            EconomicNode::ExternalMarket => amount.max(0),
             EconomicNode::PublicTreasury => 0,
         }
     }
@@ -789,7 +708,7 @@ impl Simulation {
                     Self::recalculate_military_demand_status(demand);
                 }
             }
-            EconomicNode::ExternalMarket | EconomicNode::PublicTreasury => {}
+            EconomicNode::PublicTreasury => {}
         }
     }
 
@@ -847,7 +766,7 @@ impl Simulation {
                     return true;
                 }
             }
-            EconomicNode::ExternalMarket | EconomicNode::PublicTreasury => {}
+            EconomicNode::PublicTreasury => {}
         }
         false
     }
@@ -1017,16 +936,7 @@ impl Simulation {
                     establishment_name,
                 )
             } else {
-                let resource = self.resource_def(resource_id)?;
-                if !resource.can_sell_external {
-                    return None;
-                }
-                let quote = self.market_quote(resource_id)?;
-                (
-                    EconomicNode::ExternalMarket,
-                    quote.sell_price.max(1),
-                    "mercado externo".to_string(),
-                )
+                return None;
             };
 
         let task_id = self.next_task_id();
@@ -1168,13 +1078,6 @@ impl Simulation {
                     }
                     let _ = self.add_item_to_establishment_stock(establishment_id, item_id);
                 }
-                EconomicNode::ExternalMarket => {
-                    paid = true;
-                    if let Some(item) = self.item_instance_mut(item_id) {
-                        item.owner_agent_id = None;
-                        item.owner_household_id = None;
-                    }
-                }
                 _ => {
                     let _ = self.add_item_to_agent_inventory(agent_id, item_id);
                     self.maybe_auto_equip_best_items(agent_id)?;
@@ -1281,12 +1184,6 @@ impl Simulation {
                 match task.destination {
                     EconomicNode::Establishment(establishment_id) => {
                         let _ = self.add_item_to_establishment_stock(establishment_id, item_id);
-                    }
-                    EconomicNode::ExternalMarket => {
-                        if let Some(item) = self.item_instance_mut(item_id) {
-                            item.owner_agent_id = None;
-                            item.owner_household_id = None;
-                        }
                     }
                     _ => {}
                 }
@@ -2841,6 +2738,24 @@ impl Simulation {
                 }
             }
             if food_crisis_level > previous_level {
+                let assessment = self.food_crisis_assessment_for_household(Some(household_id));
+                let access_priority = self.household_food_access_priority(household_id);
+                let mut impact_tags = vec![
+                    "crise_alimentar".to_string(),
+                    format!("household:{household_id}"),
+                ];
+                impact_tags.extend(assessment.bottlenecks.iter().cloned());
+                if assessment.material_food_source_count == 0 {
+                    impact_tags.push("sem_fornecedor_material".to_string());
+                }
+                if assessment.stalled_food_processors > 0 {
+                    impact_tags.push("processador_parado".to_string());
+                }
+                if access_priority >= 90 {
+                    impact_tags.push("vantagem_feudal_alimentar".to_string());
+                } else if access_priority <= 45 {
+                    impact_tags.push("acesso_alimentar_fragil".to_string());
+                }
                 self.push_event(WorldEvent {
                     day: self.day,
                     tick: self.tick_of_day,
@@ -2848,13 +2763,30 @@ impl Simulation {
                     target: None,
                     kind: EventKind::Scarcity,
                     summary: format!(
-                        "{household_name} entra em crise alimentar nivel {food_crisis_level}."
+                        "{household_name} entra em crise alimentar nivel {food_crisis_level}: {}.",
+                        assessment.political_cost_summary
                     ),
-                    impact_tags: vec![
-                        "crise_alimentar".to_string(),
-                        format!("household:{household_id}"),
-                    ],
+                    impact_tags,
                 });
+
+                if assessment.food_supply_emergency && access_priority <= 55 {
+                    let member_ids = self
+                        .household_by_id(household_id)
+                        .map(|household| household.member_ids.clone())
+                        .unwrap_or_default();
+                    for member_id in member_ids {
+                        let mut delta = InstitutionalPerception::zero_delta();
+                        delta.rationing_legitimacy = -4;
+                        delta.perceived_fairness = -5;
+                        delta.leader_legitimacy = -2;
+                        delta.perceived_corruption = 2;
+                        let _ = self.adjust_institutional_perception(
+                            member_id,
+                            delta,
+                            "fome e acesso alimentar fragil corroem confianca no racionamento",
+                        );
+                    }
+                }
             }
         }
 
@@ -3365,9 +3297,6 @@ impl Simulation {
                 if establishment.cash < 10 {
                     unit_price += 1;
                 }
-                if let Some(quote) = self.market_quote(&target.resource_id) {
-                    unit_price = unit_price.clamp(quote.sell_price.max(1), quote.buy_price.max(1));
-                }
                 PostedPrice {
                     resource_id: target.resource_id.clone(),
                     unit_price: unit_price.max(1),
@@ -3394,11 +3323,8 @@ impl Simulation {
             else {
                 continue;
             };
-            let mut unit_price =
+            let unit_price =
                 self.item_instance_unit_price(best_item, self.base_price(&resource_id));
-            if let Some(quote) = self.market_quote(&resource_id) {
-                unit_price = unit_price.clamp(quote.sell_price.max(1), quote.buy_price.max(1));
-            }
             prices.push(PostedPrice {
                 resource_id,
                 unit_price,
@@ -3531,10 +3457,8 @@ impl Simulation {
     pub(super) fn best_military_supply_source(
         &self,
         resource_id: &str,
-        amount: i32,
-    ) -> Option<(EconomicNode, Option<EstablishmentId>, i32, bool)> {
-        if let Some(establishment) = self
-            .establishments
+    ) -> Option<(EconomicNode, Option<EstablishmentId>, i32)> {
+        self.establishments
             .iter()
             .filter(|establishment| {
                 Self::total_resource_amount(&establishment.stock, resource_id) > 0
@@ -3542,26 +3466,13 @@ impl Simulation {
             .max_by_key(|establishment| {
                 Self::total_resource_amount(&establishment.stock, resource_id)
             })
-        {
-            return Some((
-                EconomicNode::Establishment(establishment.id),
-                Some(establishment.id),
-                0,
-                false,
-            ));
-        }
-        let resource = self.resource_def(resource_id)?;
-        if !resource.can_buy_external {
-            return None;
-        }
-        let unit_price = self
-            .market_quote(resource_id)
-            .map(|quote| quote.buy_price)
-            .unwrap_or_else(|| self.base_price(resource_id) * 2);
-        if self.village_economy.public_treasury < unit_price * amount.max(1) {
-            return None;
-        }
-        Some((EconomicNode::ExternalMarket, None, unit_price, true))
+            .map(|establishment| {
+                (
+                    EconomicNode::Establishment(establishment.id),
+                    Some(establishment.id),
+                    0,
+                )
+            })
     }
 
     pub(super) fn living_agent_count(&mut self) -> usize {
@@ -3820,17 +3731,7 @@ impl Simulation {
                 unit_price,
             ));
         }
-        let resource = self.resource_def(resource_id)?;
-        if !resource.can_buy_external {
-            return None;
-        }
-        self.market_quote(resource_id).map(|quote| {
-            (
-                EconomicNode::ExternalMarket,
-                None,
-                quote.buy_price.max(resource.base_price),
-            )
-        })
+        None
     }
 
     pub(super) fn try_complete_construction_project(&mut self, project_id: u64) {
@@ -4512,17 +4413,22 @@ impl Simulation {
                         household.name
                     )
                 };
+                let access_priority = self.household_food_access_priority(household.id);
+                let policy_priority = match self.local_norms.rationing_policy {
+                    RationingPolicy::HouseholdFirst => 100,
+                    RationingPolicy::ProducersFirst => {
+                        90u8.saturating_sub((2 - household.food_crisis_level.min(2)) * 10)
+                    }
+                    RationingPolicy::CivicFirst => access_priority.max(75),
+                    RationingPolicy::Balanced => {
+                        100u8.saturating_sub((2 - household.food_crisis_level.min(2)) * 10)
+                    }
+                };
                 self.economic_tasks.push(EconomicTask {
                     id: task_id,
                     kind: EconomicTaskKind::Comprar,
                     class: EconomicTaskClass::HouseholdFoodPurchase,
-                    priority: match self.local_norms.rationing_policy {
-                        RationingPolicy::HouseholdFirst => 100,
-                        RationingPolicy::ProducersFirst => {
-                            90u8.saturating_sub((2 - household.food_crisis_level.min(2)) * 10)
-                        }
-                        _ => 100u8.saturating_sub((2 - household.food_crisis_level.min(2)) * 10),
-                    },
+                    priority: policy_priority.max(access_priority),
                     lock_until_complete: true,
                     creates_household_reserve: offer.resource_id == ResourceKind::Graos.id(),
                     actor_household_id: household.id,
@@ -4718,21 +4624,15 @@ impl Simulation {
                     continue;
                 }
                 let amount = missing.amount.clamp(1, DEFAULT_CARRYING_CAPACITY);
-                let Some((source, related_establishment_id, unit_price, is_external)) =
-                    self.best_military_supply_source(&missing.resource_id, amount)
+                let Some((source, related_establishment_id, unit_price)) =
+                    self.best_military_supply_source(&missing.resource_id)
                 else {
                     continue;
                 };
-                let kind = if is_external {
-                    EconomicTaskKind::Comprar
-                } else {
-                    EconomicTaskKind::Transportar
-                };
+                let kind = EconomicTaskKind::Transportar;
                 let task_id = self.next_task_id();
                 let display = self.resource_display_name(&missing.resource_id);
-                let source_label = if is_external {
-                    "mercado externo".to_string()
-                } else if let Some(establishment_id) = related_establishment_id {
+                let source_label = if let Some(establishment_id) = related_establishment_id {
                     self.establishment_by_id(establishment_id)
                         .map(|establishment| establishment.name.clone())
                         .unwrap_or_else(|| "estoque local".to_string())
@@ -4811,206 +4711,10 @@ impl Simulation {
     }
 
     pub(super) fn ensure_surplus_sale_tasks(&mut self) {
-        let establishments = self.establishments.clone();
-        for establishment in establishments {
-            let recipes = self
-                .recipes_for_establishment(&establishment)
-                .into_iter()
-                .cloned()
-                .collect::<Vec<_>>();
-            for recipe in recipes {
-                let primary_output = recipe.output_resource_id;
-                let target = self.stock_target_amount(&establishment, &primary_output);
-                let current =
-                    self.establishment_total_resource_units(&establishment, &primary_output);
-                if current <= target + 3 {
-                    continue;
-                }
-                if self.village_food_pressure() > 0 && self.is_food_resource(&primary_output) {
-                    if self.tick_of_day == 0 {
-                        self.push_event(WorldEvent {
-                        day: self.day,
-                        tick: self.tick_of_day,
-                        actor: establishment
-                            .owner_household_ids
-                            .first()
-                            .and_then(|id| self.household_by_id(*id))
-                            .and_then(|household| household.member_ids.first().copied())
-                            .unwrap_or(0),
-                        target: None,
-                        kind: EventKind::Scarcity,
-                        summary: format!(
-                            "Venda de excedente de {} em {} foi bloqueada por pressao alimentar da vila.",
-                            self.resource_display_name(&primary_output),
-                            establishment.name
-                        ),
-                        impact_tags: vec!["venda_bloqueada".to_string(), "escassez".to_string()],
-                    });
-                    }
-                    continue;
-                }
-                let military_pressure = self.demanded_military_resource_pressure(&primary_output);
-                if military_pressure > 0 {
-                    if self.tick_of_day == 0 {
-                        self.push_event(WorldEvent {
-                            day: self.day,
-                            tick: self.tick_of_day,
-                            actor: establishment
-                                .owner_household_ids
-                                .first()
-                                .and_then(|id| self.household_by_id(*id))
-                                .and_then(|household| household.member_ids.first().copied())
-                                .unwrap_or(0),
-                            target: None,
-                            kind: EventKind::MilitarySupply,
-                            summary: format!(
-                                "Venda de {} em {} foi bloqueada por demanda militar pendente (faltam {}).",
-                                self.resource_display_name(&primary_output),
-                                establishment.name,
-                                military_pressure
-                            ),
-                            impact_tags: vec![
-                                "venda_bloqueada".to_string(),
-                                "suprimento_militar".to_string(),
-                                primary_output.clone(),
-                            ],
-                        });
-                    }
-                    continue;
-                }
-                if self.has_open_task_for(
-                    establishment
-                        .owner_household_ids
-                        .first()
-                        .copied()
-                        .unwrap_or_default(),
-                    EconomicTaskKind::Vender,
-                    Some(&primary_output),
-                    &EconomicNode::ExternalMarket,
-                ) {
-                    continue;
-                }
-                if let Some(actor_household_id) = establishment.owner_household_ids.first().copied()
-                {
-                    let resource_def = self.resource_def(&primary_output);
-                    if !resource_def
-                        .map(|resource| resource.can_sell_external)
-                        .unwrap_or(false)
-                    {
-                        continue;
-                    }
-                    let unit_price = self
-                        .market_quote(&primary_output)
-                        .map(|quote| quote.sell_price)
-                        .unwrap_or(self.base_price(&primary_output));
-                    let task_id = self.next_task_id();
-                    self.economic_tasks.push(EconomicTask {
-                        id: task_id,
-                        kind: EconomicTaskKind::Vender,
-                        class: EconomicTaskClass::SurplusSale,
-                        priority: 20,
-                        lock_until_complete: true,
-                        creates_household_reserve: false,
-                        actor_household_id,
-                        assigned_agent_id: None,
-                        source: EconomicNode::Establishment(establishment.id),
-                        destination: EconomicNode::ExternalMarket,
-                        resource_id: Some(primary_output.clone()),
-                        amount: 2,
-                        unit_price,
-                        total_price: unit_price * 2,
-                        description: format!(
-                            "Vender excedente de {} em {}",
-                            self.resource_display_name(&primary_output),
-                            establishment.name
-                        ),
-                        phase: EconomicTaskPhase::AwaitingPickup,
-                        related_establishment_id: Some(establishment.id),
-                        related_construction_project_id: None,
-                    });
-                }
-            }
-
-            let unique_item_outputs = establishment
-                .item_stock_ids
-                .iter()
-                .filter_map(|item_id| {
-                    self.item_instance(*item_id)
-                        .map(|item| item.resource_id.clone())
-                })
-                .collect::<std::collections::HashSet<_>>();
-            for item_resource_id in unique_item_outputs {
-                let current = self.establishment_item_count(&establishment, &item_resource_id);
-                let target = self.stock_target_amount(&establishment, &item_resource_id);
-                if current <= target + 1 {
-                    continue;
-                }
-                if self.has_open_task_for(
-                    establishment
-                        .owner_household_ids
-                        .first()
-                        .copied()
-                        .unwrap_or_default(),
-                    EconomicTaskKind::Vender,
-                    Some(&item_resource_id),
-                    &EconomicNode::ExternalMarket,
-                ) {
-                    continue;
-                }
-                let Some(actor_household_id) = establishment.owner_household_ids.first().copied()
-                else {
-                    continue;
-                };
-                let Some(resource_def) = self.resource_def(&item_resource_id) else {
-                    continue;
-                };
-                if !resource_def.can_sell_external {
-                    continue;
-                }
-                let Some(quote) = self.market_quote(&item_resource_id) else {
-                    continue;
-                };
-                let Some((best_item_name, unit_price)) = establishment
-                    .item_stock_ids
-                    .iter()
-                    .filter_map(|item_id| self.item_instance(*item_id))
-                    .filter(|item| item.resource_id == item_resource_id)
-                    .max_by_key(|item| item.craft_quality_score)
-                    .map(|item| {
-                        (
-                            item.display_name.clone(),
-                            self.item_instance_unit_price(item, quote.sell_price.max(1)),
-                        )
-                    })
-                else {
-                    continue;
-                };
-                let task_id = self.next_task_id();
-                self.economic_tasks.push(EconomicTask {
-                    id: task_id,
-                    kind: EconomicTaskKind::Vender,
-                    class: EconomicTaskClass::SurplusSale,
-                    priority: 22,
-                    lock_until_complete: true,
-                    creates_household_reserve: false,
-                    actor_household_id,
-                    assigned_agent_id: None,
-                    source: EconomicNode::Establishment(establishment.id),
-                    destination: EconomicNode::ExternalMarket,
-                    resource_id: Some(item_resource_id.clone()),
-                    amount: 1,
-                    unit_price,
-                    total_price: unit_price,
-                    description: format!(
-                        "Vender {} de {} no mercado externo",
-                        best_item_name, establishment.name
-                    ),
-                    phase: EconomicTaskPhase::AwaitingPickup,
-                    related_establishment_id: Some(establishment.id),
-                    related_construction_project_id: None,
-                });
-            }
-        }
+        // Surplus no longer sells into an abstract external market. Price can
+        // influence priorities, but sale tasks require a material buyer/source
+        // already present in the world. Inter-village demand must be expressed
+        // as real Comprar/Transportar tasks against existing establishments.
     }
 
     pub(super) fn best_food_source_for_household(
@@ -5058,7 +4762,7 @@ impl Simulation {
                 EconomicNode::Establishment(establishment_id) => {
                     self.village_index_of_establishment(establishment_id) == Some(dest_village_idx)
                 }
-                EconomicNode::ExternalMarket => false,
+
                 _ => false,
             };
             (!is_local, offer.unit_price, offer.resource_id.clone())
@@ -5069,33 +4773,248 @@ impl Simulation {
             .map(|household| household.treasury)
             .unwrap_or(0);
 
-        let emergency = self.food_supply_emergency();
-        if (emergency || offers.is_empty())
-            && let Some(resource) = self.resource_def(ResourceKind::Graos.id())
-            && resource.can_buy_external
-            && !offers
-                .iter()
-                .any(|offer| offer.resource_id == ResourceKind::Graos.id())
-            && let Some(quote) = self.market_quote(ResourceKind::Graos.id())
-        {
-            offers.push(FoodSourceOffer {
-                source: EconomicNode::ExternalMarket,
-                related_establishment_id: None,
-                resource_id: ResourceKind::Graos.id().to_string(),
-                unit_price: quote.buy_price.max(1),
-            });
-        }
-
         offers
             .into_iter()
             .filter(|offer| treasury >= offer.unit_price.max(0))
             .next()
     }
 
-    pub(super) fn food_supply_emergency(&mut self) -> bool {
+    pub(super) fn food_supply_emergency(&self) -> bool {
         let global_grain = self.total_village_resource_amount(ResourceKind::Graos.id());
         let stalled_processors = self.food_processors_missing_resource(ResourceKind::Graos.id());
         global_grain <= 6 || (global_grain <= 12 && stalled_processors > 0)
+    }
+
+    pub(super) fn food_crisis_assessment_for_household(
+        &self,
+        household_id: Option<BuildingId>,
+    ) -> FoodCrisisAssessment {
+        let household = household_id
+            .and_then(|id| self.household_by_id(id))
+            .cloned();
+        let dest_village_idx = household
+            .as_ref()
+            .and_then(|household| self.village_index_of_household(household.id));
+        let food_ids = self.food_resource_ids_sorted();
+        let grain_id = ResourceKind::Graos.id().to_string();
+        let household_food_units = household
+            .as_ref()
+            .map(|household| {
+                Self::total_food_units(&household.pantry)
+                    + Self::total_food_units(&household.reserved_food)
+            })
+            .unwrap_or(0);
+        let household_minimum_food_units = household
+            .as_ref()
+            .map(|household| household.minimum_food_units.max(1))
+            .unwrap_or(1);
+        let household_daily_need = household
+            .as_ref()
+            .map(|household| household.member_ids.len().max(1) as i32)
+            .unwrap_or(1)
+            .max(1);
+        let household_food_supply_days_tenths =
+            (household_food_units * 10 / household_daily_need).clamp(0, 999);
+
+        let mut village_grain_units = 0;
+        let mut village_ready_food_units = 0;
+        for establishment in &self.establishments {
+            if dest_village_idx.is_some()
+                && self.village_index_of_establishment(establishment.id) != dest_village_idx
+            {
+                continue;
+            }
+            village_grain_units += Self::total_resource_amount(&establishment.stock, &grain_id);
+            for resource_id in &food_ids {
+                if resource_id != &grain_id {
+                    village_ready_food_units +=
+                        Self::total_resource_amount(&establishment.stock, resource_id);
+                }
+            }
+        }
+        for household in &self.households {
+            if dest_village_idx.is_some()
+                && self.village_index_of_household(household.id) != dest_village_idx
+            {
+                continue;
+            }
+            village_grain_units += Self::total_resource_amount(&household.pantry, &grain_id)
+                + Self::total_resource_amount(&household.reserved_food, &grain_id);
+            for resource_id in &food_ids {
+                if resource_id != &grain_id {
+                    village_ready_food_units +=
+                        Self::total_resource_amount(&household.pantry, resource_id)
+                            + Self::total_resource_amount(&household.reserved_food, resource_id);
+                }
+            }
+        }
+
+        let mut material_food_source_count = 0usize;
+        let mut inter_village_food_source_count = 0usize;
+        let mut cheapest_food_price: Option<i32> = None;
+        for establishment in &self.establishments {
+            let has_food = food_ids.iter().any(|resource_id| {
+                Self::total_resource_amount(&establishment.stock, resource_id) > 0
+            });
+            if !has_food {
+                continue;
+            }
+            material_food_source_count += 1;
+            if dest_village_idx.is_some()
+                && self.village_index_of_establishment(establishment.id) != dest_village_idx
+            {
+                inter_village_food_source_count += 1;
+            }
+            for resource_id in &food_ids {
+                if Self::total_resource_amount(&establishment.stock, resource_id) <= 0 {
+                    continue;
+                }
+                let price = establishment
+                    .posted_prices
+                    .iter()
+                    .find(|posted| posted.resource_id == *resource_id)
+                    .map(|posted| posted.unit_price)
+                    .unwrap_or_else(|| self.base_price(resource_id));
+                cheapest_food_price =
+                    Some(cheapest_food_price.map_or(price, |current| current.min(price)));
+            }
+        }
+
+        let stalled_food_processors = self.food_processors_missing_resource(&grain_id);
+        let food_supply_emergency = village_grain_units <= 6
+            || household_food_units < household_minimum_food_units
+            || (village_grain_units <= 12 && stalled_food_processors > 0);
+        let household_treasury = household
+            .as_ref()
+            .map(|household| household.treasury)
+            .unwrap_or(0);
+        let household_feudal_arrears = household
+            .as_ref()
+            .map(|household| household.feudal_arrears.max(household.tax_arrears))
+            .unwrap_or(0);
+        let household_tribute_due = household
+            .as_ref()
+            .map(|household| household.feudal_tribute_due.max(0))
+            .unwrap_or(0);
+
+        let mut bottlenecks = Vec::new();
+        if village_grain_units <= 6 {
+            bottlenecks.push("graos_raiz_critico".to_string());
+        }
+        if stalled_food_processors > 0 {
+            bottlenecks.push(format!("processadores_parados={stalled_food_processors}"));
+        }
+        if material_food_source_count == 0 {
+            bottlenecks.push("sem_fornecedor_material".to_string());
+        }
+        if let Some(price) = cheapest_food_price {
+            if household_treasury < price {
+                bottlenecks.push("sem_caixa_para_compra".to_string());
+            }
+        } else {
+            bottlenecks.push("sem_oferta_com_estoque".to_string());
+        }
+        if household_feudal_arrears > 0 || household_tribute_due > 0 {
+            bottlenecks.push("pressao_feudal_fiscal".to_string());
+        }
+
+        let access_priority = household
+            .as_ref()
+            .map(|household| self.household_food_access_priority(household.id))
+            .unwrap_or(50);
+        let access_summary = if access_priority >= 90 {
+            "acesso alimentar privilegiado por autoridade, oficio ou racionamento".to_string()
+        } else if access_priority >= 70 {
+            "acesso alimentar moderado por funcao produtiva ou caixa".to_string()
+        } else if household_feudal_arrears > 0 || household_treasury <= 0 {
+            "acesso fragil: pobreza, divida ou atraso feudal reduzem poder de compra".to_string()
+        } else {
+            "acesso alimentar comum, dependente de oferta material".to_string()
+        };
+        let political_cost_summary = if food_supply_emergency && access_priority >= 90 {
+            "vantagem feudal em crise tende a corroer justica percebida nos prejudicados"
+                .to_string()
+        } else if food_supply_emergency && household_feudal_arrears > 0 {
+            "fome combinada com divida feudal tende a gerar boicote, saque ou revolta".to_string()
+        } else if food_supply_emergency {
+            "crise alimentar pressiona legitimidade do racionamento".to_string()
+        } else {
+            "sem custo politico alimentar agudo".to_string()
+        };
+
+        FoodCrisisAssessment {
+            household_minimum_food_units,
+            household_food_supply_days_tenths,
+            household_treasury,
+            household_feudal_arrears,
+            household_tribute_due,
+            village_grain_units,
+            village_ready_food_units,
+            stalled_food_processors,
+            material_food_source_count,
+            inter_village_food_source_count,
+            food_supply_emergency,
+            bottlenecks,
+            access_summary,
+            political_cost_summary,
+        }
+    }
+
+    pub(super) fn household_food_access_priority(&self, household_id: BuildingId) -> u8 {
+        let Some(household) = self.household_by_id(household_id) else {
+            return 50;
+        };
+        let mut score = 50 + i32::from(household.food_crisis_level) * 8;
+        score += (household.treasury / 8).clamp(0, 12);
+        score -= household.feudal_arrears.clamp(0, 12);
+        score -= household.tax_arrears.clamp(0, 8);
+        match self.local_norms.rationing_policy {
+            RationingPolicy::HouseholdFirst => score += 12,
+            RationingPolicy::ProducersFirst => {
+                if self.household_has_food_producer_or_authority(household) {
+                    score += 18;
+                } else {
+                    score -= 4;
+                }
+            }
+            RationingPolicy::CivicFirst => {
+                if self.household_has_authority_member(household) {
+                    score += 20;
+                } else {
+                    score -= 8;
+                }
+            }
+            RationingPolicy::Balanced => {
+                if self.household_has_food_producer_or_authority(household) {
+                    score += 8;
+                }
+            }
+        }
+        if household.direct_lord_agent_id.is_some() {
+            score += 4;
+        }
+        for agent_id in &household.member_ids {
+            score += (self.feudal_power_for_agent(*agent_id) / 25).clamp(0, 12);
+        }
+        score.clamp(5, 100) as u8
+    }
+
+    fn household_has_food_producer_or_authority(&self, household: &HouseholdEconomy) -> bool {
+        household.member_ids.iter().any(|agent_id| {
+            let role = self.agent_role_id(*agent_id).unwrap_or_default();
+            matches!(
+                role.as_str(),
+                "campones" | "padeiro" | "taverneiro" | "guarda" | "lider_local"
+            )
+        })
+    }
+
+    fn household_has_authority_member(&self, household: &HouseholdEconomy) -> bool {
+        household.member_ids.iter().any(|agent_id| {
+            let role = self.agent_role_id(*agent_id).unwrap_or_default();
+            matches!(role.as_str(), "guarda" | "lider_local")
+                || self.active_feudal_title_for_holder(*agent_id).is_some()
+        })
     }
 
     pub(super) fn household_has_critical_hunger(&mut self, household_id: BuildingId) -> bool {
@@ -5262,106 +5181,19 @@ impl Simulation {
                 .household_by_id(actor_household_id)
                 .and_then(|h| h.member_ids.first().copied())
                 .unwrap_or(0);
-            let can_buy_external = self
-                .resource_def(resource_id)
-                .map(|resource| resource.can_buy_external)
-                .unwrap_or(false);
-            if can_buy_external && let Some(quote) = self.market_quote(resource_id) {
-                let desired_amount = amount.clamp(1, DEFAULT_CARRYING_CAPACITY);
-                let unit_price = quote.buy_price.max(1);
-                let total_price = unit_price * desired_amount;
-                if destination_establishment.cash >= total_price {
-                    let destination = EconomicNode::Establishment(destination_establishment.id);
-                    let source_node = EconomicNode::ExternalMarket;
-                    let existing = self.matching_open_task_count(
-                        actor_household_id,
-                        EconomicTaskKind::Comprar,
-                        Some(resource_id),
-                        &destination,
-                        Some(&source_node),
-                    );
-                    if existing < max_open_tasks {
-                        for _ in existing..max_open_tasks {
-                            let task_id = self.next_task_id();
-                            self.economic_tasks.push(EconomicTask {
-                                id: task_id,
-                                kind: EconomicTaskKind::Comprar,
-                                class,
-                                priority: priority.saturating_add(5).min(100),
-                                lock_until_complete: true,
-                                creates_household_reserve: false,
-                                actor_household_id,
-                                assigned_agent_id: None,
-                                source: source_node.clone(),
-                                destination: destination.clone(),
-                                resource_id: Some(resource_id.to_string()),
-                                amount: desired_amount,
-                                unit_price,
-                                total_price,
-                                description: format!(
-                                    "Comprar {} x{} no mercado externo para religar {}",
-                                    self.resource_display_name(resource_id),
-                                    desired_amount,
-                                    destination_establishment.name
-                                ),
-                                phase: EconomicTaskPhase::AwaitingPickup,
-                                related_establishment_id: None,
-                                related_construction_project_id: None,
-                            });
-                        }
-                        self.push_scarcity_event_deduped(
-                            owner_agent_id,
-                            Some(destination_establishment.id),
-                            format!(
-                                "Falta fornecedor local de {} para {}; fallback externo acionado.",
-                                self.resource_display_name(resource_id),
-                                destination_establishment.name
-                            ),
-                            vec![
-                                "escassez".to_string(),
-                                "fallback_externo_acionado".to_string(),
-                                "sem_fornecedor_local".to_string(),
-                                resource_id.to_string(),
-                                format!("establishment:{}", destination_establishment.id),
-                            ],
-                            15,
-                        );
-                    }
-                    return;
-                }
-
-                self.push_scarcity_event_deduped(
-                    owner_agent_id,
-                    Some(destination_establishment.id),
-                    format!(
-                        "Producao de {} segue paralisada: sem fornecedor local de {} e sem caixa para fallback externo.",
-                        destination_establishment.name,
-                        self.resource_display_name(resource_id)
-                    ),
-                    vec![
-                        "escassez".to_string(),
-                        "fallback_externo_impossivel_por_caixa".to_string(),
-                        "sem_fornecedor_local".to_string(),
-                        resource_id.to_string(),
-                        format!("establishment:{}", destination_establishment.id),
-                    ],
-                    15,
-                );
-                return;
-            }
-
             self.push_scarcity_event_deduped(
                 owner_agent_id,
                 Some(destination_establishment.id),
                 format!(
-                    "Producao de {} paralisada: falta do insumo {} em todas as vilas.",
+                    "Producao de {} paralisada: falta do insumo {} em todas as vilas com estoque material.",
                     destination_establishment.name,
                     self.resource_display_name(resource_id)
                 ),
                 vec![
                     "escassez".to_string(),
                     "producao_parada".to_string(),
-                    "sem_fornecedor_local".to_string(),
+                    "sem_fornecedor_com_estoque".to_string(),
+                    "sem_origem_material".to_string(),
                     resource_id.to_string(),
                     format!("establishment:{}", destination_establishment.id),
                 ],
@@ -5441,29 +5273,81 @@ impl Simulation {
             .filter(|e| e.building_id.is_some())
             .cloned()
             .collect();
-        if eligible_ests.is_empty() {
+        if eligible_ests.len() < 2 {
             return Ok(());
         }
 
         use rand::Rng;
         let mut rng = rand::rng();
-        let est = &eligible_ests[rng.random_range(0..eligible_ests.len())];
-        let dest_building_id = est.building_id.unwrap();
-        let dest_name = est.name.clone();
+        let mut source_candidates = Vec::new();
+        for establishment in &eligible_ests {
+            let Some(source_village) = self.village_index_of_establishment(establishment.id) else {
+                continue;
+            };
+            let has_other_village_destination = eligible_ests.iter().any(|candidate| {
+                candidate.id != establishment.id
+                    && self.village_index_of_establishment(candidate.id) != Some(source_village)
+            });
+            if !has_other_village_destination {
+                continue;
+            }
+            for stack in &establishment.stock {
+                if stack.amount >= 4 && stack.resource_id != ResourceKind::Moedas.id() {
+                    source_candidates.push((
+                        establishment.id,
+                        establishment.building_id.unwrap(),
+                        establishment.name.clone(),
+                        source_village,
+                        stack.resource_id.clone(),
+                        stack.amount,
+                    ));
+                }
+            }
+        }
+        if source_candidates.is_empty() {
+            return Ok(());
+        }
 
-        let dest_coord = self
-            .building_by_id(dest_building_id)
-            .map(|b| b.entrance)
-            .unwrap_or(self.village_economy.external_market_coord);
-
-        let start_coord = self.village_economy.external_market_coord;
-
-        let resource_id = if rng.random_bool(0.5) {
-            "graos".to_string()
-        } else {
-            "moedas".to_string()
+        let (
+            source_establishment_id,
+            source_building_id,
+            source_name,
+            source_village,
+            resource_id,
+            available_amount,
+        ) = source_candidates[rng.random_range(0..source_candidates.len())].clone();
+        let dest_candidates = eligible_ests
+            .iter()
+            .filter(|candidate| {
+                candidate.id != source_establishment_id
+                    && self.village_index_of_establishment(candidate.id) != Some(source_village)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if dest_candidates.is_empty() {
+            return Ok(());
+        }
+        let dest_est = dest_candidates[rng.random_range(0..dest_candidates.len())].clone();
+        let Some(dest_building_id) = dest_est.building_id else {
+            return Ok(());
         };
-        let cargo_amount = rng.random_range(20..=50);
+        let dest_name = dest_est.name.clone();
+
+        let Some(start_coord) = self.building_by_id(source_building_id).map(|b| b.entrance) else {
+            return Ok(());
+        };
+        let Some(dest_coord) = self.building_by_id(dest_building_id).map(|b| b.entrance) else {
+            return Ok(());
+        };
+
+        let requested_amount = rng.random_range(4..=available_amount.min(20).max(4));
+        let cargo_amount = self
+            .establishment_by_id_mut(source_establishment_id)
+            .map(|source| Self::take_resource(&mut source.stock, &resource_id, requested_amount))
+            .unwrap_or(0);
+        if cargo_amount <= 0 {
+            return Ok(());
+        }
 
         let caravan_agent_id = self
             .world
@@ -5631,7 +5515,7 @@ impl Simulation {
         if let Some(h_id) = headman_id {
             known_by.push(h_id);
         }
-        for hh_id in &est.owner_household_ids {
+        for hh_id in &dest_est.owner_household_ids {
             if let Some(hh) = self.household_by_id(*hh_id) {
                 known_by.extend(hh.member_ids.clone());
             }
@@ -5670,8 +5554,8 @@ impl Simulation {
             kind: SecretKind::CaravanRoute,
             target_id: caravan_agent_id,
             summary: format!(
-                "A rota da caravana de {} carregando {} {}.",
-                dest_name, cargo_amount, resource_id
+                "A rota da caravana de {} para {} carregando {} {}.",
+                source_name, dest_name, cargo_amount, resource_id
             ),
             details: format!(
                 "Caravana ID: {}. Origem: ({}, {}). Destino: ({}, {}).",
@@ -5688,8 +5572,8 @@ impl Simulation {
             target: None,
             kind: EventKind::Commerce,
             summary: format!(
-                "Uma nova caravana de {} partiu de ({}, {}) carregando {} {} rumo a {}.",
-                dest_name, start_coord.x, start_coord.y, cargo_amount, resource_id, dest_name
+                "Uma nova caravana partiu de {} em ({}, {}) carregando {} {} rumo a {}.",
+                source_name, start_coord.x, start_coord.y, cargo_amount, resource_id, dest_name
             ),
             impact_tags: vec!["comercio".to_string(), "caravana".to_string()],
         });

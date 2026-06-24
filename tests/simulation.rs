@@ -312,6 +312,8 @@ impl LlmAdapter for InstrumentedAdapter {
                 "Consolidar minha posicao como {} sem perder estabilidade.",
                 input.decision_input.role
             ),
+            inner_contradiction_update: None,
+            melancholic_fixation: None,
         })
     }
 
@@ -425,7 +427,7 @@ fn world_places_are_canonical_and_unique() {
     assert!(
         places
             .iter()
-            .any(|place| place.place_id == "special:external_market")
+            .any(|place| place.place_id == "special:inter_village_trade")
     );
 }
 
@@ -595,7 +597,7 @@ fn snapshot_persists_scheduled_meetings() {
             id: 1,
             proposer_id: 1,
             invitee_ids: vec![2],
-            place_id: "special:external_market".to_string(),
+            place_id: "special:inter_village_trade".to_string(),
             scheduled_day: 1,
             scheduled_tick: 10,
             purpose: "testar persistencia".to_string(),
@@ -2048,6 +2050,29 @@ fn psychological_state_persists_and_is_visible_in_agent_view() {
         last_public_humiliation_by: None,
         active_revenge_target: None,
         long_term_plan: "Acumular margem para atravessar a proxima escassez.".to_string(),
+        personal_symbols: vec![medieval_village_llm::world_model::PersonalSymbol {
+            target_kind: medieval_village_llm::world_model::PersonalSymbolTargetKind::Event,
+            target_id: None,
+            text: "fome antiga".to_string(),
+            meaning: "nao confiar na abundancia".to_string(),
+            emotion: "melancolia".to_string(),
+            intensity: 44,
+            origin_memory_id: None,
+        }],
+        coping_patterns: vec![medieval_village_llm::world_model::CopingPattern {
+            kind: medieval_village_llm::world_model::CopingPatternKind::RitualReturn,
+            trigger: "medo de escassez".to_string(),
+            behavior_hint: "voltar ao deposito antes de dormir".to_string(),
+            strength: 33,
+            last_triggered_tick: 0,
+        }],
+        inner_contradictions: vec![medieval_village_llm::world_model::InnerContradiction {
+            desire: "guardar recursos".to_string(),
+            fear: "parecer mesquinho".to_string(),
+            compromise: "ajudar so quando houver lastro".to_string(),
+            pressure: 28,
+        }],
+        melancholic_fixation: Some("a despensa nunca parece cheia o bastante".to_string()),
         last_updated_day: snapshot.day,
         notes: vec!["teste psicologico".to_string()],
     };
@@ -2057,6 +2082,22 @@ fn psychological_state_persists_and_is_visible_in_agent_view() {
     let restored_agent = &restored.agents[0];
     assert_eq!(restored_agent.psychological_state.grief, 42);
     assert_eq!(restored_agent.psychological_state.trauma, 36);
+    assert_eq!(restored_agent.psychological_state.personal_symbols.len(), 1);
+    assert_eq!(restored_agent.psychological_state.coping_patterns.len(), 1);
+    assert_eq!(
+        restored_agent
+            .psychological_state
+            .inner_contradictions
+            .len(),
+        1
+    );
+    assert_eq!(
+        restored_agent
+            .psychological_state
+            .melancholic_fixation
+            .as_deref(),
+        Some("a despensa nunca parece cheia o bastante")
+    );
     assert_eq!(
         restored_agent.psychological_state.long_term_plan,
         "Acumular margem para atravessar a proxima escassez."
@@ -2098,6 +2139,8 @@ fn think_maker_updates_persistent_long_term_plan() {
         belief_updates: vec!["Observar antes de arriscar recursos.".to_string()],
         long_term_plan: "Consolidar minha posicao como campones sem perder estabilidade."
             .to_string(),
+        inner_contradiction_update: Some("quer estabilidade, mas teme invisibilidade".to_string()),
+        melancholic_fixation: Some("voltar ao lugar onde se sentiu seguro".to_string()),
     };
     let actor_id = actor_snapshot.id;
     simulation
@@ -2846,7 +2889,7 @@ fn total_money(snapshot: &medieval_village_llm::world_model::SimulationSnapshot)
 }
 
 #[test]
-fn grain_collapse_triggers_external_recovery_task() {
+fn grain_collapse_without_material_supplier_does_not_create_purchase() {
     let mut simulation = Simulation::seeded(SimulationConfig::default());
     let mut snapshot = simulation.snapshot();
     for household in &mut snapshot.households {
@@ -2871,10 +2914,9 @@ fn grain_collapse_triggers_external_recovery_task() {
         .expect("refresh economy should succeed");
 
     let snapshot = simulation.snapshot();
-    assert!(snapshot.economic_tasks.iter().any(|task| {
+    assert!(!snapshot.economic_tasks.iter().any(|task| {
         task.kind == EconomicTaskKind::Comprar
             && task.resource_id.as_deref() == Some(ResourceKind::Graos.id())
-            && task.source == EconomicNode::ExternalMarket
             && matches!(task.destination, EconomicNode::Establishment(_))
     }));
     assert!(snapshot.events.iter().any(|event| {
@@ -2882,7 +2924,7 @@ fn grain_collapse_triggers_external_recovery_task() {
             && event
                 .impact_tags
                 .iter()
-                .any(|tag| tag == "fallback_externo_acionado")
+                .any(|tag| tag == "sem_origem_material" || tag == "sem_fornecedor_com_estoque")
     }));
 }
 
@@ -3854,8 +3896,7 @@ fn test_chunk_dynamic_value_and_organic_expansion() {
 fn test_magical_fauna_system() {
     use medieval_village_llm::sim_core::{CreatureStateComponent, SimulationConfig};
     use medieval_village_llm::world_model::{
-        AgentLifeStatus, BodyPartKind, HuntingQuest, PartInjuryStatus, ResourceKind, TileCoord,
-        TileKind,
+        BodyPartKind, HuntingQuest, PartInjuryStatus, ResourceKind, TileCoord,
     };
 
     let mut config = SimulationConfig::default();
@@ -3896,7 +3937,7 @@ fn test_magical_fauna_system() {
         20,  // attack
     );
 
-    let mut creatures = sim.debug_creatures();
+    let creatures = sim.debug_creatures();
     assert_eq!(
         creatures.len(),
         start_creatures_len + 1,

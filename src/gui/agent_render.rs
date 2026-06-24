@@ -21,7 +21,7 @@ impl Plugin for AgentRenderPlugin {
 #[derive(Component)]
 pub struct AgentMarker(pub u64);
 
-fn spawn_all(mut commands: Commands, mut sim: ResMut<GameState>) {
+fn spawn_all(mut commands: Commands, mut sim: NonSendMut<GameState>) {
     let spatial = sim.sim.spatial();
     let (grid_w, grid_h) = (spatial.grid.width as u32, spatial.grid.height as u32);
     for view in sim.sim.agent_views() {
@@ -31,7 +31,7 @@ fn spawn_all(mut commands: Commands, mut sim: ResMut<GameState>) {
 
 fn sync_positions(
     mut commands: Commands,
-    mut sim: ResMut<GameState>,
+    mut sim: NonSendMut<GameState>,
     mut query: Query<(Entity, &mut Transform, &mut Sprite, &AgentMarker)>,
 ) {
     let spatial = sim.sim.spatial();

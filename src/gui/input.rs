@@ -16,16 +16,16 @@ impl Plugin for InputPlugin {
 
 fn handle_input(
     keys: Res<ButtonInput<KeyCode>>,
-    mut scroll: EventReader<bevy::input::mouse::MouseWheel>,
+    mut scroll: MessageReader<bevy::input::mouse::MouseWheel>,
     mut runtime: ResMut<GuiRuntimeState>,
-    mut game: ResMut<GameState>,
-    mut camera_q: Query<(&mut OrthographicProjection, &mut Transform), With<Camera>>,
+    mut game: NonSendMut<GameState>,
+    mut camera_q: Query<(&mut Projection, &mut Transform), With<Camera>>,
 ) {
-    let Ok((mut projection, mut transform)) = camera_q.get_single_mut() else {
+    let Ok((mut projection, mut transform)) = camera_q.single_mut() else {
         return;
     };
 
-    let speed = TILE_PX as f32 * PAN_SPEED / runtime.ticks_per_second.max(1) as f32;
+    let speed = TILE_PX as f32 * PAN_SPEED;
 
     if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
         transform.translation.y += speed;
@@ -77,15 +77,18 @@ fn handle_input(
     for ev in scroll.read() {
         if ev.y > 0.0 {
             runtime.ticks_per_second = runtime.ticks_per_second.max(1);
-            let zoom = current_zoom(projection.scale) + 0.3;
+            let zoom = current_zoom(&projection) + 0.3;
             camera::apply_zoom(&mut projection, zoom.min(8.0));
         } else {
-            let zoom = current_zoom(projection.scale) - 0.3;
+            let zoom = current_zoom(&projection) - 0.3;
             camera::apply_zoom(&mut projection, zoom.max(0.5));
         }
     }
 }
 
-fn current_zoom(scale: f32) -> f32 {
-    if scale <= 0.0 { 1.0 } else { 1.0 / scale }
+fn current_zoom(projection: &Projection) -> f32 {
+    match projection {
+        Projection::Orthographic(projection) if projection.scale > 0.0 => 1.0 / projection.scale,
+        _ => 1.0,
+    }
 }
