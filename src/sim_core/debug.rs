@@ -136,11 +136,13 @@ impl Simulation {
         if !self.agents_adjacent(actor_id, target_id)? {
             return Ok(false);
         }
-        self.open_conversation(
-            vec![actor_id, target_id],
-            SocialMove::Chat,
-            "contato direto",
-        )
+        Ok(self
+            .open_conversation(
+                vec![actor_id, target_id],
+                SocialMove::Chat,
+                "contato direto",
+            )?
+            .is_some())
     }
 
     pub fn debug_add_memory(

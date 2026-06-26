@@ -200,7 +200,7 @@ impl Simulation {
         } else if score <= 30 {
             "veste-se com sobriedade respeitavel".to_string()
         } else if score <= 50 {
-            "parece claramente próspero e bem-apessoado".to_string()
+            "parece claramente prÃ³spero e bem-apessoado".to_string()
         } else {
             "ostenta refinamento e status visivel".to_string()
         }
@@ -880,6 +880,202 @@ impl Simulation {
         }
     }
 
+    pub(super) fn register_horror_event(
+        &mut self,
+        actor: u64,
+        target: Option<u64>,
+        position: TileCoord,
+        kind: EventKind,
+        severity: i32,
+        summary: String,
+        mut impact_tags: Vec<String>,
+    ) -> Result<()> {
+        let severity = severity.clamp(0, 100);
+        if severity <= 0 {
+            return Ok(());
+        }
+        if !impact_tags.iter().any(|tag| tag == "horror") {
+            impact_tags.push("horror".to_string());
+        }
+        self.apply_horror_exposure_to_agent(target, severity, &summary, "alvo")?;
+        if actor != 0 && Some(actor) != target {
+            self.apply_horror_exposure_to_agent(Some(actor), severity / 3, &summary, "autor")?;
+        }
+
+        let witness_ids = self
+            .agent_ids()
+            .into_iter()
+            .filter(|agent_id| Some(*agent_id) != target && *agent_id != actor)
+            .filter(|agent_id| {
+                self.debug_agent_position(*agent_id)
+                    .map(|coord| coord.manhattan(position) <= 5)
+                    .unwrap_or(false)
+            })
+            .take(8)
+            .collect::<Vec<_>>();
+        for witness_id in witness_ids {
+            self.apply_horror_exposure_to_agent(
+                Some(witness_id),
+                severity / 2,
+                &summary,
+                "testemunha",
+            )?;
+        }
+
+        self.mark_territory_horror_at(
+            position,
+            severity,
+            matches!(
+                kind,
+                EventKind::Death | EventKind::Atrocity | EventKind::BodyHorror
+            ) as u32,
+            matches!(
+                kind,
+                EventKind::Desecration | EventKind::BodyHorror | EventKind::Atrocity
+            ),
+            impact_tags
+                .iter()
+                .any(|tag| tag == "monstruoso" || tag == "criatura"),
+            &summary,
+        );
+
+        if severity >= 35 {
+            let event = WorldEvent {
+                day: self.day,
+                tick: self.tick_of_day,
+                actor,
+                target,
+                kind,
+                summary,
+                impact_tags,
+            };
+            let window = u64::from((self.ticks_per_day / 4).max(1));
+            self.push_event_deduped(event, window, |recent| {
+                recent.kind == kind && recent.actor == actor && recent.target == target
+            });
+        }
+        Ok(())
+    }
+
+    fn apply_horror_exposure_to_agent(
+        &mut self,
+        agent_id: Option<u64>,
+        severity: i32,
+        summary: &str,
+        role: &str,
+    ) -> Result<()> {
+        let Some(agent_id) = agent_id else {
+            return Ok(());
+        };
+        let Ok(entity) = self.find_agent_entity(agent_id) else {
+            return Ok(());
+        };
+        let dread = (severity / 2).max(1);
+        let despair = if role == "alvo" {
+            severity / 4
+        } else {
+            severity / 5
+        };
+        let revulsion = if role == "autor" {
+            severity / 5
+        } else {
+            severity / 3
+        };
+        let shock = if role == "testemunha" {
+            severity / 2
+        } else {
+            severity / 3
+        };
+        let note = Some(summary.chars().take(120).collect::<String>());
+        let mut entity_mut = self.world.entity_mut(entity);
+        if let Some(mut horror) = entity_mut.get_mut::<HorrorExposureComponent>() {
+            horror.0.add_delta(
+                dread,
+                despair,
+                revulsion,
+                shock,
+                note.clone(),
+                self.total_ticks,
+            );
+        }
+        if let Some(mut psychology) = entity_mut.get_mut::<PsychologicalStateComponent>() {
+            psychology.0.fear += dread / 3;
+            psychology.0.trauma += severity / 4;
+            psychology.0.anger += if role == "alvo" { severity / 5 } else { 0 };
+            psychology.0.hope = (psychology.0.hope - severity / 8).max(0);
+            psychology.0.clamp_all();
+        }
+        if severity >= 35 {
+            let memory = AgentMemory {
+                id: self.next_memory_id,
+                day: self.day,
+                tick: self.tick_of_day,
+                kind: MemoryKind::Impression,
+                summary: format!("Horror testemunhado: {}", summary),
+                details: format!(
+                    "{} recebeu impacto de horror com severidade {}.",
+                    role, severity
+                ),
+                emotional_weight: severity.clamp(20, 100),
+                about: Vec::new(),
+                tags: vec!["horror".to_string(), role.to_string()],
+            };
+            self.next_memory_id += 1;
+            if let Some(mut memories) = entity_mut.get_mut::<MemoryComponent>() {
+                memories.0.push(memory);
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn mark_territory_horror_at(
+        &mut self,
+        position: TileCoord,
+        severity: i32,
+        deaths: u32,
+        desecrated: bool,
+        monstrous: bool,
+        summary: &str,
+    ) {
+        let Some(territory) = self
+            .territories
+            .iter_mut()
+            .find(|territory| territory.tile_coords.contains(&position))
+        else {
+            return;
+        };
+        territory.horror.add_horror(
+            severity / 2,
+            if desecrated {
+                severity / 2
+            } else {
+                severity / 6
+            },
+            deaths,
+            if monstrous { severity / 2 } else { 0 },
+            Some(summary.chars().take(120).collect::<String>()),
+            self.total_ticks,
+        );
+        territory.stability =
+            (territory.stability - territory.horror.stability_penalty / 10).clamp(0, 100);
+    }
+
+    pub(super) fn push_event_deduped<F>(
+        &mut self,
+        event: WorldEvent,
+        within_ticks: u64,
+        same_event: F,
+    ) -> bool
+    where
+        F: Fn(&WorldEvent) -> bool,
+    {
+        if self.has_recent_event(within_ticks, same_event) {
+            return false;
+        }
+        self.push_event(event);
+        true
+    }
+
     pub(super) fn has_recent_event<F>(&self, within_ticks: u64, predicate: F) -> bool
     where
         F: Fn(&WorldEvent) -> bool,
@@ -890,6 +1086,96 @@ impl Simulation {
                 + event.tick as u64;
             current_tick.saturating_sub(event_tick) <= within_ticks && predicate(event)
         })
+    }
+
+    pub(super) fn decay_horror_states_daily(&mut self) -> Result<()> {
+        let mut query = self.world.query::<&mut HorrorExposureComponent>();
+        for mut horror in query.iter_mut(&mut self.world) {
+            horror.0.decay_daily();
+        }
+        for territory in &mut self.territories {
+            territory.horror.decay_daily();
+        }
+        Ok(())
+    }
+
+    pub(super) fn retire_agent_runtime_state(&mut self, agent_id: u64, reason: &str) -> Result<()> {
+        let Ok(entity) = self.find_agent_entity(agent_id) else {
+            return Ok(());
+        };
+
+        if self
+            .world
+            .entity(entity)
+            .get::<ConversationComponent>()
+            .and_then(|conversation| conversation.active_conversation_id)
+            .is_some()
+        {
+            let _ = self.release_agent_from_conversation(agent_id, reason.to_string());
+        }
+
+        if let Some(task_id) = self
+            .world
+            .entity(entity)
+            .get::<EconomicActivityComponent>()
+            .and_then(|economic| economic.active_task_id)
+        {
+            if let Some(task) = self
+                .economic_tasks
+                .iter_mut()
+                .find(|task| task.id == task_id)
+                && task.assigned_agent_id == Some(agent_id)
+            {
+                task.assigned_agent_id = None;
+            }
+        }
+
+        self.pending_action_plans
+            .retain(|pending| pending.agent_id != agent_id);
+        self.pending_thoughts
+            .retain(|pending| pending.agent_id != agent_id);
+
+        let mut entity_mut = self.world.entity_mut(entity);
+        if let Some(mut intent) = entity_mut.get_mut::<IntentComponent>() {
+            intent.0 = None;
+        }
+        if let Some(mut utility) = entity_mut.get_mut::<UtilityControlComponent>() {
+            utility.active = None;
+        }
+        if let Some(mut path) = entity_mut.get_mut::<PathComponent>() {
+            path.0.clear();
+        }
+        if let Some(mut destination) = entity_mut.get_mut::<DestinationComponent>() {
+            destination.0 = None;
+        }
+        if let Some(mut label) = entity_mut.get_mut::<DestinationLabelComponent>() {
+            label.0 = None;
+        }
+        if let Some(mut queue) = entity_mut.get_mut::<TaskQueueComponent>() {
+            queue.0.clear();
+        }
+        if let Some(mut economic) = entity_mut.get_mut::<EconomicActivityComponent>() {
+            economic.active_task_id = None;
+        }
+        if let Some(mut thought) = entity_mut.get_mut::<ThoughtComponent>() {
+            thought.0 = format!("Inativo: {reason}");
+        }
+        Ok(())
+    }
+
+    pub(super) fn enforce_life_runtime_invariants(&mut self) -> Result<()> {
+        let mut inactive_agents = Vec::new();
+        let mut query = self.world.query::<(&AgentCore, &LifeStatusComponent)>();
+        for (core, life) in query.iter(&self.world) {
+            if life.0 != AgentLifeStatus::Vivo {
+                inactive_agents.push(core.id);
+            }
+        }
+        drop(query);
+        for agent_id in inactive_agents {
+            self.retire_agent_runtime_state(agent_id, "agente sem capacidade de agir")?;
+        }
+        Ok(())
     }
 
     pub(super) fn add_memory(

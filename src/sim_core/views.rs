@@ -678,6 +678,14 @@ impl Simulation {
             }
             map
         };
+        let horror_exposure_map = {
+            let mut map = HashMap::new();
+            let mut query = self.world.query::<(&AgentCore, &HorrorExposureComponent)>();
+            for (core, horror) in query.iter(&self.world) {
+                map.insert(core.id, horror.0.clone());
+            }
+            map
+        };
         let mut views = Vec::new();
         let mut query = self.world.query::<(
             (
@@ -719,6 +727,16 @@ impl Simulation {
                 .get(&core.id)
                 .cloned()
                 .unwrap_or_default();
+            let horror_exposure = horror_exposure_map
+                .get(&core.id)
+                .cloned()
+                .unwrap_or_default();
+            let local_horror_summary = self
+                .territories
+                .iter()
+                .find(|territory| territory.tile_coords.contains(&position.0))
+                .map(|territory| territory.horror.summary())
+                .filter(|summary| summary != "sem horror territorial dominante");
             let tile = self.tile_at(position.0);
             let building = tile
                 .and_then(|entry| entry.building_id)
@@ -743,6 +761,7 @@ impl Simulation {
                 .and_then(|building_id| self.establishment_by_building(building_id));
             let reactive_summary: crate::sim_core::utility_ai::ReactivePsychologySummary =
                 Default::default();
+            let is_alive = life_status.0 == AgentLifeStatus::Vivo;
             let scheduled_meetings = self
                 .scheduled_meetings
                 .iter()
@@ -783,14 +802,20 @@ impl Simulation {
                 building,
                 room,
                 position: position.0,
-                destination: destination.0,
-                destination_label: destination_label.0.clone(),
-                path_len: path.0.len(),
+                destination: if is_alive { destination.0 } else { None },
+                destination_label: if is_alive {
+                    destination_label.0.clone()
+                } else {
+                    None
+                },
+                path_len: if is_alive { path.0.len() } else { 0 },
                 state: state.0.clone(),
                 life_status: life_status.0,
                 injury: injury.0.clone(),
                 institutional_perception: institutional_perception.0.clone(),
                 psychological_state,
+                horror_summary: horror_exposure.summary(),
+                local_horror_summary,
                 craft_proficiencies: self.craft_proficiencies_for_agent(core.id),
                 perceived_status_score: self.perceived_status_score(core.id),
                 visible_prestige_summary: self.visible_prestige_summary(core.id),
@@ -837,7 +862,7 @@ impl Simulation {
                     })
                     .take(4)
                     .collect(),
-                last_intent: intent.0.clone(),
+                last_intent: if is_alive { intent.0.clone() } else { None },
                 last_thought: thought.0.clone(),
                 recent_memories: memories.0.iter().rev().take(4).cloned().collect(),
                 relations: relations
@@ -845,7 +870,11 @@ impl Simulation {
                     .iter()
                     .map(|(id, relation)| (*id, relation.clone()))
                     .collect(),
-                active_conversation_id: conversation.active_conversation_id,
+                active_conversation_id: if is_alive {
+                    conversation.active_conversation_id
+                } else {
+                    None
+                },
                 conversation_participant_names: conversation
                     .conversation_participant_ids
                     .iter()
@@ -880,9 +909,13 @@ impl Simulation {
                     .map(|entry| entry.pantry.clone())
                     .unwrap_or_default(),
                 pending_salary,
-                active_task_summary: economic
-                    .active_task_id
-                    .and_then(|task_id| self.economic_task_summary(task_id)),
+                active_task_summary: if is_alive {
+                    economic
+                        .active_task_id
+                        .and_then(|task_id| self.economic_task_summary(task_id))
+                } else {
+                    None
+                },
                 carrying: economic.carrying.clone(),
                 work_establishment_name: work_establishment.map(|entry| entry.name.clone()),
                 work_establishment_cash: work_establishment.map(|entry| entry.cash),
@@ -912,27 +945,55 @@ impl Simulation {
                 feudal_power_summary: Some(self.build_feudal_context(core.id).power_summary),
                 succession_status: self.build_feudal_context(core.id).succession_status,
                 scheduled_meetings,
-                planner_status: if self.planner_pending_for_agent(core.id) {
+                planner_status: if !is_alive {
+                    "dead".to_string()
+                } else if self.planner_pending_for_agent(core.id) {
                     "pending".to_string()
                 } else if intent.0.is_some() {
                     "ready".to_string()
                 } else {
                     "idle".to_string()
                 },
-                active_utility_directive: utility.active.as_ref().map(|directive| {
-                    format!(
-                        "{} [{}] ({})",
-                        directive.kind, directive.stance, directive.score
-                    )
-                }),
-                reactive_stance: reactive_summary.stance.clone(),
-                reactive_reason: reactive_summary.reason.clone(),
-                reactive_revenge_target: reactive_summary
-                    .target_agent_id
-                    .and_then(|id| agent_name_map.get(&id).cloned()),
-                reactive_status_pressure: reactive_summary.status_pressure_summary.clone(),
-                reactive_defiance_posture: reactive_summary.defiance_posture_summary.clone(),
-                control_mode: if utility.active.is_some() {
+                active_utility_directive: if is_alive {
+                    utility.active.as_ref().map(|directive| {
+                        format!(
+                            "{} [{}] ({})",
+                            directive.kind, directive.stance, directive.score
+                        )
+                    })
+                } else {
+                    None
+                },
+                reactive_stance: if is_alive {
+                    reactive_summary.stance.clone()
+                } else {
+                    "inactive".to_string()
+                },
+                reactive_reason: if is_alive {
+                    reactive_summary.reason.clone()
+                } else {
+                    "sem capacidade de agir".to_string()
+                },
+                reactive_revenge_target: if is_alive {
+                    reactive_summary
+                        .target_agent_id
+                        .and_then(|id| agent_name_map.get(&id).cloned())
+                } else {
+                    None
+                },
+                reactive_status_pressure: if is_alive {
+                    reactive_summary.status_pressure_summary.clone()
+                } else {
+                    "inactive".to_string()
+                },
+                reactive_defiance_posture: if is_alive {
+                    reactive_summary.defiance_posture_summary.clone()
+                } else {
+                    "inactive".to_string()
+                },
+                control_mode: if !is_alive {
+                    "inactive".to_string()
+                } else if utility.active.is_some() {
                     "utility".to_string()
                 } else if intent.0.is_some() {
                     "planner".to_string()

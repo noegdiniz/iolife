@@ -49,12 +49,15 @@ impl Simulation {
             self.apply_daily_marriages()?;
             self.update_mourning_states()?;
             self.decay_psychological_states_daily()?;
+            self.decay_horror_states_daily()?;
             self.generate_daily_caravans()?;
             self.decay_rumors_daily()?;
             self.update_cultural_stories_daily()?;
+            self.resolve_daily_politics()?;
             self.update_abstract_wars()?;
         }
 
+        self.enforce_life_runtime_invariants()?;
         self.apply_needs_decay();
         self.refresh_economy_state()?;
         self.refresh_political_state()?;
@@ -94,6 +97,7 @@ impl Simulation {
         self.update_trauma_trackers()?;
         self.check_active_promises()?;
         self.tick_fauna_behavior()?;
+        self.enforce_life_runtime_invariants()?;
 
         Ok(())
     }
@@ -334,14 +338,17 @@ impl Simulation {
             }
             IntentKind::Socializar => {
                 if let Some(target_id) = intent.target_agent {
-                    if self.agents_adjacent(agent_id, target_id)?
-                        && self.open_conversation(
-                            vec![agent_id, target_id],
-                            intent.social_move.unwrap_or(SocialMove::Chat),
-                            &intent.justification,
-                        )?
-                    {
-                        let _ = llm.provider_name();
+                    if self.agents_adjacent(agent_id, target_id)? {
+                        if self
+                            .open_conversation(
+                                vec![agent_id, target_id],
+                                intent.social_move.unwrap_or(SocialMove::Chat),
+                                &intent.justification,
+                            )?
+                            .is_some()
+                        {
+                            let _ = llm.provider_name();
+                        }
                     }
                 }
             }

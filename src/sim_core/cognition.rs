@@ -401,10 +401,23 @@ impl Simulation {
         self.pending_thoughts = active_thoughts;
 
         for result in completed_results {
-            self.apply_think_maker_output(result.agent_id, result.output)?;
+            if self
+                .life_status(result.agent_id)
+                .unwrap_or(AgentLifeStatus::Morto)
+                == AgentLifeStatus::Vivo
+            {
+                self.apply_think_maker_output(result.agent_id, result.output)?;
+            }
         }
 
         for result in skipped_results {
+            if self
+                .life_status(result.agent_id)
+                .unwrap_or(AgentLifeStatus::Morto)
+                != AgentLifeStatus::Vivo
+            {
+                continue;
+            }
             if !result.error.is_transient() {
                 if let Some(entity) = self.find_agent_entity(result.agent_id).ok() {
                     if let Some(mut budget) = self
@@ -445,10 +458,23 @@ impl Simulation {
 
         completed_plans.sort_by_key(|plan| plan.agent_id);
         for plan in completed_plans {
-            self.apply_completed_action_plan(llm, plan)?;
+            if self
+                .life_status(plan.agent_id)
+                .unwrap_or(AgentLifeStatus::Morto)
+                == AgentLifeStatus::Vivo
+            {
+                self.apply_completed_action_plan(llm, plan)?;
+            }
         }
 
         for plan in skipped_plans {
+            if self
+                .life_status(plan.agent_id)
+                .unwrap_or(AgentLifeStatus::Morto)
+                != AgentLifeStatus::Vivo
+            {
+                continue;
+            }
             if !plan.error.is_transient() {
                 if let Some(entity) = self.find_agent_entity(plan.agent_id).ok() {
                     if let Some(mut budget) = self
@@ -728,6 +754,7 @@ impl Simulation {
             let feudal_context = self.build_feudal_context(context.id);
             let information_context = self.build_information_context(context.id, None);
             let cultural_context = self.build_cultural_context(context.id, None);
+            let horror_context = self.build_horror_context(context.id, context.position);
             let reactive_summary = self.current_reactive_psychology_summary(context.id)?;
             let time_context = self.time_context();
             let world_places = self.world_place_inputs();
@@ -783,6 +810,9 @@ impl Simulation {
                 feudal_context,
                 information_context,
                 cultural_context,
+                social_contracts_context: self.social_contract_context_for_agent(context.id, None),
+                horror_context,
+                long_term_plan: context.psychological_state.long_term_plan.clone(),
                 profile_summary: context.profile_summary(),
                 llm_budget_remaining: 24u32.saturating_sub(context.llm_calls as u32),
                 chaos_pressure: self.agent_chaos_pressure(context.id).unwrap_or(0),
@@ -991,6 +1021,80 @@ impl Simulation {
             .collect::<Vec<_>>();
         nearby.sort();
         nearby.into_iter().next()
+    }
+
+    pub(super) fn build_horror_context(
+        &self,
+        agent_id: u64,
+        position: TileCoord,
+    ) -> HorrorContextInput {
+        let horror = self
+            .find_agent_entity(agent_id)
+            .ok()
+            .and_then(|entity| {
+                self.world
+                    .entity(entity)
+                    .get::<HorrorExposureComponent>()
+                    .map(|component| component.0.clone())
+            })
+            .unwrap_or_default();
+        let local_horror = self
+            .territories
+            .iter()
+            .find(|territory| territory.tile_coords.contains(&position))
+            .map(|territory| territory.horror.clone())
+            .unwrap_or_default();
+
+        let mut immediate_risks = Vec::new();
+        if horror.shock >= 45 {
+            immediate_risks.push("risco de paralisia por choque".to_string());
+        }
+        if horror.dread >= 60 || local_horror.dread >= 60 {
+            immediate_risks.push("pânico local plausível".to_string());
+        }
+        if local_horror.monstrous_presence >= 35 {
+            immediate_risks.push("rastro monstruoso recente".to_string());
+        }
+        if local_horror.desecration >= 40 {
+            immediate_risks.push("local profanado ou associado a morte".to_string());
+        }
+
+        let mut taboos_or_omens = Vec::new();
+        if local_horror.cultural_taboo >= 35 {
+            taboos_or_omens.push("o lugar começa a virar tabu cultural".to_string());
+        }
+        if horror.nightmares >= 3 {
+            taboos_or_omens.push("pesadelos recorrentes afetam julgamento".to_string());
+        }
+        taboos_or_omens.extend(local_horror.notes.iter().take(2).cloned());
+
+        let summary = match (horror.summary(), local_horror.summary()) {
+            (personal, local)
+                if personal == "sem horror dominante"
+                    && local == "sem horror territorial dominante" =>
+            {
+                "sem horror dominante".to_string()
+            }
+            (personal, local) if local == "sem horror territorial dominante" => personal,
+            (personal, local) if personal == "sem horror dominante" => local,
+            (personal, local) => format!("{}; {}", personal, local),
+        };
+
+        HorrorContextInput {
+            dread: horror.dread,
+            despair: horror.despair,
+            revulsion: horror.revulsion,
+            shock: horror.shock,
+            nightmares: horror.nightmares,
+            desensitization: horror.desensitization,
+            fixation: horror.horror_fixation,
+            local_dread: local_horror.dread,
+            local_desecration: local_horror.desecration,
+            local_monstrous_presence: local_horror.monstrous_presence,
+            summary,
+            immediate_risks,
+            taboos_or_omens,
+        }
     }
 
     pub(super) fn build_psychological_context(

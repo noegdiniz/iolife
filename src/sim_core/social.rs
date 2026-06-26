@@ -444,6 +444,40 @@ impl Simulation {
                 .debug_agent_position(event.actor)
                 .ok()
                 .and_then(|pos| self.tile_at(pos).and_then(|tile| tile.building_id));
+            if let Some(existing) = self.cultural_stories.iter_mut().find(|story| {
+                story.title == title
+                    && story.origin_kind == kind
+                    && story.associated_building_id == associated_building_id
+            }) {
+                existing.cultural_strength = (existing.cultural_strength + 6).clamp(0, 100);
+                existing.stability = (existing.stability + 3).clamp(0, 100);
+                existing.last_told_tick = self.total_ticks;
+                if !existing
+                    .source_event_summaries
+                    .iter()
+                    .any(|summary| summary == &event.summary)
+                {
+                    existing.source_event_summaries.push(event.summary.clone());
+                }
+                let summary = format!(
+                    "A historia '{}' ganhou novo reforco na memoria da vila.",
+                    title
+                );
+                self.push_event_deduped(
+                    WorldEvent {
+                        day: self.day,
+                        tick: self.tick_of_day,
+                        actor: event.actor,
+                        target: event.target,
+                        kind: EventKind::CulturalStory,
+                        summary: summary.clone(),
+                        impact_tags: vec!["cultura".to_string(), "reforco".to_string()],
+                    },
+                    u64::from(self.ticks_per_day),
+                    |recent| recent.kind == EventKind::CulturalStory && recent.summary == summary,
+                );
+                continue;
+            }
             let story = CulturalStory {
                 id: story_id,
                 title: title.clone(),
@@ -534,7 +568,7 @@ impl Simulation {
         participant_ids: Vec<u64>,
         move_kind: SocialMove,
         reason: &str,
-    ) -> Result<bool> {
+    ) -> Result<Option<ConversationId>> {
         let mut deduped = Vec::new();
         for agent_id in participant_ids {
             if !deduped.contains(&agent_id) {
@@ -542,7 +576,7 @@ impl Simulation {
             }
         }
         if !(2..=5).contains(&deduped.len()) {
-            return Ok(false);
+            return Ok(None);
         }
         if !self.participants_share_room_and_radius(&deduped)? {
             if let Some(&initiator_id) = deduped.first() {
@@ -561,14 +595,14 @@ impl Simulation {
                     ],
                 });
             }
-            return Ok(false);
+            return Ok(None);
         }
         for &agent_id in &deduped {
             if self.agent_conversation_id(agent_id)?.is_some() {
-                return Ok(false);
+                return Ok(None);
             }
             if self.agent_social_cooldown_until(agent_id)? > self.total_ticks {
-                return Ok(false);
+                return Ok(None);
             }
         }
 
@@ -591,16 +625,23 @@ impl Simulation {
             turn_count: 0,
             max_turns: MAX_CONVERSATION_TURNS,
             opening_reason,
-            summary: format!(
-                "{} inicia uma conversa em grupo com {}.",
-                participant_names[0],
-                participant_names
-                    .iter()
-                    .skip(1)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+            summary: if deduped.len() >= 3 {
+                format!(
+                    "{} inicia uma conversa em grupo com {}.",
+                    participant_names[0],
+                    participant_names
+                        .iter()
+                        .skip(1)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            } else {
+                format!(
+                    "{} inicia uma conversa com {}.",
+                    participant_names[0], participant_names[1]
+                )
+            },
             recent_turns: Vec::new(),
             participant_states: deduped
                 .iter()
@@ -647,20 +688,31 @@ impl Simulation {
             actor: initiator_id,
             target: deduped.get(1).copied(),
             kind: EventKind::ConversationStarted,
-            summary: format!(
-                "{} inicia conversa em grupo ({} agentes): {}.",
-                participant_names[0],
-                deduped.len(),
-                reason
-            ),
+            summary: if deduped.len() >= 3 {
+                format!(
+                    "{} inicia conversa em grupo ({} agentes): {}.",
+                    participant_names[0],
+                    deduped.len(),
+                    reason
+                )
+            } else {
+                format!(
+                    "{} inicia conversa com {}: {}.",
+                    participant_names[0], participant_names[1], reason
+                )
+            },
             impact_tags: vec![
                 "social".to_string(),
                 "conversa".to_string(),
-                "grupo".to_string(),
+                if deduped.len() >= 3 {
+                    "grupo".to_string()
+                } else {
+                    "dupla".to_string()
+                },
                 move_kind.as_str().to_string(),
             ],
         });
-        Ok(true)
+        Ok(Some(conversation_id))
     }
 
     fn participants_share_room_and_radius(&mut self, participant_ids: &[u64]) -> Result<bool> {
@@ -705,11 +757,15 @@ impl Simulation {
         let mut removed = Vec::new();
         for &agent_id in &snapshot.participant_ids {
             let state = self.agent_state(agent_id)?;
+            let life_status = self.life_status(agent_id)?;
             let position = self.debug_agent_position(agent_id)?;
             let room_id = self.tile_at(position).and_then(|tile| tile.room_id);
             let spatial_ok = room_id == anchor_room_id && anchor_position.manhattan(position) <= 2;
-            let need_ok = state.hunger < 95 && state.energy > 5 && state.health > 15;
-            if !(spatial_ok && need_ok) {
+            let able_to_continue = life_status == AgentLifeStatus::Vivo
+                && state.hunger < 98
+                && state.energy > 0
+                && state.health > 0;
+            if !(spatial_ok && able_to_continue) {
                 removed.push(agent_id);
             }
         }
@@ -1033,6 +1089,7 @@ impl Simulation {
         );
         let speaker_injury = self.agent_injury(speaker_id)?;
         let reactive_summary = self.current_reactive_psychology_summary(speaker_id)?;
+        let horror_context = self.build_horror_context(speaker_id, speaker_position);
 
         let other_participants = conversation
             .participant_ids
@@ -1196,6 +1253,9 @@ impl Simulation {
             information_context: self
                 .build_information_context(speaker_id, Some(primary_target_id)),
             cultural_context: self.build_cultural_context(speaker_id, Some(primary_target_id)),
+            social_contracts_context: self
+                .social_contract_context_for_agent(speaker_id, Some(primary_target_id)),
+            horror_context,
             body_parts: speaker_injury.body_parts.clone(),
         })
     }
@@ -1447,6 +1507,9 @@ impl Simulation {
     pub(super) fn process_scheduled_meetings(&mut self) -> Result<()> {
         let now_day = self.day;
         let now_tick = self.tick_of_day;
+        let travel_window = (self.ticks_per_day / 4).max(2);
+        let late_window = (self.ticks_per_day / 8).max(2);
+
         let active_ids = self
             .scheduled_meetings
             .iter()
@@ -1454,19 +1517,18 @@ impl Simulation {
             .map(|meeting| meeting.id)
             .collect::<Vec<_>>();
         for meeting_id in active_ids {
-            if let Some(meeting) = self
+            let linked_conversation_id = self
                 .scheduled_meetings
                 .iter()
                 .find(|meeting| meeting.id == meeting_id)
-                .cloned()
-            {
-                let tracked_participants = self.meeting_confirmed_participants(&meeting);
-                let still_active = tracked_participants.iter().skip(1).any(|agent_id| {
-                    self.conversation_between_active(meeting.proposer_id, *agent_id)
-                });
-                if !still_active {
-                    self.set_meeting_status(meeting_id, ScheduledMeetingStatus::Completed, None)?;
-                }
+                .and_then(|meeting| meeting.active_conversation_id);
+            let still_active = linked_conversation_id
+                .and_then(|conversation_id| self.conversation_state(conversation_id))
+                .map(|conversation| conversation.status == ConversationStatus::Active)
+                .unwrap_or(false);
+            if !still_active {
+                self.fulfill_meeting_contracts(meeting_id)?;
+                self.set_meeting_status(meeting_id, ScheduledMeetingStatus::Completed, None)?;
             }
         }
 
@@ -1482,6 +1544,31 @@ impl Simulation {
             .cloned()
             .collect::<Vec<_>>();
         for meeting in pending {
+            let due_soon = meeting.scheduled_day == now_day
+                && meeting.scheduled_tick >= now_tick
+                && meeting.scheduled_tick.saturating_sub(now_tick) <= travel_window;
+            let due = meeting.scheduled_day < now_day
+                || (meeting.scheduled_day == now_day && meeting.scheduled_tick <= now_tick);
+
+            if due_soon || due {
+                self.accept_unanswered_meeting_invites(meeting.id)?;
+            }
+
+            let Some(meeting) = self
+                .scheduled_meetings
+                .iter()
+                .find(|candidate| candidate.id == meeting.id)
+                .cloned()
+            else {
+                continue;
+            };
+            if !matches!(
+                meeting.status,
+                ScheduledMeetingStatus::Proposed | ScheduledMeetingStatus::Accepted
+            ) {
+                continue;
+            }
+
             let confirmed_participants = self.meeting_confirmed_participants(&meeting);
             if confirmed_participants.len() < 2 {
                 let all_answered = meeting.responses.len() >= meeting.invitee_ids.len();
@@ -1491,17 +1578,12 @@ impl Simulation {
                 continue;
             }
 
-            let due_soon = meeting.scheduled_day == now_day
-                && meeting.scheduled_tick >= now_tick
-                && meeting.scheduled_tick.saturating_sub(now_tick) <= 30;
-            if due_soon {
+            if due_soon || due {
                 for &agent_id in &confirmed_participants {
                     self.queue_meeting_travel_task(agent_id, &meeting.place_id)?;
                 }
             }
 
-            let due = meeting.scheduled_day < now_day
-                || (meeting.scheduled_day == now_day && meeting.scheduled_tick <= now_tick);
             if !due {
                 continue;
             }
@@ -1517,11 +1599,20 @@ impl Simulation {
                 && present.len() >= 2
                 && self.participants_share_room_and_radius(&present)?
             {
-                if self.open_conversation(present.clone(), SocialMove::Chat, "encontro_marcado")? {
+                if let Some(conversation_id) =
+                    self.open_conversation(present.clone(), SocialMove::Chat, "encontro_marcado")?
+                {
+                    if let Some(stored) = self
+                        .scheduled_meetings
+                        .iter_mut()
+                        .find(|stored| stored.id == meeting.id)
+                    {
+                        stored.active_conversation_id = Some(conversation_id);
+                    }
                     self.set_meeting_status(meeting.id, ScheduledMeetingStatus::Active, None)?;
                 }
             } else if meeting.scheduled_day < now_day
-                || now_tick.saturating_sub(meeting.scheduled_tick) > 30
+                || now_tick.saturating_sub(meeting.scheduled_tick) > late_window
             {
                 self.mark_meeting_missed(meeting.id)?;
             }
@@ -1596,6 +1687,7 @@ impl Simulation {
             purpose: meeting.purpose.clone(),
             status: ScheduledMeetingStatus::Proposed,
             created_tick: self.total_ticks,
+            active_conversation_id: None,
             responses: Vec::new(),
         });
         let speaker_name = self.agent_name(speaker_id)?;
@@ -1721,6 +1813,21 @@ impl Simulation {
         if response.accept {
             self.queue_meeting_travel_task(updated_meeting.proposer_id, &updated_meeting.place_id)?;
             self.queue_meeting_travel_task(responder_id, &updated_meeting.place_id)?;
+            self.upsert_social_contract(
+                SocialContractKind::AttendMeeting,
+                responder_id,
+                updated_meeting.proposer_id,
+                format!(
+                    "comparecer ao encontro #{}: {}",
+                    updated_meeting.id, updated_meeting.purpose
+                ),
+                updated_meeting.scheduled_day,
+                None,
+                Some(updated_meeting.id),
+                None,
+                Some(format!("local marcado: {}", updated_meeting.place_id)),
+                "falta ao encontro reduz confianca e gera cobranca social".to_string(),
+            )?;
         }
         let responder_name = self.agent_name(responder_id)?;
         self.push_event(WorldEvent {
@@ -1749,6 +1856,71 @@ impl Simulation {
                 }
                 .to_string(),
             ],
+        });
+        Ok(())
+    }
+
+    fn accept_unanswered_meeting_invites(&mut self, meeting_id: ScheduledMeetingId) -> Result<()> {
+        let Some(meeting) = self
+            .scheduled_meetings
+            .iter()
+            .find(|meeting| meeting.id == meeting_id)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        if !matches!(
+            meeting.status,
+            ScheduledMeetingStatus::Proposed | ScheduledMeetingStatus::Accepted
+        ) {
+            return Ok(());
+        }
+        let unanswered = meeting
+            .invitee_ids
+            .iter()
+            .copied()
+            .filter(|agent_id| {
+                !meeting
+                    .responses
+                    .iter()
+                    .any(|response| response.agent_id == *agent_id)
+            })
+            .filter(|agent_id| {
+                self.life_status(*agent_id)
+                    .map(|status| status == AgentLifeStatus::Vivo)
+                    .unwrap_or(false)
+            })
+            .collect::<Vec<_>>();
+        if unanswered.is_empty() {
+            return Ok(());
+        }
+        if let Some(stored) = self
+            .scheduled_meetings
+            .iter_mut()
+            .find(|stored| stored.id == meeting_id)
+        {
+            for agent_id in &unanswered {
+                stored.responses.push(MeetingParticipantResponse {
+                    agent_id: *agent_id,
+                    accept: true,
+                    reason: "aceite tacito perto do horario marcado".to_string(),
+                    response_tick: self.total_ticks,
+                });
+            }
+            stored.status = ScheduledMeetingStatus::Accepted;
+        }
+        self.push_event(WorldEvent {
+            day: self.day,
+            tick: self.tick_of_day,
+            actor: meeting.proposer_id,
+            target: unanswered.first().copied(),
+            kind: EventKind::Meeting,
+            summary: format!(
+                "Encontro #{} confirmou {} participante(s) por aceite tacito perto do horario.",
+                meeting_id,
+                unanswered.len()
+            ),
+            impact_tags: vec!["encontro".to_string(), "aceite_tacito".to_string()],
         });
         Ok(())
     }
@@ -1811,22 +1983,87 @@ impl Simulation {
         if self.place_by_id(place_id).is_none() {
             return Ok(());
         }
-        let entity = self.find_agent_entity(agent_id)?;
-        let mut entity_mut = self.world.entity_mut(entity);
-        let mut queue = entity_mut
-            .get_mut::<TaskQueueComponent>()
-            .ok_or_else(|| anyhow!("missing task queue component"))?;
-        let already_queued = queue.0.iter().any(|task| {
-            task.kind == IntentKind::Andar && task.target_semantic.as_deref() == Some(place_id)
-        });
-        if !already_queued {
-            queue.0.push_back(SimplifiedTask {
-                kind: IntentKind::Andar,
-                target_semantic: Some(place_id.to_string()),
-                target_agent: None,
-                social_move: None,
-            });
+        let state = self.agent_state(agent_id)?;
+        let life_status = self.life_status(agent_id)?;
+        if life_status != AgentLifeStatus::Vivo
+            || state.hunger >= 98
+            || state.energy <= 0
+            || state.health <= 0
+        {
+            return Ok(());
         }
+        let locked_economic_task = self
+            .active_economic_task_for_agent(agent_id)
+            .map(|task| task.lock_until_complete)
+            .unwrap_or(false);
+        let entity = self.find_agent_entity(agent_id)?;
+        let task = SimplifiedTask {
+            kind: IntentKind::Andar,
+            target_semantic: Some(place_id.to_string()),
+            target_agent: None,
+            social_move: None,
+        };
+        {
+            let mut entity_mut = self.world.entity_mut(entity);
+            let mut queue = entity_mut
+                .get_mut::<TaskQueueComponent>()
+                .ok_or_else(|| anyhow!("missing task queue component"))?;
+            let already_queued = queue.0.iter().any(|queued| {
+                queued.kind == IntentKind::Andar
+                    && queued.target_semantic.as_deref() == Some(place_id)
+            });
+            if !already_queued {
+                queue.0.push_front(task.clone());
+            }
+        }
+        if locked_economic_task {
+            return Ok(());
+        }
+        let active_conversation = self
+            .world
+            .entity(entity)
+            .get::<ConversationComponent>()
+            .and_then(|conversation| conversation.active_conversation_id)
+            .is_some();
+        if active_conversation {
+            return Ok(());
+        }
+        let intent = AgentIntent {
+            kind: IntentKind::Andar,
+            target_agent: None,
+            target_semantic: Some(place_id.to_string()),
+            justification: "deslocando-se para encontro marcado".to_string(),
+            dominant_emotion: "comprometido".to_string(),
+            perceived_risk: 0,
+            belief_updates: Vec::new(),
+            priority: 2,
+            social_move: None,
+        };
+        {
+            let mut entity_mut = self.world.entity_mut(entity);
+            entity_mut
+                .get_mut::<IntentComponent>()
+                .ok_or_else(|| anyhow!("missing intent component"))?
+                .0 = Some(intent);
+            entity_mut
+                .get_mut::<ThoughtComponent>()
+                .ok_or_else(|| anyhow!("missing thought component"))?
+                .0 = "Indo ao local de encontro marcado.".to_string();
+            entity_mut
+                .get_mut::<DestinationComponent>()
+                .ok_or_else(|| anyhow!("missing destination component"))?
+                .0 = None;
+            entity_mut
+                .get_mut::<DestinationLabelComponent>()
+                .ok_or_else(|| anyhow!("missing destination label component"))?
+                .0 = Some(place_id.to_string());
+            entity_mut
+                .get_mut::<PathComponent>()
+                .ok_or_else(|| anyhow!("missing path component"))?
+                .0
+                .clear();
+        }
+        self.ensure_navigation_for_current_intent(agent_id)?;
         Ok(())
     }
 
@@ -1836,14 +2073,6 @@ impl Simulation {
             return Ok(false);
         };
         Ok(position == destination || position.manhattan(destination) <= 2)
-    }
-
-    fn conversation_between_active(&self, a: u64, b: u64) -> bool {
-        self.conversations.iter().any(|conversation| {
-            conversation.status == ConversationStatus::Active
-                && conversation.participant_ids.contains(&a)
-                && conversation.participant_ids.contains(&b)
-        })
     }
 
     fn set_meeting_status(
@@ -1859,7 +2088,13 @@ impl Simulation {
         else {
             return Ok(());
         };
+        if meeting.status == status && response_tick.is_none() {
+            return Ok(());
+        }
         meeting.status = status;
+        if !matches!(status, ScheduledMeetingStatus::Active) {
+            meeting.active_conversation_id = None;
+        }
         if response_tick.is_some() {
             let _ = response_tick;
         }
@@ -1889,6 +2124,7 @@ impl Simulation {
             return Ok(());
         };
         self.set_meeting_status(meeting_id, ScheduledMeetingStatus::Missed, None)?;
+        self.breach_meeting_contracts(meeting_id, "encontro perdido")?;
         let participants = self.meeting_all_participants(&meeting);
         for &agent_id in &participants {
             let others = participants
@@ -2289,6 +2525,361 @@ impl Simulation {
         Ok(())
     }
 
+    pub(super) fn social_contract_context_for_agent(
+        &self,
+        agent_id: u64,
+        other_id: Option<u64>,
+    ) -> Vec<String> {
+        self.social_contracts
+            .iter()
+            .filter(|contract| {
+                matches!(
+                    contract.status,
+                    SocialContractStatus::Proposed
+                        | SocialContractStatus::Active
+                        | SocialContractStatus::PartiallyFulfilled
+                ) && contract.parties.contains(&agent_id)
+                    && other_id.is_none_or(|other| contract.parties.contains(&other))
+            })
+            .take(6)
+            .map(|contract| self.describe_social_contract(contract))
+            .collect()
+    }
+
+    fn describe_social_contract(&self, contract: &SocialContract) -> String {
+        let pledged = self
+            .agent_name(contract.pledged_by)
+            .unwrap_or_else(|_| format!("Agente {}", contract.pledged_by));
+        let owed = self
+            .agent_name(contract.owed_to)
+            .unwrap_or_else(|_| format!("Agente {}", contract.owed_to));
+        let backing = contract
+            .material_backing
+            .as_ref()
+            .map(|note| format!("; lastro: {note}"))
+            .unwrap_or_default();
+        format!(
+            "#{id} {kind:?}/{status:?}: {pledged} deve a {owed}: {subject} ate Dia {due}{backing}",
+            id = contract.id,
+            kind = contract.kind,
+            status = contract.status,
+            subject = contract.subject,
+            due = contract.due_day,
+        )
+    }
+
+    fn promise_contract_kind(condition: &PromiseCondition) -> SocialContractKind {
+        match condition {
+            PromiseCondition::DeliverResource { .. } => SocialContractKind::DeliverResource,
+            PromiseCondition::VoteForPolicy { .. } => SocialContractKind::PoliticalVote,
+            PromiseCondition::KeepSecret { .. } => SocialContractKind::KeepSecret,
+        }
+    }
+
+    fn promise_contract_subject(&self, condition: &PromiseCondition) -> String {
+        match condition {
+            PromiseCondition::VoteForPolicy { domain, value } => format!("{domain}={value}"),
+            _ => self.describe_promise_condition(condition),
+        }
+    }
+
+    fn issue_subject(issue: &PoliticalIssue) -> String {
+        format!("{}={}", issue.domain.as_str(), issue.proposed_value)
+    }
+
+    fn matching_issue_for_vote_promise(
+        &self,
+        condition: &PromiseCondition,
+    ) -> Option<PoliticalIssueId> {
+        let PromiseCondition::VoteForPolicy { domain, value } = condition else {
+            return None;
+        };
+        self.political_issues
+            .iter()
+            .find(|issue| {
+                issue.status == PoliticalIssueStatus::Open
+                    && (issue.domain.as_str() == domain || domain == &format!("{:?}", issue.domain))
+                    && &issue.proposed_value == value
+            })
+            .map(|issue| issue.id)
+    }
+
+    fn find_equivalent_social_contract(
+        &self,
+        kind: SocialContractKind,
+        pledged_by: u64,
+        owed_to: u64,
+        subject: &str,
+    ) -> Option<SocialContractId> {
+        self.social_contracts
+            .iter()
+            .find(|contract| {
+                contract.kind == kind
+                    && contract.pledged_by == pledged_by
+                    && contract.owed_to == owed_to
+                    && contract.subject == subject
+                    && matches!(
+                        contract.status,
+                        SocialContractStatus::Proposed
+                            | SocialContractStatus::Active
+                            | SocialContractStatus::PartiallyFulfilled
+                    )
+            })
+            .map(|contract| contract.id)
+    }
+
+    fn upsert_social_contract(
+        &mut self,
+        kind: SocialContractKind,
+        pledged_by: u64,
+        owed_to: u64,
+        subject: String,
+        due_day: u32,
+        linked_task_id: Option<EconomicTaskId>,
+        linked_meeting_id: Option<ScheduledMeetingId>,
+        linked_issue_id: Option<PoliticalIssueId>,
+        material_backing: Option<String>,
+        breach_consequence: String,
+    ) -> Result<SocialContractId> {
+        if let Some(existing_id) =
+            self.find_equivalent_social_contract(kind, pledged_by, owed_to, &subject)
+        {
+            if let Some(contract) = self
+                .social_contracts
+                .iter_mut()
+                .find(|contract| contract.id == existing_id)
+            {
+                contract.due_day = contract.due_day.max(due_day);
+                contract.linked_task_id = contract.linked_task_id.or(linked_task_id);
+                contract.linked_meeting_id = contract.linked_meeting_id.or(linked_meeting_id);
+                contract.linked_issue_id = contract.linked_issue_id.or(linked_issue_id);
+                contract.material_backing = contract.material_backing.clone().or(material_backing);
+                contract.updated_tick = self.total_ticks;
+            }
+            return Ok(existing_id);
+        }
+
+        let id = self.next_social_contract_id;
+        self.next_social_contract_id += 1;
+        let parties = if pledged_by == owed_to {
+            vec![pledged_by]
+        } else {
+            vec![pledged_by, owed_to]
+        };
+        let contract = SocialContract {
+            id,
+            kind,
+            parties,
+            subject: subject.clone(),
+            pledged_by,
+            owed_to,
+            status: SocialContractStatus::Active,
+            due_day,
+            linked_task_id,
+            linked_meeting_id,
+            linked_issue_id,
+            material_backing,
+            breach_consequence,
+            created_tick: self.total_ticks,
+            updated_tick: self.total_ticks,
+        };
+        self.social_contracts.push(contract);
+        let pledged_name = self.agent_name(pledged_by)?;
+        let owed_name = self.agent_name(owed_to)?;
+        self.push_event(WorldEvent {
+            day: self.day,
+            tick: self.tick_of_day,
+            actor: pledged_by,
+            target: Some(owed_to),
+            kind: EventKind::ContractCreated,
+            summary: format!(
+                "Contrato social #{} criado: {} deve a {}: {}.",
+                id, pledged_name, owed_name, subject
+            ),
+            impact_tags: vec!["social".to_string(), "contrato".to_string()],
+        });
+        Ok(id)
+    }
+
+    fn set_social_contract_status(
+        &mut self,
+        contract_id: SocialContractId,
+        status: SocialContractStatus,
+        reason: &str,
+    ) -> Result<()> {
+        let Some(index) = self
+            .social_contracts
+            .iter()
+            .position(|contract| contract.id == contract_id)
+        else {
+            return Ok(());
+        };
+        if self.social_contracts[index].status == status {
+            return Ok(());
+        }
+        self.social_contracts[index].status = status;
+        self.social_contracts[index].updated_tick = self.total_ticks;
+        let contract = self.social_contracts[index].clone();
+        let event_kind = match status {
+            SocialContractStatus::Fulfilled => EventKind::ContractFulfilled,
+            SocialContractStatus::Breached => EventKind::ContractBreached,
+            _ => EventKind::SocialBond,
+        };
+        self.push_event(WorldEvent {
+            day: self.day,
+            tick: self.tick_of_day,
+            actor: contract.pledged_by,
+            target: Some(contract.owed_to),
+            kind: event_kind,
+            summary: format!(
+                "Contrato social #{} {:?}: {} ({reason}).",
+                contract.id, status, contract.subject
+            ),
+            impact_tags: vec!["social".to_string(), "contrato".to_string()],
+        });
+        Ok(())
+    }
+
+    fn fulfill_social_contract_for_promise(&mut self, promise: &ActivePromise) -> Result<()> {
+        let kind = Self::promise_contract_kind(&promise.condition);
+        let subject = self.promise_contract_subject(&promise.condition);
+        if let Some(contract_id) = self.find_equivalent_social_contract(
+            kind,
+            promise.promiser_id,
+            promise.promisee_id,
+            &subject,
+        ) {
+            self.set_social_contract_status(
+                contract_id,
+                SocialContractStatus::Fulfilled,
+                "promessa cumprida",
+            )?;
+        }
+        Ok(())
+    }
+
+    fn breach_social_contract_for_promise(&mut self, promise: &ActivePromise) -> Result<()> {
+        let kind = Self::promise_contract_kind(&promise.condition);
+        let subject = self.promise_contract_subject(&promise.condition);
+        if let Some(contract_id) = self.find_equivalent_social_contract(
+            kind,
+            promise.promiser_id,
+            promise.promisee_id,
+            &subject,
+        ) {
+            self.set_social_contract_status(
+                contract_id,
+                SocialContractStatus::Breached,
+                "promessa quebrada",
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn resolve_political_vote_contracts(
+        &mut self,
+        actor_id: u64,
+        issue_id: PoliticalIssueId,
+        support: bool,
+    ) -> Result<()> {
+        let Some(issue) = self
+            .political_issues
+            .iter()
+            .find(|issue| issue.id == issue_id)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        let subject = Self::issue_subject(&issue);
+        let contract_ids = self
+            .social_contracts
+            .iter()
+            .filter(|contract| {
+                contract.kind == SocialContractKind::PoliticalVote
+                    && contract.pledged_by == actor_id
+                    && contract.subject == subject
+                    && matches!(
+                        contract.status,
+                        SocialContractStatus::Proposed
+                            | SocialContractStatus::Active
+                            | SocialContractStatus::PartiallyFulfilled
+                    )
+            })
+            .map(|contract| contract.id)
+            .collect::<Vec<_>>();
+        for contract_id in contract_ids {
+            if support {
+                self.set_social_contract_status(
+                    contract_id,
+                    SocialContractStatus::Fulfilled,
+                    "voto registrado no conselho",
+                )?;
+            } else {
+                self.set_social_contract_status(
+                    contract_id,
+                    SocialContractStatus::Breached,
+                    "voto contrario ao prometido",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn fulfill_meeting_contracts(
+        &mut self,
+        meeting_id: ScheduledMeetingId,
+    ) -> Result<()> {
+        let ids = self
+            .social_contracts
+            .iter()
+            .filter(|contract| {
+                contract.kind == SocialContractKind::AttendMeeting
+                    && contract.linked_meeting_id == Some(meeting_id)
+                    && matches!(
+                        contract.status,
+                        SocialContractStatus::Proposed
+                            | SocialContractStatus::Active
+                            | SocialContractStatus::PartiallyFulfilled
+                    )
+            })
+            .map(|contract| contract.id)
+            .collect::<Vec<_>>();
+        for id in ids {
+            self.set_social_contract_status(
+                id,
+                SocialContractStatus::Fulfilled,
+                "encontro ocorreu",
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn breach_meeting_contracts(
+        &mut self,
+        meeting_id: ScheduledMeetingId,
+        reason: &str,
+    ) -> Result<()> {
+        let ids = self
+            .social_contracts
+            .iter()
+            .filter(|contract| {
+                contract.kind == SocialContractKind::AttendMeeting
+                    && contract.linked_meeting_id == Some(meeting_id)
+                    && matches!(
+                        contract.status,
+                        SocialContractStatus::Proposed
+                            | SocialContractStatus::Active
+                            | SocialContractStatus::PartiallyFulfilled
+                    )
+            })
+            .map(|contract| contract.id)
+            .collect::<Vec<_>>();
+        for id in ids {
+            self.set_social_contract_status(id, SocialContractStatus::Breached, reason)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn execute_dialogue_make_promise(
         &mut self,
         speaker_id: u64,
@@ -2392,6 +2983,31 @@ impl Simulation {
         };
         self.promises.push(active);
         let promise_summary = self.describe_promise_condition(&promise.condition);
+        let due_day = self.day
+            + (promise
+                .duration_ticks
+                .saturating_add(self.ticks_per_day.saturating_sub(1))
+                / self.ticks_per_day.max(1));
+        let linked_issue_id = self.matching_issue_for_vote_promise(&promise.condition);
+        let linked_task_id = match promise.condition {
+            PromiseCondition::DeliverResource { .. } => self
+                .active_economic_task_for_agent(speaker_id)
+                .map(|task| task.id),
+            _ => None,
+        };
+        self.upsert_social_contract(
+            Self::promise_contract_kind(&promise.condition),
+            speaker_id,
+            promise.recipient_id,
+            self.promise_contract_subject(&promise.condition),
+            due_day,
+            linked_task_id,
+            None,
+            linked_issue_id,
+            backing_note.clone(),
+            "quebra de promessa gera perda de confianca, ressentimento e risco de rumor"
+                .to_string(),
+        )?;
         let memory_summary = if let Some(note) = &backing_note {
             format!("{} me prometeu {} ({note}).", speaker_name, promise_summary)
         } else {
@@ -3196,6 +3812,8 @@ impl Simulation {
             vec![promise.promisee_id],
         )?;
 
+        self.fulfill_social_contract_for_promise(&promise)?;
+
         self.push_event(WorldEvent {
             day: self.day,
             tick: self.tick_of_day,
@@ -3272,6 +3890,8 @@ impl Simulation {
             known_by: vec![promise.promisee_id, promise.promiser_id],
         };
         self.secrets.push(secret);
+
+        self.breach_social_contract_for_promise(&promise)?;
 
         self.push_event(WorldEvent {
             day: self.day,
@@ -3414,7 +4034,7 @@ impl Simulation {
         outcome: ConversationOutcome,
         reason: String,
     ) -> Result<()> {
-        let (participants, summary) = {
+        let (participants, summary, turn_count, opening_reason) = {
             let conversation = self
                 .conversation_state_mut(conversation_id)
                 .ok_or_else(|| anyhow!("conversation {conversation_id} not found"))?;
@@ -3424,6 +4044,8 @@ impl Simulation {
             (
                 conversation.participant_ids.clone(),
                 conversation.summary.clone(),
+                conversation.turn_count,
+                conversation.opening_reason.clone(),
             )
         };
 
@@ -3478,6 +4100,26 @@ impl Simulation {
             });
         }
 
+        let churn_without_progress = turn_count == 0
+            && (matches!(
+                outcome,
+                ConversationOutcome::DistanceBreak
+                    | ConversationOutcome::OneSidedExit
+                    | ConversationOutcome::BlockingBreak
+            ) || reason.contains("massa critica")
+                || reason.contains("distancia"));
+        let social_loop_reason = opening_reason.contains("vinganca")
+            || opening_reason.contains("promessa")
+            || opening_reason.contains("ofensa")
+            || opening_reason.contains("cobranca")
+            || opening_reason.contains("ofender")
+            || opening_reason.contains("pressionar");
+        let extended_cooldown_until = if churn_without_progress || social_loop_reason {
+            Some(self.total_ticks + u64::from((self.ticks_per_day / 4).max(4)))
+        } else {
+            None
+        };
+
         for agent_id in participants.iter().copied() {
             let other_id = participants
                 .iter()
@@ -3486,6 +4128,16 @@ impl Simulation {
                 .unwrap_or(agent_id);
             let other_name = self.agent_name(other_id)?;
             self.release_agent_from_conversation(agent_id, reason.clone())?;
+            if let Some(cooldown_until) = extended_cooldown_until
+                && let Ok(entity) = self.find_agent_entity(agent_id)
+                && let Some(mut conversation) = self
+                    .world
+                    .entity_mut(entity)
+                    .get_mut::<ConversationComponent>()
+            {
+                conversation.social_cooldown_until =
+                    conversation.social_cooldown_until.max(cooldown_until);
+            }
             self.add_memory(
                 agent_id,
                 if matches!(outcome, ConversationOutcome::PhysicalConflict) {
@@ -3836,10 +4488,6 @@ impl Simulation {
             }
         }
 
-        println!(
-            "DEBUG BIRTH: day={}, potential_mothers={:?}",
-            self.day, potential_mothers
-        );
 
         let mut parents_pairs = Vec::new();
         for (mother_id, spouse_id, home_building_id) in potential_mothers {
@@ -3857,10 +4505,6 @@ impl Simulation {
             }
         }
 
-        println!(
-            "DEBUG BIRTH: day={}, parents_pairs={:?}",
-            self.day, parents_pairs
-        );
 
         const CHILD_NAMES: &[&str] = &[
             "Arthur",
@@ -3996,6 +4640,7 @@ impl Simulation {
                         InjuryComponent::default(),
                         InstitutionalPerceptionComponent::default(),
                         PsychologicalStateComponent::default(),
+                        HorrorExposureComponent::default(),
                         RumorBeliefComponent::default(),
                         StoryBeliefComponent::default(),
                     ),

@@ -222,6 +222,7 @@ impl Simulation {
         if !self.record_political_position(actor_id, issue_id, support)? {
             return Ok(());
         }
+        self.resolve_political_vote_contracts(actor_id, issue_id, support)?;
         let actor_name = self.agent_name(actor_id)?;
         let issue_summary = self
             .political_issues
@@ -234,12 +235,12 @@ impl Simulation {
             tick: self.tick_of_day,
             actor: actor_id,
             target: None,
-            kind: EventKind::PoliticalSupport,
+            kind: EventKind::CouncilVote,
             summary: format!(
-                "{actor_name} {} a pauta: {issue_summary}.",
+                "{actor_name} registra voto no conselho: {} {issue_summary}.",
                 if support { "apoia" } else { "se opoe a" }
             ),
-            impact_tags: vec!["politica".to_string(), "apoio".to_string()],
+            impact_tags: vec!["politica".to_string(), "conselho".to_string()],
         });
         Ok(())
     }
@@ -1347,12 +1348,19 @@ impl Simulation {
                 .holder_agent_id
                 .and_then(|holder_id| self.life_status(holder_id).ok())
                 .is_some_and(|status| status != AgentLifeStatus::Vivo);
-            if holder_dead
-                && !self.succession_crises.iter().any(|crisis| {
+            if holder_dead {
+                let already_open = self.succession_crises.iter().any(|crisis| {
                     crisis.title_id == title.id && crisis.status == SuccessionCrisisStatus::Open
-                })
-            {
-                self.open_succession_crisis_for_title(&title)?;
+                });
+                let already_resolved_for_current_holder =
+                    self.succession_crises.iter().any(|crisis| {
+                        crisis.title_id == title.id
+                            && crisis.status == SuccessionCrisisStatus::Resolved
+                            && crisis.recognized_heir_id == title.holder_agent_id
+                    });
+                if !already_open && !already_resolved_for_current_holder {
+                    self.open_succession_crisis_for_title(&title)?;
+                }
             }
         }
         self.resolve_stable_succession_crises()?;
@@ -1410,6 +1418,15 @@ impl Simulation {
             let Some(successor_id) = successor_id else {
                 continue;
             };
+            if title.holder_agent_id == Some(successor_id)
+                && self.succession_crises.iter().any(|entry| {
+                    entry.id == crisis.id
+                        && entry.status == SuccessionCrisisStatus::Resolved
+                        && entry.recognized_heir_id == Some(successor_id)
+                })
+            {
+                continue;
+            }
             let successor_name = self
                 .agent_name(successor_id)
                 .unwrap_or_else(|_| format!("agente {}", successor_id));
@@ -1458,42 +1475,72 @@ impl Simulation {
                     (territory.stability + 5).clamp(0, 100)
                 };
             }
-            self.push_event(WorldEvent {
-                day: self.day,
-                tick: self.tick_of_day,
-                actor: successor_id,
-                target: None,
-                kind: if should_resolve_by_force {
-                    EventKind::Usurpation
-                } else {
-                    EventKind::SuccessionRecognized
+            let event_kind = if should_resolve_by_force {
+                EventKind::Usurpation
+            } else {
+                EventKind::SuccessionRecognized
+            };
+            let summary = if should_resolve_by_force {
+                format!(
+                    "{} tomou o titulo {} ao encerrar a crise sucessoria.",
+                    successor_name, title.name
+                )
+            } else {
+                format!(
+                    "{} foi reconhecido como sucessor de {}.",
+                    successor_name, title.name
+                )
+            };
+            let title_id = title.id;
+            let crisis_id = crisis.id;
+            self.push_event_deduped(
+                WorldEvent {
+                    day: self.day,
+                    tick: self.tick_of_day,
+                    actor: successor_id,
+                    target: None,
+                    kind: event_kind,
+                    summary: summary.clone(),
+                    impact_tags: vec![
+                        "feudal".to_string(),
+                        "sucessao".to_string(),
+                        if should_resolve_by_force {
+                            "usurpacao".to_string()
+                        } else {
+                            "reconhecimento".to_string()
+                        },
+                        format!("title:{title_id}"),
+                        format!("crisis:{crisis_id}"),
+                    ],
                 },
-                summary: if should_resolve_by_force {
-                    format!(
-                        "{} tomou o titulo {} ao encerrar a crise sucessoria.",
-                        successor_name, title.name
-                    )
-                } else {
-                    format!(
-                        "{} foi reconhecido como sucessor de {}.",
-                        successor_name, title.name
-                    )
+                u64::from(self.ticks_per_day),
+                |recent| {
+                    recent.kind == event_kind
+                        && recent.actor == successor_id
+                        && recent
+                            .impact_tags
+                            .iter()
+                            .any(|tag| tag == &format!("title:{title_id}"))
+                        && recent.summary == summary
                 },
-                impact_tags: vec![
-                    "feudal".to_string(),
-                    "sucessao".to_string(),
-                    if should_resolve_by_force {
-                        "usurpacao".to_string()
-                    } else {
-                        "reconhecimento".to_string()
-                    },
-                ],
-            });
+            );
         }
         Ok(())
     }
 
     pub(super) fn open_succession_crisis_for_title(&mut self, title: &FeudalTitle) -> Result<()> {
+        if self.succession_crises.iter().any(|crisis| {
+            crisis.title_id == title.id && crisis.status == SuccessionCrisisStatus::Open
+        }) {
+            return Ok(());
+        }
+        if self.succession_crises.iter().any(|crisis| {
+            crisis.title_id == title.id
+                && crisis.status == SuccessionCrisisStatus::Resolved
+                && crisis.recognized_heir_id == title.holder_agent_id
+        }) {
+            return Ok(());
+        }
         let mut claimants = Vec::new();
         if let Some(holder_id) = title.holder_agent_id {
             if let Some(lineage) = self.lineage_snapshot(holder_id) {
@@ -1558,18 +1605,35 @@ impl Simulation {
                 title.name, claimants
             ),
         });
-        self.push_event(WorldEvent {
-            day: self.day,
-            tick: self.tick_of_day,
-            actor: title.holder_agent_id.unwrap_or(0),
-            target: recognized_heir_id,
-            kind: EventKind::SuccessionOpened,
-            summary: format!(
-                "Crise sucessoria aberta para {} com pretendentes {:?}.",
-                title.name, claimants
-            ),
-            impact_tags: vec!["feudal".to_string(), "sucessao".to_string()],
-        });
+        let summary = format!(
+            "Crise sucessoria aberta para {} com pretendentes {:?}.",
+            title.name, claimants
+        );
+        let title_id = title.id;
+        self.push_event_deduped(
+            WorldEvent {
+                day: self.day,
+                tick: self.tick_of_day,
+                actor: title.holder_agent_id.unwrap_or(0),
+                target: recognized_heir_id,
+                kind: EventKind::SuccessionOpened,
+                summary: summary.clone(),
+                impact_tags: vec![
+                    "feudal".to_string(),
+                    "sucessao".to_string(),
+                    format!("title:{title_id}"),
+                ],
+            },
+            u64::from(self.ticks_per_day),
+            |recent| {
+                recent.kind == EventKind::SuccessionOpened
+                    && recent
+                        .impact_tags
+                        .iter()
+                        .any(|tag| tag == &format!("title:{title_id}"))
+                    && recent.summary == summary
+            },
+        );
         Ok(())
     }
 
@@ -2072,10 +2136,26 @@ impl Simulation {
 
     pub(super) fn resolve_daily_politics(&mut self) -> Result<()> {
         self.refresh_political_state()?;
+        let contract_issue_ids = self
+            .social_contracts
+            .iter()
+            .filter(|contract| {
+                contract.kind == SocialContractKind::PoliticalVote
+                    && matches!(
+                        contract.status,
+                        SocialContractStatus::Proposed
+                            | SocialContractStatus::Active
+                            | SocialContractStatus::PartiallyFulfilled
+                    )
+            })
+            .filter_map(|contract| contract.linked_issue_id)
+            .collect::<HashSet<_>>();
         let open_issue_ids = self
             .political_issues
             .iter()
-            .filter(|issue| issue.status == PoliticalIssueStatus::Open)
+            .filter(|issue| {
+                issue.status == PoliticalIssueStatus::Open && contract_issue_ids.contains(&issue.id)
+            })
             .map(|issue| issue.id)
             .collect::<Vec<_>>();
         for issue_id in open_issue_ids {
@@ -2102,6 +2182,8 @@ impl Simulation {
                 .map(|actor_id| self.political_influence(actor_id) / 2)
                 .sum::<i32>();
             let issue = &self.political_issues[issue_index];
+            let supporter_ids = issue.supporter_ids.clone();
+            let opposer_ids = issue.opposer_ids.clone();
             let support = issue.support_score + pressure_support;
             let opposition = issue.opposition_score;
             let net = support - opposition;
@@ -2119,20 +2201,26 @@ impl Simulation {
                 issue.resolved_day = Some(self.day);
                 issue.proposed_by.unwrap_or(0)
             };
+            for supporter_id in supporter_ids {
+                self.resolve_political_vote_contracts(supporter_id, issue_id, true)?;
+            }
+            for opposer_id in opposer_ids {
+                self.resolve_political_vote_contracts(opposer_id, issue_id, false)?;
+            }
             self.push_event(WorldEvent {
                 day: self.day,
                 tick: self.tick_of_day,
                 actor,
                 target: None,
-                kind: EventKind::InstitutionalDispute,
+                kind: EventKind::CouncilDecision,
                 summary: if passed {
                     format!(
-                        "Pauta popular ganhou forca, mas nao muda norma sem decreto: {summary} (saldo politico {net})."
+                        "Conselho registrou maioria politica, mas norma exige decreto: {summary} (saldo politico {net})."
                     )
                 } else {
-                    format!("Pauta rejeitada: {summary} (saldo politico {net}).")
+                    format!("Conselho rejeitou pauta: {summary} (saldo politico {net}).")
                 },
-                impact_tags: vec!["politica".to_string(), "disputa".to_string()],
+                impact_tags: vec!["politica".to_string(), "conselho".to_string()],
             });
             if passed {
                 for faction in self
@@ -2702,6 +2790,7 @@ impl Simulation {
             let role_id = self.agent_role_id(*agent_id).unwrap_or_default();
             let entity = self.find_agent_entity(*agent_id)?;
             let mut entity_mut = self.world.entity_mut(entity);
+            let mut became_inactive = false;
             if let Some(status) = entity_mut.get::<LifeStatusComponent>()
                 && status.0 != AgentLifeStatus::Vivo
             {
@@ -2786,6 +2875,12 @@ impl Simulation {
                         status.0 = AgentLifeStatus::Morto;
                     }
                 }
+                if entity_mut
+                    .get::<LifeStatusComponent>()
+                    .is_some_and(|status| status.0 != AgentLifeStatus::Vivo)
+                {
+                    became_inactive = true;
+                }
                 battle_casualties.push(*agent_id);
             }
             if let Some(mut perception) = entity_mut.get_mut::<InstitutionalPerceptionComponent>() {
@@ -2811,6 +2906,10 @@ impl Simulation {
                 ));
                 perception.0.last_updated_day = self.day;
                 perception.0.clamp_all();
+            }
+            drop(entity_mut);
+            if became_inactive {
+                self.retire_agent_runtime_state(*agent_id, "baixa de guerra")?;
             }
         }
 
@@ -3020,6 +3119,73 @@ impl Simulation {
         }
     }
 
+    fn try_join_equivalent_faction(
+        &mut self,
+        agent_id: u64,
+        objective: FactionObjective,
+        agenda_tag: &str,
+        village_name: &str,
+        founder_name: &str,
+    ) -> Result<bool> {
+        let influence = self.political_influence(agent_id).max(1);
+        let Some(index) = self.political_factions.iter().position(|faction| {
+            let objective_matches = match (faction.objective, objective) {
+                (
+                    Some(FactionObjective::TaxBoycott { .. }),
+                    FactionObjective::TaxBoycott { .. },
+                ) => true,
+                (Some(existing), requested) => existing == requested,
+                _ => false,
+            };
+            faction.agenda_tag == agenda_tag
+                && objective_matches
+                && faction.name.contains(village_name)
+        }) else {
+            return Ok(false);
+        };
+        let faction_name;
+        let changed;
+        {
+            let faction = &mut self.political_factions[index];
+            faction_name = faction.name.clone();
+            changed = !faction.member_ids.contains(&agent_id);
+            if changed {
+                faction.member_ids.push(agent_id);
+                faction.influence = (faction.influence + influence).clamp(0, 10_000);
+                faction.rage = (faction.rage + 3).clamp(0, 100);
+            }
+        }
+        if changed {
+            let summary = format!(
+                "{} adere a faccao '{}' em vez de fundar uma duplicata.",
+                founder_name, faction_name
+            );
+            self.push_event_deduped(
+                WorldEvent {
+                    day: self.day,
+                    tick: self.tick_of_day,
+                    actor: agent_id,
+                    target: None,
+                    kind: EventKind::FactionShift,
+                    summary: summary.clone(),
+                    impact_tags: vec![
+                        "politica".to_string(),
+                        "faccao".to_string(),
+                        agenda_tag.to_string(),
+                        "adesao".to_string(),
+                    ],
+                },
+                u64::from(self.ticks_per_day / 2),
+                |recent| {
+                    recent.kind == EventKind::FactionShift
+                        && recent.actor == agent_id
+                        && recent.summary == summary
+                },
+            );
+        }
+        Ok(true)
+    }
+
     pub(super) fn check_faction_founding(&mut self) -> Result<()> {
         let agent_ids = self.agent_ids();
         for agent_id in agent_ids {
@@ -3047,6 +3213,20 @@ impl Simulation {
                     .min_by_key(|b| b.entrance.manhattan(coord))
                     .cloned();
                 if let Some(farm) = farm_building {
+                    let objective = FactionObjective::FoodRiot {
+                        barn_building_id: farm.id,
+                        target_grains: 15,
+                        grains_stolen: 0,
+                    };
+                    if self.try_join_equivalent_faction(
+                        agent_id,
+                        objective,
+                        "motim_comida",
+                        &v_name,
+                        &founder_name,
+                    )? {
+                        continue;
+                    }
                     let faction_id = self.next_political_faction_id;
                     self.next_political_faction_id += 1;
                     let name = format!("Revoltados do Celeiro de {}", v_name);
@@ -3062,11 +3242,7 @@ impl Simulation {
                         influence,
                         support_issue_ids: Vec::new(),
                         opposition_issue_ids: Vec::new(),
-                        objective: Some(FactionObjective::FoodRiot {
-                            barn_building_id: farm.id,
-                            target_grains: 15,
-                            grains_stolen: 0,
-                        }),
+                        objective: Some(objective),
                         is_action_active: false,
                         rage: 10,
                     });
@@ -3094,6 +3270,18 @@ impl Simulation {
             if let Some(household_id) = self.household_id_for_agent(agent_id) {
                 if let Some(household) = self.household_by_id(household_id) {
                     if household.tax_arrears >= 10 {
+                        let objective = FactionObjective::TaxBoycott {
+                            day_activated: self.day,
+                        };
+                        if self.try_join_equivalent_faction(
+                            agent_id,
+                            objective,
+                            "boicote_imposto",
+                            &v_name,
+                            &founder_name,
+                        )? {
+                            continue;
+                        }
                         let faction_id = self.next_political_faction_id;
                         self.next_political_faction_id += 1;
                         let name = format!("Liga Anti-Imposto de {}", v_name);
@@ -3109,9 +3297,7 @@ impl Simulation {
                             influence,
                             support_issue_ids: Vec::new(),
                             opposition_issue_ids: Vec::new(),
-                            objective: Some(FactionObjective::TaxBoycott {
-                                day_activated: self.day,
-                            }),
+                            objective: Some(objective),
                             is_action_active: false,
                             rage: 10,
                         });
@@ -3154,6 +3340,16 @@ impl Simulation {
                     }
                 }
                 if let Some(leader_agent_id) = leader_id_opt {
+                    let objective = FactionObjective::DeposeLeader { leader_agent_id };
+                    if self.try_join_equivalent_faction(
+                        agent_id,
+                        objective,
+                        "depor_lider",
+                        &v_name,
+                        &founder_name,
+                    )? {
+                        continue;
+                    }
                     let faction_id = self.next_political_faction_id;
                     self.next_political_faction_id += 1;
                     let name = format!("Rebeldes Conspiradores de {}", v_name);
@@ -3169,7 +3365,7 @@ impl Simulation {
                         influence,
                         support_issue_ids: Vec::new(),
                         opposition_issue_ids: Vec::new(),
-                        objective: Some(FactionObjective::DeposeLeader { leader_agent_id }),
+                        objective: Some(objective),
                         is_action_active: false,
                         rage: 15,
                     });
@@ -3210,6 +3406,19 @@ impl Simulation {
                 }
             }
             if let Some((suspect_agent_id, crime_case_id)) = vigilante_case_opt {
+                let objective = FactionObjective::VigilanteJustice {
+                    suspect_agent_id,
+                    crime_case_id,
+                };
+                if self.try_join_equivalent_faction(
+                    agent_id,
+                    objective,
+                    "justica_vigilante",
+                    &v_name,
+                    &founder_name,
+                )? {
+                    continue;
+                }
                 let faction_id = self.next_political_faction_id;
                 self.next_political_faction_id += 1;
                 let name = format!("Vigilantes de {}", v_name);
@@ -3225,10 +3434,7 @@ impl Simulation {
                     influence,
                     support_issue_ids: Vec::new(),
                     opposition_issue_ids: Vec::new(),
-                    objective: Some(FactionObjective::VigilanteJustice {
-                        suspect_agent_id,
-                        crime_case_id,
-                    }),
+                    objective: Some(objective),
                     is_action_active: false,
                     rage: 20,
                 });

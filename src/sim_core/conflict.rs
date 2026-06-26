@@ -123,6 +123,10 @@ impl Simulation {
             .map(|(item, _)| item.display_name.clone())
             .unwrap_or_else(|| "mãos nuas".to_string());
         drop(weapon_profile);
+        let target_position = self.debug_agent_position(target_id).unwrap_or_else(|_| {
+            self.agent_position(target_id)
+                .unwrap_or(TileCoord { x: 0, y: 0 })
+        });
         let mut visceral_desc = String::new();
 
         {
@@ -343,6 +347,16 @@ impl Simulation {
                     .0 = AgentLifeStatus::Incapacitado;
             }
         }
+        if target_died || target_incapacitated {
+            self.retire_agent_runtime_state(
+                target_id,
+                if target_died {
+                    "morto em combate"
+                } else {
+                    "incapacitado em combate"
+                },
+            )?;
+        }
 
         {
             let actor_entity = self.find_agent_entity(actor_id)?;
@@ -380,6 +394,37 @@ impl Simulation {
                 weapon_name.clone(),
             ],
         });
+        let horror_severity = (damage
+            + weapon_severity
+            + if target_died {
+                55
+            } else if target_incapacitated {
+                35
+            } else {
+                0
+            }
+            + if damage >= 16 { 20 } else { 0 })
+        .clamp(0, 100);
+        if horror_severity >= 45 {
+            let horror_kind = if target_died || damage >= 16 {
+                EventKind::BodyHorror
+            } else {
+                EventKind::Panic
+            };
+            self.register_horror_event(
+                actor_id,
+                Some(target_id),
+                target_position,
+                horror_kind,
+                horror_severity,
+                format!("{}", visceral_desc),
+                vec![
+                    "violencia".to_string(),
+                    "mutilacao".to_string(),
+                    "trauma".to_string(),
+                ],
+            )?;
+        }
         self.apply_relation_delta(
             target_id,
             actor_id,
@@ -888,6 +933,10 @@ impl Simulation {
         }
         let actor_name = self.agent_name(actor_id)?;
         let target_name = self.agent_name(target_id)?;
+        let target_position = self.debug_agent_position(target_id).unwrap_or_else(|_| {
+            self.agent_position(target_id)
+                .unwrap_or(TileCoord { x: 0, y: 0 })
+        });
         self.push_event(WorldEvent {
             day: self.day,
             tick: self.tick_of_day,
@@ -900,6 +949,29 @@ impl Simulation {
             ),
             impact_tags: vec!["punicao".to_string(), "justica".to_string()],
         });
+        let punishment_horror = if justice_severity == JusticeSeverity::Severe {
+            i32::from(severity).clamp(0, 100)
+        } else {
+            (i32::from(severity) - 25).clamp(0, 100)
+        };
+        if punishment_horror >= 55 {
+            self.register_horror_event(
+                actor_id,
+                Some(target_id),
+                target_position,
+                EventKind::Atrocity,
+                punishment_horror,
+                format!(
+                    "punição pública brutal contra {target_name} no caso {case_id} ({:?})",
+                    sentence
+                ),
+                vec![
+                    "punicao".to_string(),
+                    "atrocidade".to_string(),
+                    "coercao".to_string(),
+                ],
+            )?;
+        }
 
         self.mark_public_humiliation(
             target_id,
@@ -1254,6 +1326,7 @@ impl Simulation {
                 .ok_or_else(|| anyhow!("missing destination label component"))?
                 .0 = None;
         }
+        self.retire_agent_runtime_state(agent_id, "morte consolidada")?;
         self.clear_active_economic_task(agent_id)?;
         self.interrupt_agent_conversations(agent_id, ConversationOutcome::PhysicalConflict)?;
         for combat in self.combats.iter_mut().filter(|combat| {

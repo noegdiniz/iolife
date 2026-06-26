@@ -484,6 +484,33 @@ impl Simulation {
             impact_tags: vec!["violencia".to_string(), "fauna".to_string()],
         });
 
+        let target_position = self
+            .debug_agent_position(target_agent_id)
+            .unwrap_or(TileCoord { x: 0, y: 0 });
+        let horror_severity = (damage + if agent_died { 55 } else { 15 }).clamp(0, 100);
+        if horror_severity >= 35 {
+            self.register_horror_event(
+                creature_id,
+                Some(target_agent_id),
+                target_position,
+                if agent_died {
+                    EventKind::BodyHorror
+                } else {
+                    EventKind::Panic
+                },
+                horror_severity,
+                format!(
+                    "{} deixou marcas monstruosas em {} durante o ataque",
+                    c_name, agent_name
+                ),
+                vec![
+                    "criatura".to_string(),
+                    "monstruoso".to_string(),
+                    "panico".to_string(),
+                ],
+            )?;
+        }
+
         if agent_died {
             self.mark_agent_dead(
                 target_agent_id,

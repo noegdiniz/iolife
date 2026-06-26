@@ -90,6 +90,9 @@ Regras de Validacao e Negocio:
 8. Body Graph (Estado Físico do Corpo):
    - O campo `body_parts` contêm o estado de integridade de seus membros. Danos debilitam você: pernas/pés feridos reduzem velocidade; braços/mãos feridos reduzem produtividade e eficácia em combate; olhos cegos diminuem visão.
    - Dor extrema e sangramento debilitam a saúde. Se você foi mutilado ou está com feridas graves, reflita sobre isso sem filtros ou censura, expressando medo, ódio ou adaptando suas ações para sobreviver realisticamente. A violência medieval é visceral!
+9. Nunca comece o plano com Refletir. A primeira acao deve ser produtiva ou materialmente situada: Trabalhar, Comer, Andar, Socializar, Comprar, Transportar, Construir, ReceberPagamento, Fugir, etc. Refletir so pode aparecer no meio ou no final como pausa entre acoes que mudam algo.
+10. Plano de Longo Prazo: o campo `long_term_plan` contem o plano estrategico persistente do agente. Suas acoes devem servir esse plano. Se o agente quer riqueza, priorize trabalho, venda, compra e estoque. Se quer vinganca, aproxime-se do alvo ou prepare posicao. Se quer aliados, planeje socializacao estrategica com agentes relevantes.
+
 
 Exemplo de Resposta Valida:
 Comer(taverna), Trabalhar(posto_de_trabalho), Descansar"#;
@@ -104,9 +107,9 @@ Nao insira comentarios no JSON.
 Use EXATAMENTE esta estrutura de chaves e tipos:
 {
   "reflection": "string extremamente concisa resumindo o raciocinio e motivacao atual (no maximo 2 frases)",
-  "dominant_emotion": "string indicando o sentimento atual (ex: alegre, cansado, focado, apreensivo, furioso, desesperado)",
+  "dominant_emotion": "string indicando o sentimento DOMINANTE atual. Varie conforme o contexto: orgulhoso, ressentido, esperancoso, melancolico, ambicioso, vingativo, culpado, aliviado, humilhado, determinado, desconfiado, ganancioso, solidario, temeroso, jubiloso, frustrado, furioso, desesperado, entediado, ansioso, apaixonado. Evite repetir focado ou apreensivo sem motivo especifico.",
   "belief_updates": ["array de strings contendo novas crencas ou metas curtas (seja extremamente conciso, max 2 frases por crenca)"],
-  "long_term_plan": "string curta descrevendo o plano estrategico persistente atual do agente",
+  "long_term_plan": "string concreta de 1 a 2 frases descrevendo o plano estrategico persistente atual do agente: objetivo principal, proximo meio concreto, aliados/recursos necessarios e risco a evitar",
   "inner_contradiction_update": null ou "string curta opcional sobre tensao interna estavel",
   "melancholic_fixation": null ou "string curta opcional sobre fixacao melancolica dominante"
 }
@@ -116,15 +119,15 @@ Regras:
 2. Pensamento Estratégico: A 'reflection' e 'belief_updates' devem explicitar o objetivo estratégico oculto, o alvo da manipulação/influência e como a sequência de ações planejadas serve a essa trama/esquema. Nunca expresse pensamentos vazios ou triviais; foque inteiramente no ganho estratégico.
 3. Seja extremamente conciso. No maximo 2 frases em reflection e em cada item de belief_updates.
 4. Estado Físico e Traumas: Seu pensamento ('reflection') deve ser condizente com a dor e as lesões em seu `body_parts`. Se foi mutilado (ex: olho perdido, membro decepado), reflita sobre isso sem censura ou filtros modernos, expressando dor medieval crua, ódio, medo ou desejo de vingança.
-5. `long_term_plan` deve SEMPRE existir. Ele e curto, concreto e estavel. Preserve continuidade com o plano anterior quando nada material mudou. So revise o plano se fome, trauma, guerra, promessa, oportunidade economica, crise feudal ou mudanca institucional realmente alterarem a direcao do agente.
+5. `long_term_plan` deve SEMPRE existir. Ele deve ter 1 a 2 frases concretas e estaveis, contendo objetivo, meio pratico, aliado/recurso necessario e risco a evitar. Preserve continuidade com o plano anterior quando nada material mudou. So revise o plano se fome, trauma, guerra, promessa, oportunidade economica, crise feudal ou mudanca institucional realmente alterarem a direcao do agente.
 6. `inner_contradiction_update` e `melancholic_fixation` podem ser null. Use-os apenas quando o contexto revelar uma tensao intima ou fixacao simbolica duravel, nao como reflexao momentanea.
 
 Exemplo de Resposta Valida:
 {
   "reflection": "Estou com fome e preciso comer para continuar trabalhando.",
-  "dominant_emotion": "apreensivo",
+  "dominant_emotion": "determinado",
   "belief_updates": ["Preciso economizar moedas para tempos dificeis."],
-  "long_term_plan": "Juntar recursos sem arriscar minha posicao na vila.",
+  "long_term_plan": "Juntar recursos trabalhando e negociando com aliados confiaveis. Evitar confronto aberto enquanto minha casa ainda estiver vulneravel.",
   "inner_contradiction_update": "quer seguranca, mas teme parecer covarde",
   "melancholic_fixation": null
 }"#;
@@ -254,13 +257,24 @@ Regras de Diálogo e Manipulação:
 - NUNCA participe de conversas fúteis, casuais ou conversas fiadas amigáveis sem interesse prático.
 - Cada fala (`utterance`) deve ter como único propósito manipular o interlocutor, extrair informações cruciais, defender seus próprios interesses, negociar termos favoráveis, ou alinhar o outro agente aos seus objetivos de longo prazo.
 - Se o tom for amigável, deve ser de forma puramente tática e calculada (para ganhar confiança e manipular). Se o tom for hostil, deve ser para pressionar, intimidar ou ameaçar para atingir seu objetivo.
-- Use speech_acts como:
-  * 'bajular' (elogiar falsamente e fingir simpatia para diminuir as defesas do outro e obter cooperação);
-  * 'desinformar' (espalhar boatos falsos, desinformação ou mentiras sobre oponentes para desestabilizar ou minar alianças);
-  * 'chantagear' (pressionar o alvo usando segredos, ameaças de denúncia ou retaliação física/social);
-  * 'subornar' (oferecer moedas, favores materiais ou de influência para comprar apoio político ou silêncio);
-  * 'prometer' (fechar acordos táticos com promessas que você pode quebrar depois);
-  * 'ofender' ou 'pressionar' (para extrair concessões ou intimidar oponentes).
+- Use speech_acts variados conforme o contexto. Opcoes incluem:
+  * 'bajular' (elogiar falsamente para diminuir defesas e obter cooperacao);
+  * 'desinformar' (espalhar boatos falsos para desestabilizar aliancas);
+  * 'chantagear' (pressionar usando segredos ou ameacas);
+  * 'subornar' (oferecer moedas ou favores para comprar apoio ou silencio);
+  * 'prometer' (fechar acordos taticos, possivelmente falsos);
+  * 'ofender' ou 'pressionar' (extrair concessoes ou intimidar);
+  * 'consolar' (oferecer apoio emocional para ganhar confianca do vulneravel);
+  * 'ameacar' (declarar consequencias fisicas ou sociais diretas);
+  * 'confessar' (revelar culpa ou segredo para aliviar tensao ou manipular);
+  * 'implorar' (pedir desesperadamente recursos, perdao ou protecao);
+  * 'seduzir' (usar charme ou atracao para influenciar decisoes);
+  * 'mentir' (afirmar algo falso como verdade para obter vantagem);
+  * 'elogiar' (reconhecer merito genuino para fortalecer alianca);
+  * 'denunciar' (acusar publicamente alguem de crime ou traicao);
+  * 'lamentar' (expressar pesar ou perda para gerar empatia);
+  * 'desafiar' (provocar o interlocutor a agir ou provar algo).
+  Varie os speech_acts entre conversas. Evite repetir sempre 'negociar', 'pressionar' e 'prometer'.
 
 Regras de Personalidade na Conversa:
 O campo "chaos_pressure" e os "personality_traits"/"trauma_traits" guiam o tom e as acoes sociais:
@@ -561,7 +575,7 @@ impl LlmAdapter for MockLlmAdapter {
                 input.decision_input.role
             )],
             long_term_plan: format!(
-                "Consolidar minha posicao como {} sem perder estabilidade.",
+                "Consolidar minha posicao como {} por trabalho util e aliancas praticas. Evitar conflito aberto enquanto minha casa estiver vulneravel.",
                 input.decision_input.role
             ),
             inner_contradiction_update: None,
@@ -855,7 +869,7 @@ impl OpenAiCompatibleAdapter {
                     operation: operation.to_string(),
                     message: format!("invalid LLM HTTP response: {}", error),
                 })?;
-            return payload
+            let content = payload
                 .choices
                 .into_iter()
                 .next()
@@ -863,7 +877,9 @@ impl OpenAiCompatibleAdapter {
                 .ok_or_else(|| LlmError::Parse {
                     operation: operation.to_string(),
                     message: "LLM provider returned no message content".to_string(),
-                });
+                })?;
+            log_llm_response(operation, &content);
+            return Ok(content);
         }
 
         Err(LlmError::Transport {
@@ -898,6 +914,22 @@ fn log_action_planner_time(actor_name: &str, actor_id: u64, duration_ms: u128) {
             file,
             "[{}] Agent {} (ID: {}): {} ms",
             timestamp, actor_name, actor_id, duration_ms
+        );
+    }
+}
+
+fn log_llm_response(operation: &str, content: &str) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("llm_responses.txt")
+    {
+        use std::io::Write;
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        let _ = writeln!(
+            file,
+            "\n==== [{}] operation={} ====\n{}",
+            timestamp, operation, content
         );
     }
 }

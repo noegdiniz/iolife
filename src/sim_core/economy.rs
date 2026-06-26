@@ -2385,15 +2385,21 @@ impl Simulation {
     pub(super) fn apply_reflect(&mut self, actor_id: u64) -> Result<()> {
         let name = self.agent_name(actor_id)?;
         let entity = self.find_agent_entity(actor_id)?;
+        let stress_reduced;
         {
             let mut entity_mut = self.world.entity_mut(entity);
             let mut state = entity_mut
                 .get_mut::<StateComponent>()
                 .ok_or_else(|| anyhow!("missing state component"))?;
+            let before = state.0.stress;
+            if before < 45 {
+                return Ok(());
+            }
             state.0.stress = (state.0.stress - 8).clamp(0, 100);
             state.0.mood = (state.0.mood + 2).clamp(0, 100);
+            stress_reduced = before - state.0.stress >= 6;
         }
-        self.push_event(WorldEvent {
+        let event = WorldEvent {
             day: self.day,
             tick: self.tick_of_day,
             actor: actor_id,
@@ -2401,7 +2407,16 @@ impl Simulation {
             kind: EventKind::Reflection,
             summary: format!("{name} se recolhe para refletir em um lugar calmo."),
             impact_tags: vec!["reflexao".to_string()],
-        });
+        };
+        if stress_reduced {
+            let summary = event.summary.clone();
+            self.push_event_deduped(event, u64::from(self.ticks_per_day / 2), |recent| {
+                recent.kind == EventKind::Reflection
+                    && recent.actor == actor_id
+                    && recent.target.is_none()
+                    && recent.summary == summary
+            });
+        }
         Ok(())
     }
 
@@ -3217,21 +3232,34 @@ impl Simulation {
                         grains_left -= needed;
                         served_households.push(hh_pri.id);
 
-                        self.push_event(WorldEvent {
-                            day: self.day,
-                            tick: self.tick_of_day,
-                            actor: leader_id.unwrap_or(0),
-                            target: hh_pri.members.first().copied(),
-                            kind: EventKind::Commerce,
-                            summary: format!(
-                                "LÃ­der distribuiu {} grÃ£o(s) para {} (Favorecido: {}).",
-                                needed, hh_pri.name, hh_pri.is_favored
-                            ),
-                            impact_tags: vec![
-                                "racionamento".to_string(),
-                                "distribuicao".to_string(),
-                            ],
-                        });
+                        let actor = leader_id.unwrap_or(0);
+                        let target = hh_pri.members.first().copied();
+                        let summary = format!(
+                            "LÃƒÂ­der distribuiu {} grÃƒÂ£o(s) para {} (Favorecido: {}).",
+                            needed, hh_pri.name, hh_pri.is_favored
+                        );
+                        self.push_event_deduped(
+                            WorldEvent {
+                                day: self.day,
+                                tick: self.tick_of_day,
+                                actor,
+                                target,
+                                kind: EventKind::Commerce,
+                                summary: summary.clone(),
+                                impact_tags: vec![
+                                    "racionamento".to_string(),
+                                    "distribuicao".to_string(),
+                                    format!("household:{}", hh_pri.id),
+                                ],
+                            },
+                            u64::from(self.ticks_per_day / 2),
+                            |recent| {
+                                recent.kind == EventKind::Commerce
+                                    && recent.actor == actor
+                                    && recent.target == target
+                                    && recent.summary == summary
+                            },
+                        );
                     } else {
                         let was_prejudiced = hh_priorities.iter().any(|other| {
                             served_households.contains(&other.id)
@@ -5391,6 +5419,7 @@ impl Simulation {
                 InjuryComponent::default(),
                 InstitutionalPerceptionComponent::default(),
                 PsychologicalStateComponent::default(),
+                HorrorExposureComponent::default(),
                 RumorBeliefComponent::default(),
                 StoryBeliefComponent::default(),
             ),
@@ -5464,6 +5493,7 @@ impl Simulation {
                 InjuryComponent::default(),
                 InstitutionalPerceptionComponent::default(),
                 PsychologicalStateComponent::default(),
+                HorrorExposureComponent::default(),
                 RumorBeliefComponent::default(),
                 StoryBeliefComponent::default(),
             ),

@@ -45,6 +45,12 @@ pub(super) enum UtilityDirectiveKind {
     ExibirStatus,
     SubmeterSe,
     PrepararVinganca,
+    Congelar,
+    FugirEmPanico,
+    EsconderSe,
+    ProtegerFerido,
+    EvitarLugarProfanado,
+    EntrarEmFrenesi,
     RepetirRitual,
 }
 
@@ -67,6 +73,12 @@ impl UtilityDirectiveKind {
             Self::ExibirStatus => "exibir_status",
             Self::SubmeterSe => "submeter_se",
             Self::PrepararVinganca => "preparar_vinganca",
+            Self::Congelar => "congelar",
+            Self::FugirEmPanico => "fugir_em_panico",
+            Self::EsconderSe => "esconder_se",
+            Self::ProtegerFerido => "proteger_ferido",
+            Self::EvitarLugarProfanado => "evitar_lugar_profanado",
+            Self::EntrarEmFrenesi => "entrar_em_frenesi",
             Self::RepetirRitual => "repetir_ritual",
         }
     }
@@ -123,6 +135,10 @@ pub(super) struct RealtimeUtilityContext {
     pub feudal_power: i32,
     pub has_direct_lord: bool,
     pub is_authority_or_official: bool,
+    pub horror: HorrorExposure,
+    pub local_horror: TerritoryHorrorState,
+    pub nearby_grievous_wounded: Option<u64>,
+    pub horrific_scene_nearby: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -144,6 +160,12 @@ pub(super) struct UtilityScoreBreakdown {
     pub submit: i32,
     pub prepare_revenge: i32,
     pub symbolic_ritual: i32,
+    pub freeze: i32,
+    pub panic_flee: i32,
+    pub hide: i32,
+    pub protect_wounded: i32,
+    pub avoid_profaned_place: i32,
+    pub frenzy: i32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -534,7 +556,8 @@ impl Simulation {
 
         if changed {
             self.clear_navigation_keep_intent(agent_id)?;
-            self.push_event(WorldEvent {
+            let directive_tag = decision.kind.as_str().to_string();
+            let event = WorldEvent {
                 day: self.day,
                 tick: self.tick_of_day,
                 actor: agent_id,
@@ -548,10 +571,25 @@ impl Simulation {
                 ),
                 impact_tags: vec![
                     "utility_ai".to_string(),
-                    decision.kind.as_str().to_string(),
+                    directive_tag.clone(),
                     decision.stance.as_str().to_string(),
                 ],
-            });
+            };
+            let target = event.target;
+            let noisy = matches!(
+                directive_tag.as_str(),
+                "repetir_ritual" | "buscar_privacidade" | "exibir_status" | "retirar_se"
+            );
+            if noisy {
+                self.push_event_deduped(event, u64::from(self.ticks_per_day / 2), |recent| {
+                    recent.kind == EventKind::Routine
+                        && recent.actor == agent_id
+                        && recent.target == target
+                        && recent.impact_tags.iter().any(|tag| tag == &directive_tag)
+                });
+            } else {
+                self.push_event(event);
+            }
         }
         Ok(())
     }
@@ -632,6 +670,22 @@ impl Simulation {
             breakdown.continue_vital_task,
             stance,
         )?);
+        consider(self.freeze_decision(agent_id, &context, breakdown.freeze, stance)?);
+        consider(self.panic_flee_decision(agent_id, &context, breakdown.panic_flee, stance)?);
+        consider(self.hide_decision(agent_id, &context, breakdown.hide, stance)?);
+        consider(self.protect_wounded_decision(
+            agent_id,
+            &context,
+            breakdown.protect_wounded,
+            stance,
+        )?);
+        consider(self.avoid_profaned_place_decision(
+            agent_id,
+            &context,
+            breakdown.avoid_profaned_place,
+            stance,
+        )?);
+        consider(self.frenzy_decision(agent_id, &context, breakdown.frenzy, stance)?);
         consider(self.rest_decision(agent_id, &context, breakdown.rest, stance)?);
         consider(self.flee_decision(agent_id, &context, breakdown.flee, stance)?);
         consider(self.fight_decision(agent_id, &context, breakdown.fight, stance)?);
@@ -739,6 +793,41 @@ impl Simulation {
             .and_then(|household| household.direct_lord_agent_id)
             .is_some();
         let is_authority_or_official = self.is_authority_role(&role_id) || has_feudal_title;
+        let horror = self
+            .find_agent_entity(agent_id)
+            .ok()
+            .and_then(|entity| {
+                self.world
+                    .entity(entity)
+                    .get::<HorrorExposureComponent>()
+                    .map(|component| component.0.clone())
+            })
+            .unwrap_or_default();
+        let local_horror = self
+            .territories
+            .iter()
+            .find(|territory| territory.tile_coords.contains(&position))
+            .map(|territory| territory.horror.clone())
+            .unwrap_or_default();
+        let nearby_grievous_wounded = self
+            .agent_ids()
+            .into_iter()
+            .filter(|other_id| *other_id != agent_id)
+            .find(|other_id| {
+                self.debug_agent_position(*other_id)
+                    .map(|coord| coord.manhattan(position) <= 3)
+                    .unwrap_or(false)
+                    && self
+                        .agent_injury(*other_id)
+                        .map(|injury| {
+                            injury.bleeding >= 5 || injury.pain >= 75 || injury.severe_wounds >= 2
+                        })
+                        .unwrap_or(false)
+            });
+        let horrific_scene_nearby = horror.shock >= 45
+            || local_horror.dread >= 45
+            || local_horror.desecration >= 35
+            || local_horror.monstrous_presence >= 35;
 
         Ok(RealtimeUtilityContext {
             hunger: state.hunger,
@@ -781,12 +870,24 @@ impl Simulation {
             feudal_power,
             has_direct_lord,
             is_authority_or_official,
+            horror,
+            local_horror,
+            nearby_grievous_wounded,
+            horrific_scene_nearby,
         })
     }
 
     fn reactive_stance_for_context(&self, context: &RealtimeUtilityContext) -> ReactiveStance {
         let psych = &context.psychological_state;
         let threat_pressure = (100 - context.health).max(0) + context.pain + context.bleeding * 3;
+        if context.horror.shock + context.horror.dread + context.local_horror.dread >= 130 {
+            return ReactiveStance::ProtectiveRetreat;
+        }
+        if context.horror.revulsion + psych.anger + psych.dominance_drive >= 130
+            && context.active_combat_target.is_some()
+        {
+            return ReactiveStance::PredatoryOpportunism;
+        }
         if (context.urgent_legal_target.is_some()
             || (context.food_supply_emergency && context.is_authority_or_official))
             && self.is_authority_role(&context.role_id)
@@ -1098,7 +1199,7 @@ impl Simulation {
         {
             scores.prepare_revenge += 18;
         }
-        if context.hunger < 70 && context.active_combat_target.is_none() && context.health > 40 {
+        if context.hunger < 55 && context.active_combat_target.is_none() && context.health > 55 {
             let strongest_symbol = psych
                 .personal_symbols
                 .iter()
@@ -1111,11 +1212,51 @@ impl Simulation {
                 .map(|pattern| pattern.strength)
                 .max()
                 .unwrap_or(0);
-            let symbolic_affect = psych.grief.max(psych.guilt).max(psych.trauma) / 3;
-            scores.symbolic_ritual = (strongest_symbol / 2)
-                + (strongest_coping / 3)
-                + symbolic_affect
-                + psych.humiliation.max(0) / 5;
+            let symbolic_affect = psych
+                .grief
+                .max(psych.guilt)
+                .max(psych.trauma)
+                .max(psych.humiliation.max(0));
+            if strongest_symbol >= 65 && symbolic_affect >= 45 {
+                scores.symbolic_ritual =
+                    (strongest_symbol / 2) + (strongest_coping / 3) + symbolic_affect / 2;
+            }
+        }
+        let horror_pressure = context.horror.dread
+            + context.horror.shock
+            + context.horror.revulsion / 2
+            + context.local_horror.dread / 2
+            + context.local_horror.desecration / 3
+            + context.local_horror.monstrous_presence / 2;
+        if horror_pressure >= 55 && context.hunger < 85 {
+            scores.panic_flee = horror_pressure / 2 + psych.fear.max(0) / 2 + danger_pressure / 4;
+            scores.hide = horror_pressure / 3 + psych.submission_drive.max(0) / 3;
+            if context.horrific_scene_nearby {
+                scores.panic_flee += 8;
+                scores.hide += 4;
+            }
+        }
+        if context.horror.shock >= 55
+            && context.active_combat_target.is_none()
+            && context.hunger < 80
+        {
+            scores.freeze = context.horror.shock + context.horror.dread / 3;
+        }
+        if context.local_horror.desecration >= 45 && context.hunger < 70 && context.health > 35 {
+            scores.avoid_profaned_place =
+                context.local_horror.desecration + context.horror.revulsion / 2;
+        }
+        if context.nearby_grievous_wounded.is_some()
+            && context.active_combat_target.is_none()
+            && context.hunger < 75
+        {
+            scores.protect_wounded =
+                45 + psych.guilt.max(psych.hope).max(0) / 3 + context.horror.dread / 4;
+        }
+        if context.active_combat_target.is_some()
+            && context.horror.revulsion + psych.anger + psych.dominance_drive > psych.fear + 90
+        {
+            scores.frenzy = 55 + psych.anger / 2 + context.horror.revulsion / 2;
         }
         match stance {
             ReactiveStance::InstitutionalAssertion => {
@@ -1160,6 +1301,8 @@ impl Simulation {
             scores.institutional_duty += 5;
             scores.withdraw_social += 5;
             scores.prepare_revenge += 5;
+            scores.panic_flee += 5;
+            scores.hide += 5;
         }
 
         Ok(scores)
@@ -1288,6 +1431,217 @@ impl Simulation {
             reason: format!("continuidade de tarefa vital: {}", task.description),
             stance,
             focus_target: None,
+        }))
+    }
+
+    fn freeze_decision(
+        &mut self,
+        _agent_id: u64,
+        context: &RealtimeUtilityContext,
+        score: i32,
+        stance: ReactiveStance,
+    ) -> Result<Option<UtilityDecision>> {
+        if score < 70 || context.active_combat_target.is_some() || context.hunger >= 80 {
+            return Ok(None);
+        }
+        Ok(Some(UtilityDecision {
+            kind: UtilityDirectiveKind::Congelar,
+            intent: AgentIntent {
+                kind: IntentKind::Refletir,
+                target_agent: None,
+                target_semantic: Some("choque horrivel".to_string()),
+                justification: "O choque imediato impede uma aÃ§Ã£o ordenada por alguns instantes."
+                    .to_string(),
+                dominant_emotion: "choque".to_string(),
+                perceived_risk: 8,
+                belief_updates: vec!["O horror visto agora ainda domina meu corpo.".to_string()],
+                priority: 8,
+                social_move: None,
+            },
+            score,
+            thought: "Meu corpo trava diante do horror antes que eu consiga escolher melhor."
+                .to_string(),
+            reason: "choque horrÃ­vel recente".to_string(),
+            stance,
+            focus_target: None,
+        }))
+    }
+
+    fn panic_flee_decision(
+        &mut self,
+        _agent_id: u64,
+        context: &RealtimeUtilityContext,
+        score: i32,
+        stance: ReactiveStance,
+    ) -> Result<Option<UtilityDecision>> {
+        if score < 55 || context.hunger >= 90 {
+            return Ok(None);
+        }
+        Ok(Some(UtilityDecision {
+            kind: UtilityDirectiveKind::FugirEmPanico,
+            intent: AgentIntent {
+                kind: IntentKind::Fugir,
+                target_agent: None,
+                target_semantic: None,
+                justification: "PÃ¢nico e horror local tornam permanecer aqui perigoso demais."
+                    .to_string(),
+                dominant_emotion: "pavor".to_string(),
+                perceived_risk: 9,
+                belief_updates: vec![
+                    "Preciso sair do foco de horror antes de quebrar por dentro.".to_string(),
+                ],
+                priority: 10,
+                social_move: None,
+            },
+            score,
+            thought: "NÃ£o Ã© prudÃªncia: Ã© pÃ¢nico. Preciso fugir deste horror.".to_string(),
+            reason: "pavor coletivo ou horror territorial".to_string(),
+            stance,
+            focus_target: context.active_combat_target,
+        }))
+    }
+
+    fn hide_decision(
+        &mut self,
+        agent_id: u64,
+        context: &RealtimeUtilityContext,
+        score: i32,
+        stance: ReactiveStance,
+    ) -> Result<Option<UtilityDecision>> {
+        if score < 50 || context.active_combat_target.is_some() || context.hunger >= 80 {
+            return Ok(None);
+        }
+        Ok(Some(UtilityDecision {
+            kind: UtilityDirectiveKind::EsconderSe,
+            intent: AgentIntent {
+                kind: IntentKind::Andar,
+                target_agent: None,
+                target_semantic: self.private_retreat_place(agent_id)?,
+                justification: "Esconder-se reduz exposiÃ§Ã£o ao horror e Ã  violÃªncia prÃ³xima."
+                    .to_string(),
+                dominant_emotion: "pavor".to_string(),
+                perceived_risk: 7,
+                belief_updates: vec!["Ficar visÃ­vel agora me torna vulnerÃ¡vel.".to_string()],
+                priority: 8,
+                social_move: None,
+            },
+            score,
+            thought: "Preciso me esconder antes que este lugar me arraste para mais violÃªncia."
+                .to_string(),
+            reason: "horror local favorece esconder-se".to_string(),
+            stance,
+            focus_target: None,
+        }))
+    }
+
+    fn protect_wounded_decision(
+        &mut self,
+        _agent_id: u64,
+        context: &RealtimeUtilityContext,
+        score: i32,
+        stance: ReactiveStance,
+    ) -> Result<Option<UtilityDecision>> {
+        let Some(target_id) = context.nearby_grievous_wounded else {
+            return Ok(None);
+        };
+        if score < 55 {
+            return Ok(None);
+        }
+        Ok(Some(UtilityDecision {
+            kind: UtilityDirectiveKind::ProtegerFerido,
+            intent: AgentIntent {
+                kind: IntentKind::Socializar,
+                target_agent: Some(target_id),
+                target_semantic: None,
+                justification: "HÃ¡ alguÃ©m gravemente ferido perto demais para ignorar."
+                    .to_string(),
+                dominant_emotion: "urgencia".to_string(),
+                perceived_risk: 6,
+                belief_updates: vec![
+                    "Proteger feridos reduz pÃ¢nico e culpa coletiva.".to_string(),
+                ],
+                priority: 8,
+                social_move: Some(SocialMove::Favor),
+            },
+            score,
+            thought: "Se eu abandonar este ferido, o horror deste lugar piora.".to_string(),
+            reason: "ferido grave prÃ³ximo".to_string(),
+            stance,
+            focus_target: Some(target_id),
+        }))
+    }
+
+    fn avoid_profaned_place_decision(
+        &mut self,
+        agent_id: u64,
+        context: &RealtimeUtilityContext,
+        score: i32,
+        stance: ReactiveStance,
+    ) -> Result<Option<UtilityDecision>> {
+        if score < 55 || context.active_combat_target.is_some() {
+            return Ok(None);
+        }
+        Ok(Some(UtilityDecision {
+            kind: UtilityDirectiveKind::EvitarLugarProfanado,
+            intent: AgentIntent {
+                kind: IntentKind::Andar,
+                target_agent: None,
+                target_semantic: self.private_retreat_place(agent_id)?,
+                justification:
+                    "O lugar estÃ¡ marcado por morte/profanaÃ§Ã£o e corrÃ³i minha estabilidade."
+                        .to_string(),
+                dominant_emotion: "repulsa".to_string(),
+                perceived_risk: 6,
+                belief_updates: vec![
+                    "Este lugar precisa ser evitado ou enfrentado com cuidado.".to_string(),
+                ],
+                priority: 7,
+                social_move: None,
+            },
+            score,
+            thought: "Este lugar estÃ¡ errado demais; sair daqui Ã© uma forma de sobreviver."
+                .to_string(),
+            reason: "evitar local profanado".to_string(),
+            stance,
+            focus_target: None,
+        }))
+    }
+
+    fn frenzy_decision(
+        &mut self,
+        _agent_id: u64,
+        context: &RealtimeUtilityContext,
+        score: i32,
+        stance: ReactiveStance,
+    ) -> Result<Option<UtilityDecision>> {
+        let Some(target_id) = context.active_combat_target else {
+            return Ok(None);
+        };
+        if score < 70 {
+            return Ok(None);
+        }
+        Ok(Some(UtilityDecision {
+            kind: UtilityDirectiveKind::EntrarEmFrenesi,
+            intent: AgentIntent {
+                kind: IntentKind::Combater,
+                target_agent: Some(target_id),
+                target_semantic: None,
+                justification:
+                    "Repulsa, raiva e medo se convertem em violÃªncia defensiva imediata."
+                        .to_string(),
+                dominant_emotion: "frenesi".to_string(),
+                perceived_risk: 10,
+                belief_updates: vec![
+                    "O horror diante de mim precisa ser repelido agora.".to_string(),
+                ],
+                priority: 10,
+                social_move: None,
+            },
+            score,
+            thought: "O horror vira fÃºria; se eu parar, ele me engole.".to_string(),
+            reason: "frenesi por horror em combate".to_string(),
+            stance,
+            focus_target: Some(target_id),
         }))
     }
 
@@ -1593,11 +1947,19 @@ impl Simulation {
     fn seek_privacy_decision(
         &mut self,
         agent_id: u64,
-        _context: &RealtimeUtilityContext,
+        context: &RealtimeUtilityContext,
         score: i32,
         stance: ReactiveStance,
     ) -> Result<Option<UtilityDecision>> {
-        if score <= 0 {
+        if score < 60 {
+            return Ok(None);
+        }
+        let psych = &context.psychological_state;
+        let deep_pressure = psych.humiliation.max(0) >= 50
+            || psych.trauma >= 55
+            || psych.fear >= 65
+            || context.recent_public_humiliation;
+        if !deep_pressure {
             return Ok(None);
         }
         Ok(Some(UtilityDecision {
@@ -1636,7 +1998,13 @@ impl Simulation {
         let Some(target_id) = context.relevant_social_target else {
             return Ok(None);
         };
-        if score <= 0 || !matches!(stance, ReactiveStance::StatusDisplay) {
+        if score < 70 || !matches!(stance, ReactiveStance::StatusDisplay) {
+            return Ok(None);
+        }
+        let psych = &context.psychological_state;
+        let public_status_event = context.witness_count >= 2
+            && (psych.status_anxiety >= 45 || psych.pride >= 55 || psych.humiliation.max(0) >= 45);
+        if !public_status_event {
             return Ok(None);
         }
         Ok(Some(UtilityDecision {
@@ -1746,12 +2114,20 @@ impl Simulation {
 
     fn symbolic_ritual_decision(
         &mut self,
-        _agent_id: u64,
+        agent_id: u64,
         context: &RealtimeUtilityContext,
         score: i32,
         stance: ReactiveStance,
     ) -> Result<Option<UtilityDecision>> {
-        if score <= 0 || context.active_combat_target.is_some() || context.hunger >= 70 {
+        if score < 85 || context.active_combat_target.is_some() || context.hunger >= 55 {
+            return Ok(None);
+        }
+        let psych = &context.psychological_state;
+        let deep_affect = psych.grief >= 50
+            || psych.trauma >= 60
+            || psych.guilt >= 50
+            || psych.humiliation.max(0) >= 55;
+        if !deep_affect {
             return Ok(None);
         }
         let Some(symbol) = context
@@ -1762,7 +2138,16 @@ impl Simulation {
         else {
             return Ok(None);
         };
-        if symbol.intensity < 35 {
+        if symbol.intensity < 70 {
+            return Ok(None);
+        }
+        let symbol_text = symbol.text.clone();
+        if self.has_recent_event(u64::from(self.ticks_per_day / 2), |event| {
+            event.kind == EventKind::Routine
+                && event.actor == agent_id
+                && event.impact_tags.iter().any(|tag| tag == "repetir_ritual")
+                && event.summary.contains(&symbol_text)
+        }) {
             return Ok(None);
         }
         let (kind, target_semantic) = if symbol.target_kind == PersonalSymbolTargetKind::Place {
@@ -1800,7 +2185,10 @@ impl Simulation {
                 "Volto ao simbolo '{}' porque ele ainda pesa mais do que uma rotina vazia.",
                 symbol.text
             ),
-            reason: format!("ritual simbolico ligado a {}", symbol.meaning),
+            reason: format!(
+                "ritual simbolico ligado a {} ({})",
+                symbol.meaning, symbol.text
+            ),
             stance,
             focus_target: None,
         }))

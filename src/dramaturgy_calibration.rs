@@ -67,6 +67,7 @@ pub struct DramaturgyCalibrationReport {
     pub food_system_metrics: BTreeMap<String, u64>,
     pub top_psychological_arcs: Vec<String>,
     pub top_noise_failures: Vec<String>,
+    pub noise_categories: BTreeMap<String, u64>,
     pub good_chains: Vec<String>,
     pub bad_chains: Vec<String>,
 }
@@ -100,6 +101,18 @@ impl DramaturgyCalibrationReport {
                 .collect::<Vec<_>>()
                 .join(", ");
             lines.push(format!("alimentacao={food_metrics}"));
+        }
+        if !self.noise_categories.is_empty() {
+            let categories = self
+                .noise_categories
+                .iter()
+                .filter(|(_, value)| **value > 0)
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if !categories.is_empty() {
+                lines.push(format!("categorias_ruido={categories}"));
+            }
         }
         if !self.top_noise_failures.is_empty() {
             lines.push(format!("ruido={}", self.top_noise_failures.join("; ")));
@@ -137,6 +150,7 @@ pub fn analyze_snapshot(
     let event_counts = event_counts(&snapshot.events);
     let food_system_metrics = food_system_metrics(snapshot);
     let top_noise_failures = top_noise_failures(&snapshot.events, config.max_examples);
+    let noise_categories = noise_categories(snapshot, &snapshot.events);
     let bad_material_events = material_coherence_failures(&snapshot.events);
     let strong_events = strong_events(&snapshot.events);
     let psychological_markers = psychological_marker_count(snapshot);
@@ -203,6 +217,7 @@ pub fn analyze_snapshot(
         food_system_metrics,
         top_psychological_arcs: top_psychological_arcs(snapshot, config.max_examples),
         top_noise_failures,
+        noise_categories,
         good_chains,
         bad_chains,
     }
@@ -335,6 +350,13 @@ fn strong_events(events: &[WorldEvent]) -> Vec<&WorldEvent> {
                     | EventKind::FactionShift
                     | EventKind::Construction
                     | EventKind::CulturalStory
+                    | EventKind::Atrocity
+                    | EventKind::BodyHorror
+                    | EventKind::Desecration
+                    | EventKind::Panic
+                    | EventKind::Nightmare
+                    | EventKind::HorrorRumor
+                    | EventKind::MercyKilling
             )
         })
         .collect()
@@ -350,6 +372,19 @@ fn psychological_marker_count(snapshot: &SimulationSnapshot) -> usize {
             .agents
             .iter()
             .filter(|agent| !agent.memories.is_empty())
+            .count()
+        + snapshot
+            .agents
+            .iter()
+            .filter(|agent| {
+                agent.horror.dread
+                    + agent.horror.despair
+                    + agent.horror.revulsion
+                    + agent.horror.shock
+                    + agent.horror.nightmares
+                    + agent.horror.desensitization
+                    > 0
+            })
             .count()
         + snapshot
             .agents
@@ -451,6 +486,23 @@ fn consequence_followthrough_hits(snapshot: &SimulationSnapshot) -> usize {
         hits += 1;
     }
     if !snapshot.rumors.is_empty() || !snapshot.cultural_stories.is_empty() {
+        hits += 1;
+    }
+    if snapshot.agents.iter().any(|agent| {
+        agent.horror.dread
+            + agent.horror.despair
+            + agent.horror.revulsion
+            + agent.horror.shock
+            + agent.horror.nightmares
+            + agent.horror.desensitization
+            > 0
+    }) || snapshot.territories.iter().any(|territory| {
+        territory.horror.dread
+            + territory.horror.desecration
+            + territory.horror.monstrous_presence
+            + territory.horror.cultural_taboo
+            > 0
+    }) {
         hits += 1;
     }
     if !snapshot.economic_tasks.is_empty() || !snapshot.military_demands.is_empty() {
@@ -609,6 +661,78 @@ fn score_noise_control(
     clamp_score(
         100 - repeated_penalty - stale_task_penalty - promise_penalty - empty_conversation_penalty,
     )
+}
+
+fn noise_categories(snapshot: &SimulationSnapshot, events: &[WorldEvent]) -> BTreeMap<String, u64> {
+    let mut out = BTreeMap::new();
+    let dead_control = snapshot
+        .agents
+        .iter()
+        .filter(|agent| {
+            agent.life_status != crate::world_model::AgentLifeStatus::Vivo
+                && (agent.last_intent.is_some()
+                    || !agent.planned_path.is_empty()
+                    || agent.active_economic_task_id.is_some()
+                    || agent.active_conversation_id.is_some())
+        })
+        .count() as u64;
+    out.insert("dead_agent_control".to_string(), dead_control);
+
+    let mut repeated: HashMap<String, usize> = HashMap::new();
+    for event in events {
+        let key = format!(
+            "{:?}|{}|{:?}|{}",
+            event.kind, event.actor, event.target, event.summary
+        );
+        *repeated.entry(key).or_insert(0) += 1;
+    }
+    let repeated_of = |kind: EventKind, needle: Option<&str>| -> u64 {
+        repeated
+            .iter()
+            .filter(|(key, count)| {
+                **count >= 3
+                    && key.starts_with(&format!("{:?}|", kind))
+                    && needle.map(|part| key.contains(part)).unwrap_or(true)
+            })
+            .map(|(_, count)| *count as u64)
+            .sum()
+    };
+    out.insert(
+        "succession_loop".to_string(),
+        repeated_of(EventKind::SuccessionOpened, None)
+            + repeated_of(EventKind::SuccessionRecognized, None),
+    );
+    out.insert(
+        "reflection_loop".to_string(),
+        repeated_of(EventKind::Reflection, None),
+    );
+    out.insert(
+        "conversation_churn".to_string(),
+        repeated_of(EventKind::ConversationEnded, Some("massa critica"))
+            + repeated_of(EventKind::ConversationEnded, Some("distancia")),
+    );
+    out.insert(
+        "repeated_distribution".to_string(),
+        repeated_of(EventKind::Commerce, Some("distribuiu")),
+    );
+
+    let mut faction_keys: HashMap<String, usize> = HashMap::new();
+    for faction in &snapshot.political_factions {
+        let key = format!(
+            "{}|{}|{}|{:?}",
+            faction.name, faction.agenda_tag, faction.proposed_value, faction.objective
+        );
+        *faction_keys.entry(key).or_insert(0) += 1;
+    }
+    out.insert(
+        "faction_duplicate".to_string(),
+        faction_keys
+            .values()
+            .filter(|count| **count > 1)
+            .map(|count| (*count - 1) as u64)
+            .sum(),
+    );
+    out
 }
 
 fn top_noise_failures(events: &[WorldEvent], limit: usize) -> Vec<String> {

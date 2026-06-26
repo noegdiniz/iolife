@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Single source of truth for persisted snapshot compatibility.
-pub const SNAPSHOT_SCHEMA_VERSION: u32 = 27;
+pub const SNAPSHOT_SCHEMA_VERSION: u32 = 31;
 
 // ===== Identifiers =====
 
@@ -24,6 +24,7 @@ pub type WarId = u64;
 pub type MilitaryDemandId = u64;
 pub type InsurrectionId = u64;
 pub type ScheduledMeetingId = u64;
+pub type SocialContractId = u64;
 pub type FeudalTitleId = u64;
 pub type FeudalContractId = u64;
 pub type EstateHoldingId = u64;
@@ -412,6 +413,46 @@ impl TileCoord {
                 y: self.y - 1,
             },
         ]
+    }
+}
+
+mod crop_map_serde {
+    use super::{CropState, TileCoord};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::HashMap;
+
+    #[derive(Serialize, Deserialize)]
+    struct CropEntry {
+        coord: TileCoord,
+        state: CropState,
+    }
+
+    pub fn serialize<S>(
+        map: &HashMap<TileCoord, CropState>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let entries = map
+            .iter()
+            .map(|(coord, state)| CropEntry {
+                coord: *coord,
+                state: *state,
+            })
+            .collect::<Vec<_>>();
+        entries.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<HashMap<TileCoord, CropState>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let entries = Vec::<CropEntry>::deserialize(deserializer)?;
+        Ok(entries
+            .into_iter()
+            .map(|entry| (entry.coord, entry.state))
+            .collect())
     }
 }
 
@@ -945,6 +986,220 @@ pub struct PsychologicalState {
     pub melancholic_fixation: Option<String>,
     pub last_updated_day: u32,
     pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HorrorExposure {
+    pub dread: i32,
+    pub despair: i32,
+    pub revulsion: i32,
+    pub shock: i32,
+    pub nightmares: i32,
+    pub desensitization: i32,
+    pub horror_fixation: Option<String>,
+    pub last_horror_event_tick: u64,
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
+impl Default for HorrorExposure {
+    fn default() -> Self {
+        Self {
+            dread: 0,
+            despair: 0,
+            revulsion: 0,
+            shock: 0,
+            nightmares: 0,
+            desensitization: 0,
+            horror_fixation: None,
+            last_horror_event_tick: 0,
+            notes: Vec::new(),
+        }
+    }
+}
+
+impl HorrorExposure {
+    pub fn clamp_all(&mut self) {
+        self.dread = self.dread.clamp(0, 100);
+        self.despair = self.despair.clamp(0, 100);
+        self.revulsion = self.revulsion.clamp(0, 100);
+        self.shock = self.shock.clamp(0, 100);
+        self.nightmares = self.nightmares.clamp(0, 100);
+        self.desensitization = self.desensitization.clamp(0, 100);
+        self.notes.truncate(8);
+    }
+
+    pub fn add_delta(
+        &mut self,
+        dread: i32,
+        despair: i32,
+        revulsion: i32,
+        shock: i32,
+        note: Option<String>,
+        tick: u64,
+    ) {
+        self.dread += dread;
+        self.despair += despair;
+        self.revulsion += revulsion;
+        self.shock += shock;
+        if shock >= 15 || dread >= 20 || despair >= 20 {
+            self.nightmares += 1;
+        }
+        if dread >= 25 || revulsion >= 20 {
+            self.horror_fixation = note.clone().filter(|text| !text.trim().is_empty());
+        }
+        if let Some(note) = note {
+            if !note.trim().is_empty() && !self.notes.iter().any(|existing| existing == &note) {
+                self.notes.insert(0, note);
+            }
+        }
+        self.last_horror_event_tick = tick;
+        self.clamp_all();
+    }
+
+    pub fn decay_daily(&mut self) {
+        self.dread = (self.dread - 2).max(0);
+        self.despair = (self.despair - 1).max(0);
+        self.revulsion = (self.revulsion - 2).max(0);
+        self.shock = (self.shock - 8).max(0);
+        self.nightmares = (self.nightmares - 1).max(0);
+        if self.dread >= 45 || self.revulsion >= 35 {
+            self.desensitization = (self.desensitization + 1).clamp(0, 100);
+        } else {
+            self.desensitization = (self.desensitization - 1).max(0);
+        }
+        if self.dread < 15 && self.revulsion < 15 {
+            self.horror_fixation = None;
+        }
+        self.clamp_all();
+    }
+
+    pub fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        if self.dread >= 60 {
+            parts.push("pavor persistente".to_string());
+        } else if self.dread >= 30 {
+            parts.push("medo sombrio".to_string());
+        }
+        if self.despair >= 50 {
+            parts.push("desespero alto".to_string());
+        }
+        if self.revulsion >= 40 {
+            parts.push("repulsa forte".to_string());
+        }
+        if self.shock >= 35 {
+            parts.push("choque recente".to_string());
+        }
+        if self.nightmares >= 3 {
+            parts.push("pesadelos recorrentes".to_string());
+        }
+        if self.desensitization >= 50 {
+            parts.push("dessensibilizado pela crueldade".to_string());
+        }
+        if let Some(fixation) = &self.horror_fixation {
+            parts.push(format!("fixado em {}", fixation));
+        }
+        if parts.is_empty() {
+            "sem horror dominante".to_string()
+        } else {
+            parts.join("; ")
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TerritoryHorrorState {
+    pub dread: i32,
+    pub desecration: i32,
+    pub recent_deaths: u32,
+    pub famine_pressure: i32,
+    pub monstrous_presence: i32,
+    pub cultural_taboo: i32,
+    pub stability_penalty: i32,
+    pub last_horror_tick: u64,
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
+impl Default for TerritoryHorrorState {
+    fn default() -> Self {
+        Self {
+            dread: 0,
+            desecration: 0,
+            recent_deaths: 0,
+            famine_pressure: 0,
+            monstrous_presence: 0,
+            cultural_taboo: 0,
+            stability_penalty: 0,
+            last_horror_tick: 0,
+            notes: Vec::new(),
+        }
+    }
+}
+
+impl TerritoryHorrorState {
+    pub fn add_horror(
+        &mut self,
+        dread: i32,
+        desecration: i32,
+        deaths: u32,
+        monstrous: i32,
+        note: Option<String>,
+        tick: u64,
+    ) {
+        self.dread = (self.dread + dread).clamp(0, 100);
+        self.desecration = (self.desecration + desecration).clamp(0, 100);
+        self.recent_deaths = self.recent_deaths.saturating_add(deaths).min(999);
+        self.monstrous_presence = (self.monstrous_presence + monstrous).clamp(0, 100);
+        self.cultural_taboo = (self.cultural_taboo + (dread / 3) + (desecration / 2)).clamp(0, 100);
+        self.stability_penalty =
+            (self.dread / 4 + self.desecration / 5 + self.monstrous_presence / 5).clamp(0, 100);
+        self.last_horror_tick = tick;
+        if let Some(note) = note {
+            if !note.trim().is_empty() && !self.notes.iter().any(|existing| existing == &note) {
+                self.notes.insert(0, note);
+            }
+        }
+        self.notes.truncate(8);
+    }
+
+    pub fn decay_daily(&mut self) {
+        self.dread = (self.dread - 1).max(0);
+        self.desecration = (self.desecration - 1).max(0);
+        self.famine_pressure = (self.famine_pressure - 1).max(0);
+        self.monstrous_presence = (self.monstrous_presence - 1).max(0);
+        self.cultural_taboo = (self.cultural_taboo - 1).max(0);
+        self.recent_deaths = self.recent_deaths.saturating_sub(1);
+        self.stability_penalty =
+            (self.dread / 4 + self.desecration / 5 + self.monstrous_presence / 5).clamp(0, 100);
+        self.notes.truncate(8);
+    }
+
+    pub fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        if self.dread >= 60 {
+            parts.push("territorio aterrorizado".to_string());
+        } else if self.dread >= 30 {
+            parts.push("medo local persistente".to_string());
+        }
+        if self.desecration >= 35 {
+            parts.push("profanação percebida".to_string());
+        }
+        if self.monstrous_presence >= 35 {
+            parts.push("rastro monstruoso".to_string());
+        }
+        if self.recent_deaths >= 3 {
+            parts.push(format!("{} mortes recentes", self.recent_deaths));
+        }
+        if self.cultural_taboo >= 40 {
+            parts.push("tabu cultural crescente".to_string());
+        }
+        if parts.is_empty() {
+            "sem horror territorial dominante".to_string()
+        } else {
+            parts.join("; ")
+        }
+    }
 }
 
 impl PsychologicalState {
@@ -1911,6 +2166,8 @@ pub struct Territory {
     pub stability: i32,
     pub strategic_value: i32,
     pub control_pressure: Vec<TerritoryControlPressure>,
+    #[serde(default)]
+    pub horror: TerritoryHorrorState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2311,6 +2568,8 @@ pub struct ScheduledMeeting {
     pub status: ScheduledMeetingStatus,
     pub created_tick: u64,
     #[serde(default)]
+    pub active_conversation_id: Option<ConversationId>,
+    #[serde(default)]
     pub responses: Vec<MeetingParticipantResponse>,
 }
 
@@ -2366,8 +2625,20 @@ pub enum EventKind {
     SuccessionContested,
     Usurpation,
     FeudalSanction,
+    Atrocity,
+    BodyHorror,
+    Desecration,
+    Panic,
+    Nightmare,
+    HorrorRumor,
+    MercyKilling,
     CreatureKilled,
     CreatureQuestCreated,
+    ContractCreated,
+    ContractFulfilled,
+    ContractBreached,
+    CouncilVote,
+    CouncilDecision,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2396,6 +2667,8 @@ pub struct AgentSnapshot {
     pub institutional_perception: InstitutionalPerception,
     #[serde(default)]
     pub psychological_state: PsychologicalState,
+    #[serde(default)]
+    pub horror: HorrorExposure,
     #[serde(default)]
     pub rumor_beliefs: Vec<RumorBelief>,
     #[serde(default)]
@@ -2519,6 +2792,8 @@ pub struct SimulationSnapshot {
     pub next_cultural_story_id: CulturalStoryId,
     pub next_scheduled_meeting_id: ScheduledMeetingId,
     #[serde(default)]
+    pub next_social_contract_id: SocialContractId,
+    #[serde(default)]
     pub next_feudal_title_id: FeudalTitleId,
     #[serde(default)]
     pub next_feudal_contract_id: FeudalContractId,
@@ -2537,6 +2812,8 @@ pub struct SimulationSnapshot {
     pub item_instances: Vec<ItemInstance>,
     pub conversations: Vec<ConversationState>,
     pub scheduled_meetings: Vec<ScheduledMeeting>,
+    #[serde(default)]
+    pub social_contracts: Vec<SocialContract>,
     pub combats: Vec<CombatState>,
     pub crime_cases: Vec<CrimeCase>,
     pub political_factions: Vec<PoliticalFaction>,
@@ -2570,7 +2847,7 @@ pub struct SimulationSnapshot {
     pub construction_projects: Vec<ConstructionProject>,
     pub spatial: SpatialSnapshot,
     pub events: Vec<WorldEvent>,
-    #[serde(default)]
+    #[serde(default, with = "crop_map_serde")]
     pub crops: HashMap<TileCoord, CropState>,
     #[serde(default)]
     pub secrets: Vec<Secret>,
@@ -2657,6 +2934,46 @@ pub struct ActivePromise {
     pub condition: PromiseCondition,
     pub deadline_tick: u32,
     pub created_at_tick: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SocialContractKind {
+    DeliverResource,
+    PoliticalVote,
+    AttendMeeting,
+    KeepSecret,
+    ProvideProtection,
+    SupportFaction,
+    EconomicFavor,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SocialContractStatus {
+    Proposed,
+    Active,
+    PartiallyFulfilled,
+    Fulfilled,
+    Breached,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SocialContract {
+    pub id: SocialContractId,
+    pub kind: SocialContractKind,
+    pub parties: Vec<u64>,
+    pub subject: String,
+    pub pledged_by: u64,
+    pub owed_to: u64,
+    pub status: SocialContractStatus,
+    pub due_day: u32,
+    pub linked_task_id: Option<EconomicTaskId>,
+    pub linked_meeting_id: Option<ScheduledMeetingId>,
+    pub linked_issue_id: Option<PoliticalIssueId>,
+    pub material_backing: Option<String>,
+    pub breach_consequence: String,
+    pub created_tick: u64,
+    pub updated_tick: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

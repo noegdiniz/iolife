@@ -1,11 +1,11 @@
 use crate::agent_mind::{
     ConversationContextInput, ConversationObservedAgentInput, ConversationTurnInput, DecisionInput,
-    EconomicContextInput, EconomicOpportunityInput, FeudalContextInput, InformationContextInput,
-    InstitutionalContextInput, LegalContextInput, MeetingResponse, NearbyAgentInput,
-    NearbyFixtureInput, PoliticalContextInput, ProposedMeeting, PsychologicalContextInput,
-    RecentEventInput, RelationalHistoryInput, ThinkMakerInput, ThinkMakerOutput, TimeContextInput,
-    WorldPlaceInput, parse_action_planner_output, retrieve_relational_memories,
-    retrieve_relevant_memories, validate_intent,
+    EconomicContextInput, EconomicOpportunityInput, FeudalContextInput, HorrorContextInput,
+    InformationContextInput, InstitutionalContextInput, LegalContextInput, MeetingResponse,
+    NearbyAgentInput, NearbyFixtureInput, PoliticalContextInput, ProposedMeeting,
+    PsychologicalContextInput, RecentEventInput, RelationalHistoryInput, ThinkMakerInput,
+    ThinkMakerOutput, TimeContextInput, WorldPlaceInput, parse_action_planner_output,
+    retrieve_relational_memories, retrieve_relevant_memories, validate_intent,
 };
 use crate::economy_catalog::{default_economy_catalog, validate_catalog};
 use crate::llm_adapter::{LlmAdapter, LlmError};
@@ -21,23 +21,24 @@ use crate::world_model::{
     EconomyCatalog, EquipmentSlot, EscrowAccount, EstablishmentEconomy, EstablishmentId,
     EstateHolding, EstateHoldingId, EventKind, FactionObjective, FeudalContract, FeudalContractId,
     FeudalContractStatus, FeudalRank, FeudalTitle, FeudalTitleId, FixtureId, FixtureKind,
-    FixtureSpec, ForeignRelation, ForeignRelationId, HistoricalBootstrapSummary, HouseholdEconomy,
-    HuntingQuest, InjuryState, InnerContradiction, InstitutionalPerception, InsurrectionId,
-    InsurrectionStage, InsurrectionState, InsurrectionStatus, IntentKind, ItemAffordanceKind,
-    ItemClass, ItemInstance, ItemInstanceId, JusticeSeverity, LocalNorms, LocationKind, MemoryKind,
-    MilitaryDemand, MilitaryDemandId, MilitaryDemandStatus, PendingPaymentClaim, PersonalSymbol,
-    PersonalSymbolTargetKind, PolicyAct, PolicyActId, PolicyActStatus, PolicyAuthority,
-    PolicyDomain, PolicyEffect, PolicyFavor, PolicyScope, PolicyTarget, PoliticalFaction,
-    PoliticalFactionId, PoliticalIssue, PoliticalIssueId, PoliticalIssueStatus, PoliticalPressure,
-    Polity, PolityId, PostedPrice, PowerCenter, PowerCenterId, PromiseCondition,
-    PsychologicalState, RationingPolicy, RefinementLevel, RelationDelta, ResourceKind,
-    ResourceStack, Role, RoomId, RoomSpec, Rumor, RumorBelief, SNAPSHOT_SCHEMA_VERSION,
-    ScarcityMetric, ScheduledMeeting, ScheduledMeetingId, ScheduledMeetingStatus, Secret,
-    SecretKind, SentenceKind, SimplifiedTask, SimulationSnapshot, SocialMove, SpatialSnapshot,
-    StoryBelief, StoryStatus, StoryVersion, SuccessionCrisis, SuccessionCrisisId,
-    SuccessionCrisisStatus, Territory, TerritoryId, TileCoord, TileKind, TileSpec, TraumaTracker,
-    VillageEconomy, WarId, WarStage, WarState, WarStatus, WorldEvent, WorldPlaceKind,
-    WorldPlaceRef,
+    FixtureSpec, ForeignRelation, ForeignRelationId, HistoricalBootstrapSummary, HorrorExposure,
+    HouseholdEconomy, HuntingQuest, InjuryState, InnerContradiction, InstitutionalPerception,
+    InsurrectionId, InsurrectionStage, InsurrectionState, InsurrectionStatus, IntentKind,
+    ItemAffordanceKind, ItemClass, ItemInstance, ItemInstanceId, JusticeSeverity, LocalNorms,
+    LocationKind, MemoryKind, MilitaryDemand, MilitaryDemandId, MilitaryDemandStatus,
+    PendingPaymentClaim, PersonalSymbol, PersonalSymbolTargetKind, PolicyAct, PolicyActId,
+    PolicyActStatus, PolicyAuthority, PolicyDomain, PolicyEffect, PolicyFavor, PolicyScope,
+    PolicyTarget, PoliticalFaction, PoliticalFactionId, PoliticalIssue, PoliticalIssueId,
+    PoliticalIssueStatus, PoliticalPressure, Polity, PolityId, PostedPrice, PowerCenter,
+    PowerCenterId, PromiseCondition, PsychologicalState, RationingPolicy, RefinementLevel,
+    RelationDelta, ResourceKind, ResourceStack, Role, RoomId, RoomSpec, Rumor, RumorBelief,
+    SNAPSHOT_SCHEMA_VERSION, ScarcityMetric, ScheduledMeeting, ScheduledMeetingId,
+    ScheduledMeetingStatus, Secret, SecretKind, SentenceKind, SimplifiedTask, SimulationSnapshot,
+    SocialContract, SocialContractId, SocialContractKind, SocialContractStatus, SocialMove,
+    SpatialSnapshot, StoryBelief, StoryStatus, StoryVersion, SuccessionCrisis, SuccessionCrisisId,
+    SuccessionCrisisStatus, Territory, TerritoryHorrorState, TerritoryId, TileCoord, TileKind,
+    TileSpec, TraumaTracker, VillageEconomy, WarId, WarStage, WarState, WarStatus, WorldEvent,
+    WorldPlaceKind, WorldPlaceRef,
 };
 use anyhow::{Result, anyhow};
 use bevy_ecs::prelude::*;
@@ -64,7 +65,7 @@ use helpers::{
 pub use tick::tick_interval_ms;
 use utility_ai::UtilityControlComponent;
 
-pub const SIMULATED_MINUTES_PER_TICK: u32 = 1;
+pub const SIMULATED_MINUTES_PER_TICK: u32 = 30;
 pub const DEFAULT_TICKS_PER_DAY: u32 = 24 * 60 / SIMULATED_MINUTES_PER_TICK;
 pub const DEFAULT_TICKS_PER_SECOND: u32 = 1;
 pub const MAX_TICKS_PER_SECOND: u32 = 10;
@@ -102,6 +103,9 @@ pub struct InstitutionalPerceptionComponent(pub InstitutionalPerception);
 
 #[derive(Component, Clone, Default)]
 pub struct PsychologicalStateComponent(pub PsychologicalState);
+
+#[derive(Component, Clone, Default)]
+pub struct HorrorExposureComponent(pub HorrorExposure);
 
 #[derive(Component, Clone, Default)]
 pub struct RumorBeliefComponent(pub Vec<RumorBelief>);
@@ -289,6 +293,8 @@ pub struct AgentView {
     pub injury: InjuryState,
     pub institutional_perception: InstitutionalPerception,
     pub psychological_state: PsychologicalState,
+    pub horror_summary: String,
+    pub local_horror_summary: Option<String>,
     pub craft_proficiencies: CraftProficiencyState,
     pub perceived_status_score: i32,
     pub visible_prestige_summary: String,
@@ -404,6 +410,7 @@ pub struct Simulation {
     next_insurrection_id: InsurrectionId,
     next_cultural_story_id: CulturalStoryId,
     next_scheduled_meeting_id: ScheduledMeetingId,
+    next_social_contract_id: SocialContractId,
     next_feudal_title_id: FeudalTitleId,
     next_feudal_contract_id: FeudalContractId,
     next_estate_holding_id: EstateHoldingId,
@@ -453,6 +460,7 @@ pub struct Simulation {
     pub story_versions: Vec<StoryVersion>,
     pub cultural_traditions: Vec<CulturalTradition>,
     pub scheduled_meetings: Vec<ScheduledMeeting>,
+    pub social_contracts: Vec<SocialContract>,
     pub active_escrows: Vec<EscrowAccount>,
     next_rumor_id: u64,
 }
@@ -517,6 +525,7 @@ impl Simulation {
                     InjuryComponent(agent.injury),
                     InstitutionalPerceptionComponent(agent.institutional_perception),
                     PsychologicalStateComponent(agent.psychological_state),
+                    HorrorExposureComponent(agent.horror),
                     RumorBeliefComponent(agent.rumor_beliefs),
                     StoryBeliefComponent(agent.story_beliefs),
                 ),
@@ -642,6 +651,15 @@ impl Simulation {
                     .unwrap_or(0)
                     + 1,
             ),
+            next_social_contract_id: snapshot.next_social_contract_id.max(
+                snapshot
+                    .social_contracts
+                    .iter()
+                    .map(|contract| contract.id)
+                    .max()
+                    .unwrap_or(0)
+                    + 1,
+            ),
             next_feudal_title_id: snapshot.next_feudal_title_id.max(
                 feudal_titles
                     .iter()
@@ -737,6 +755,7 @@ impl Simulation {
             story_versions: snapshot.story_versions.clone(),
             cultural_traditions: snapshot.cultural_traditions.clone(),
             scheduled_meetings,
+            social_contracts: snapshot.social_contracts.clone(),
             active_escrows: snapshot.active_escrows.clone(),
             next_rumor_id: snapshot.rumors.iter().map(|r| r.id).max().unwrap_or(0) + 1,
             next_cultural_story_id: snapshot.next_cultural_story_id.max(
@@ -783,6 +802,9 @@ impl Simulation {
             let relations = entry
                 .get::<RelationComponent>()
                 .expect("missing relation component");
+            let horror = entry
+                .get::<HorrorExposureComponent>()
+                .expect("missing horror exposure component");
             let rumor_beliefs = entry
                 .get::<RumorBeliefComponent>()
                 .expect("missing rumor belief component");
@@ -854,6 +876,7 @@ impl Simulation {
                 injury: injury.0.clone(),
                 institutional_perception: institutional_perception.0.clone(),
                 psychological_state: psychological_state.0.clone(),
+                horror: horror.0.clone(),
                 rumor_beliefs: rumor_beliefs.0.clone(),
                 story_beliefs,
                 relations: relations.0.clone(),
@@ -930,6 +953,7 @@ impl Simulation {
             next_insurrection_id: self.next_insurrection_id,
             next_cultural_story_id: self.next_cultural_story_id,
             next_scheduled_meeting_id: self.next_scheduled_meeting_id,
+            next_social_contract_id: self.next_social_contract_id,
             next_feudal_title_id: self.next_feudal_title_id,
             next_feudal_contract_id: self.next_feudal_contract_id,
             next_estate_holding_id: self.next_estate_holding_id,
@@ -941,6 +965,7 @@ impl Simulation {
             item_instances: self.item_instances.clone(),
             conversations: self.conversations.clone(),
             scheduled_meetings: self.scheduled_meetings.clone(),
+            social_contracts: self.social_contracts.clone(),
             combats: self.combats.clone(),
             crime_cases: self.crime_cases.clone(),
             political_factions: self.political_factions.clone(),

@@ -603,6 +603,7 @@ fn snapshot_persists_scheduled_meetings() {
             purpose: "testar persistencia".to_string(),
             status: ScheduledMeetingStatus::Accepted,
             created_tick: 0,
+            active_conversation_id: None,
             responses: vec![
                 medieval_village_llm::world_model::MeetingParticipantResponse {
                     agent_id: 2,

@@ -66,6 +66,23 @@ pub struct PsychologicalContextInput {
     pub melancholic_fixation: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HorrorContextInput {
+    pub dread: i32,
+    pub despair: i32,
+    pub revulsion: i32,
+    pub shock: i32,
+    pub nightmares: i32,
+    pub desensitization: i32,
+    pub fixation: Option<String>,
+    pub local_dread: i32,
+    pub local_desecration: i32,
+    pub local_monstrous_presence: i32,
+    pub summary: String,
+    pub immediate_risks: Vec<String>,
+    pub taboos_or_omens: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EconomicOpportunityInput {
     pub kind: EconomicTaskKind,
@@ -246,6 +263,12 @@ pub struct DecisionInput {
     pub feudal_context: FeudalContextInput,
     pub information_context: InformationContextInput,
     pub cultural_context: CulturalContextInput,
+    #[serde(default)]
+    pub social_contracts_context: Vec<String>,
+    #[serde(default)]
+    pub horror_context: HorrorContextInput,
+    #[serde(default)]
+    pub long_term_plan: String,
     pub profile_summary: Vec<String>,
     pub llm_budget_remaining: u32,
     pub chaos_pressure: u32,
@@ -367,6 +390,10 @@ pub struct ConversationTurnInput {
     pub information_context: InformationContextInput,
     #[serde(default)]
     pub cultural_context: CulturalContextInput,
+    #[serde(default)]
+    pub social_contracts_context: Vec<String>,
+    #[serde(default)]
+    pub horror_context: HorrorContextInput,
     #[serde(default)]
     pub body_parts: Vec<crate::world_model::BodyPartState>,
 }
@@ -705,6 +732,11 @@ pub fn parse_action_planner_output(raw: &str) -> Vec<SimplifiedTask> {
                 });
             }
         }
+    }
+
+    if tasks.len() > 1 && tasks.first().map(|task| task.kind) == Some(IntentKind::Refletir) {
+        let refletir = tasks.remove(0);
+        tasks.push(refletir);
     }
 
     tasks

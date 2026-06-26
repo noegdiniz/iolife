@@ -1233,6 +1233,7 @@ fn generate_procedural_world(
         next_insurrection_id: materialized.next_insurrection_id,
         next_cultural_story_id: materialized.next_cultural_story_id,
         next_scheduled_meeting_id: 1,
+        next_social_contract_id: 1,
         next_feudal_title_id: materialized.next_feudal_title_id,
         next_feudal_contract_id: materialized.next_feudal_contract_id,
         next_estate_holding_id: materialized.next_estate_holding_id,
@@ -1244,6 +1245,7 @@ fn generate_procedural_world(
         item_instances: materialized.item_instances,
         conversations: Vec::new(),
         scheduled_meetings: Vec::new(),
+        social_contracts: Vec::new(),
         combats: Vec::new(),
         crime_cases: materialized.crime_cases,
         political_factions: materialized.political_factions,
@@ -1683,6 +1685,7 @@ fn materialize_history(
                         pressure: (100 - pressure).clamp(0, 90),
                     },
                 ],
+                horror: TerritoryHorrorState::default(),
             });
             territory_id_by_key.insert((layout.index, territory_key), territory_id);
         }
@@ -1931,6 +1934,7 @@ fn materialize_history(
                 Some(&layout.name),
                 1,
             ),
+            horror: HorrorExposure::default(),
             rumor_beliefs: Vec::new(),
             story_beliefs,
             relations,
